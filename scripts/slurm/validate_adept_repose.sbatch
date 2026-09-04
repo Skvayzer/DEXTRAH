@@ -15,7 +15,7 @@ NUM_ENVS="${NUM_ENVS:-16}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-64}"
 
 cd "${REPO_ROOT}/dextrah_lab/rl_games"
-"${ADEPT_ENV_PATH}/bin/python" validate_adept_repose.py \
+"${ADEPT_ENV_PATH}/bin/python" -u validate_adept_repose.py \
     --headless \
     --task=Adept-Kuka-Allegro-Repose \
     --num_envs="${NUM_ENVS}" \

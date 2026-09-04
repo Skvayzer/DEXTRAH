@@ -51,6 +51,7 @@ def main() -> None:
     env = gym.make(args.task, cfg=cfg)
     base = env.unwrapped
     env.reset()
+    print("ADEPT_VALIDATION_STAGE=environment_ready", flush=True)
 
     # Place alternating objects directly over the index and thumb sensor
     # origins. This is a diagnostic-only penetration that must produce an
@@ -89,6 +90,11 @@ def main() -> None:
         raise RuntimeError(
             f"thumb contact sensor did not cross {cfg.contact_force_threshold} N"
         )
+    print(
+        "ADEPT_VALIDATION_STAGE=contact_ready "
+        f"index_N={index_force:.6f} thumb_N={thumb_force:.6f}",
+        flush=True,
+    )
 
     env.reset()
     max_abs_qd = 0.0
@@ -121,6 +127,7 @@ def main() -> None:
         raise RuntimeError(
             f"fabric exceeded a URDF joint limit by {-minimum_joint_margin:.6f} rad"
         )
+    print("ADEPT_VALIDATION_STAGE=rollout_ready", flush=True)
 
     report = {
         "contact": {
@@ -135,7 +142,7 @@ def main() -> None:
         },
         "use_cuda_graph": args.use_cuda_graph,
     }
-    print("ADEPT_VALIDATION=" + json.dumps(report, sort_keys=True))
+    print("ADEPT_VALIDATION=" + json.dumps(report, sort_keys=True), flush=True)
     env.close()
 
 
