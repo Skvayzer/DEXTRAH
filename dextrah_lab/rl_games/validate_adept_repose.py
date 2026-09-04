@@ -58,7 +58,6 @@ def main() -> None:
     # origins.  Starting outside the fingers and letting PhysX establish the
     # contact is both representative and much better conditioned than
     # teleporting an object into an overlapping collision configuration.
-    base._compute_intermediate_values()
     spec_index = torch.round(
         base.object_id_scalar[:, 0] * (len(ADEPT_PRIMITIVES) - 1)
     ).long()
@@ -101,15 +100,18 @@ def main() -> None:
     velocity = torch.zeros(2, 6, device=base.device)
     velocity[:, 2] = -1.0
     base.object.write_root_velocity_to_sim(velocity, env_ids=probe_env_ids)
+    print("ADEPT_VALIDATION_STAGE=contact_probe_configured", flush=True)
 
     peak_force = torch.zeros(args.num_envs, 4, device=base.device)
-    for _ in range(args.contact_steps):
+    for step in range(args.contact_steps):
         # Advance PhysX directly: placing an object inside a collision sphere is
         # intentional here, but feeding that diagnostic penetration through
         # the fabric's mesh-avoidance query is needlessly expensive.
         base.sim.step(render=False)
         base.scene.update(cfg.sim.dt)
         base._compute_intermediate_values()
+        if step == 0:
+            print("ADEPT_VALIDATION_STAGE=contact_probe_stepped", flush=True)
         force = torch.linalg.vector_norm(
             base.fingertip_contact_forces[:, 1:, :], dim=-1
         )
