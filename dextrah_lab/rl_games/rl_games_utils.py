@@ -229,8 +229,8 @@ class MultiObserver(AlgoObserver):
     def after_init(self, algo):
         self._call_multi('after_init', algo)
 
-    def process_infos(self, infos, done_indices):
-        self._call_multi('process_infos', infos, done_indices)
+    def process_infos(self, infos, done_indices, **kwargs):
+        self._call_multi('process_infos', infos, done_indices, **kwargs)
 
     def after_steps(self):
         self._call_multi('after_steps')
@@ -288,4 +288,3 @@ class RLGPUEnv(vecenv.IVecEnv):
     def set_env_state(self, env_state):
         if hasattr(self.env, 'set_env_state'):
             self.env.set_env_state(env_state)
-

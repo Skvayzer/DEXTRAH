@@ -62,7 +62,7 @@ class AdeptPBTObserver:
     def after_init(self, algo):
         self.algo = algo
 
-    def process_infos(self, infos: dict[str, Any], _done_indices):
+    def process_infos(self, infos: dict[str, Any], _done_indices, **_kwargs):
         objective = infos.get("true_objective")
         if objective is not None:
             value = objective.detach().float().mean().item() if torch.is_tensor(objective) else float(objective)
@@ -140,4 +140,3 @@ class AdeptPBTObserver:
             self._load_policy_only(decision.donor.checkpoint)
         self._apply_hparams(decision.hparams)
         self.last_check_frames = frame
-

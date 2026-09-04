@@ -91,7 +91,7 @@ class AdeptPostTrainingObserver:
             parameter_group["lr"] = learning_rate
         self._phase = phase
 
-    def process_infos(self, _infos, _done_indices):
+    def process_infos(self, _infos, _done_indices, **_kwargs):
         pass
 
     def after_steps(self):
