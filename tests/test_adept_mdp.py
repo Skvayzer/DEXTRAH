@@ -8,7 +8,10 @@ from dextrah_lab.tasks.dextrah_kuka_allegro.adept_mdp import (
     keypoint_pose_error,
     pose_keypoints,
     primitive_surface_points,
+    quaternion_apply_wxyz,
+    quaternion_multiply_wxyz,
     reposing_reward,
+    rotation_vector_to_quaternion_wxyz,
     sample_uniform_quaternion,
     transform_pointcloud,
 )
@@ -82,3 +85,15 @@ def test_uniform_quaternion_samples_are_normalized():
     torch.testing.assert_close(
         torch.linalg.vector_norm(samples, dim=-1), torch.ones(1024)
     )
+
+
+def test_rotation_vector_and_quaternion_product():
+    quarter_turn = rotation_vector_to_quaternion_wxyz(
+        torch.tensor([[0.0, 0.0, math.pi / 2]])
+    )
+    half_turn = quaternion_multiply_wxyz(quarter_turn, quarter_turn)
+    rotated = quaternion_apply_wxyz(half_turn, torch.tensor([[1.0, 0.0, 0.0]]))
+    torch.testing.assert_close(rotated, torch.tensor([[-1.0, 0.0, 0.0]]), atol=1e-6, rtol=1e-6)
+
+    identity = rotation_vector_to_quaternion_wxyz(torch.zeros(2, 3))
+    torch.testing.assert_close(identity, torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(2, 1))

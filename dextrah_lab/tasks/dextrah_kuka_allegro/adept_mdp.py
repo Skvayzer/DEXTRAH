@@ -53,6 +53,37 @@ def quaternion_apply_wxyz(quaternion: torch.Tensor, points: torch.Tensor) -> tor
     return points + 2.0 * (scalar * uv + uuv)
 
 
+def quaternion_multiply_wxyz(
+    left: torch.Tensor, right: torch.Tensor
+) -> torch.Tensor:
+    """Hamilton product for scalar-first quaternions."""
+
+    lw, lv = left[..., :1], left[..., 1:]
+    rw, rv = right[..., :1], right[..., 1:]
+    return torch.cat(
+        (
+            lw * rw - (lv * rv).sum(dim=-1, keepdim=True),
+            lw * rv + rw * lv + torch.linalg.cross(lv, rv, dim=-1),
+        ),
+        dim=-1,
+    )
+
+
+def rotation_vector_to_quaternion_wxyz(rotation_vector: torch.Tensor) -> torch.Tensor:
+    """Convert an axis-angle rotation vector to a normalized quaternion."""
+
+    angle = torch.linalg.vector_norm(rotation_vector, dim=-1, keepdim=True)
+    half_angle = 0.5 * angle
+    # sin(x) / x has a removable singularity.  The second-order branch also
+    # keeps gradients finite around the identity rotation.
+    vector_scale = torch.where(
+        angle > 1e-7,
+        torch.sin(half_angle) / angle.clamp_min(1e-12),
+        0.5 - angle.square() / 48.0,
+    )
+    return torch.cat((torch.cos(half_angle), rotation_vector * vector_scale), dim=-1)
+
+
 def sample_uniform_quaternion(
     count: int,
     device: torch.device | str,

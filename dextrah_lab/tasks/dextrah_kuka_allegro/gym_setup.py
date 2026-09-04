@@ -9,9 +9,32 @@ import gymnasium as gym
 from . import agents
 from .dextrah_kuka_allegro_env import DextrahKukaAllegroEnv
 from .adept_repose_env import AdeptKukaAllegroReposeEnv
+from .adept_fmb_env import AdeptKukaAllegroFmbEnv
 from .dextrah_kuka_allegro_env_cfg import (
     AdeptKukaAllegroEnvCfg,
+    AdeptKukaAllegroFmbEnvCfg,
+    AdeptKukaAllegroFmbSquareRoundEnvCfg,
     DextrahKukaAllegroEnvCfg,
+)
+
+gym.register(
+    id="Adept-Kuka-Allegro-FMB-Star",
+    entry_point="dextrah_lab.tasks.dextrah_kuka_allegro.adept_fmb_env:AdeptKukaAllegroFmbEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": AdeptKukaAllegroFmbEnvCfg,
+        "rl_games_cfg_entry_point": f"{agents.__name__}:adept_posttrain_ppo.yaml",
+    },
+)
+
+gym.register(
+    id="Adept-Kuka-Allegro-FMB-SquareRound",
+    entry_point="dextrah_lab.tasks.dextrah_kuka_allegro.adept_fmb_env:AdeptKukaAllegroFmbEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": AdeptKukaAllegroFmbSquareRoundEnvCfg,
+        "rl_games_cfg_entry_point": f"{agents.__name__}:adept_posttrain_ppo.yaml",
+    },
 )
 
 ##

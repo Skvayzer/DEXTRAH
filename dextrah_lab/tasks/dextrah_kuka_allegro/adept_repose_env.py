@@ -15,6 +15,8 @@ from .adept_mdp import (
     keypoint_pose_error,
     primitive_surface_points,
     reposing_reward,
+    quaternion_multiply_wxyz,
+    rotation_vector_to_quaternion_wxyz,
     sample_uniform_quaternion,
     transform_pointcloud,
 )
@@ -36,9 +38,18 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
         self.object_goal_quat = torch.zeros(self.num_envs, 4, device=self.device)
         self.object_goal_quat[:, 0] = 1.0
 
-        point_bank = primitive_surface_points(
-            self.cfg.num_pointcloud_points, device=self.device
+        self.local_object_pointcloud, self.object_id_scalar = (
+            self._build_local_object_pointcloud()
         )
+
+        self._contact_body_indices = None
+        self.fingertip_contact_forces = torch.zeros(
+            self.num_envs, len(self.cfg.hand_body_names), 3, device=self.device
+        )
+        self._last_gravity_adr = None
+
+    def _build_local_object_pointcloud(self):
+        point_bank = primitive_surface_points(self.cfg.num_pointcloud_points, device=self.device)
         spec_index = {spec.name: index for index, spec in enumerate(ADEPT_PRIMITIVES)}
         unknown_objects = sorted(set(self.object_names) - set(spec_index))
         if unknown_objects or len(self.object_names) != len(ADEPT_PRIMITIVES):
@@ -51,16 +62,11 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             device=self.device,
             dtype=torch.long,
         )
-        self.local_object_pointcloud = point_bank[env_spec_indices]
-        self.object_id_scalar = env_spec_indices.float().unsqueeze(-1) / (
+        local_pointcloud = point_bank[env_spec_indices]
+        object_id_scalar = env_spec_indices.float().unsqueeze(-1) / (
             len(ADEPT_PRIMITIVES) - 1
         )
-
-        self._contact_body_indices = None
-        self.fingertip_contact_forces = torch.zeros(
-            self.num_envs, len(self.cfg.hand_body_names), 3, device=self.device
-        )
-        self._last_gravity_adr = None
+        return local_pointcloud, object_id_scalar
 
     def _setup_policy_params(self):
         self.cfg.num_student_observations = 206
@@ -90,6 +96,8 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
 
     def _compute_intermediate_values(self):
         super()._compute_intermediate_values()
+        if hasattr(self, "robot_joint_pos_bias"):
+            self._apply_adept_observation_noise()
         if hasattr(self, "contact_sensor"):
             indices = self._ordered_contact_body_indices()
             self.fingertip_contact_forces = self.contact_sensor.data.net_forces_w[
@@ -121,6 +129,8 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
 
+        self._ensure_adept_noise_buffers()
+
         # DirectRLEnv may dispatch reset before this subclass constructor has
         # allocated goal buffers.
         if not hasattr(self, "object_goal_quat"):
@@ -132,8 +142,27 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
 
         super()._reset_idx(env_ids)
 
-        count = len(env_ids)
+        # Appendix-I biases are independently sampled per observed joint and
+        # held for the rollout.  The inherited DextrAH implementation samples
+        # one shared scalar and halves the published interval.
         fraction = self._adr_fraction()
+        joint_position_bias = self.dextrah_adr.get_custom_param_value(
+            "robot_state_noise", "robot_joint_pos_bias"
+        )
+        joint_velocity_bias = self.dextrah_adr.get_custom_param_value(
+            "robot_state_noise", "robot_joint_vel_bias"
+        )
+        count = len(env_ids)
+        self.robot_joint_pos_bias[env_ids] = joint_position_bias * (
+            2.0 * torch.rand(count, self.cfg.num_actions, device=self.device) - 1.0
+        )
+        self.robot_joint_vel_bias[env_ids] = joint_velocity_bias * (
+            2.0 * torch.rand(count, self.cfg.num_actions, device=self.device) - 1.0
+        )
+        # No sustained object-pose bias is listed in ADEPT Appendix I.
+        self.object_pos_bias[env_ids] = 0.0
+        self.object_rot_bias[env_ids] = 0.0
+
         center = torch.tensor(
             self.cfg.inferred_goal_center, device=self.device
         ).unsqueeze(0)
@@ -168,6 +197,63 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             (self.object.data.root_pos_w[env_ids], object_quat), dim=-1
         )
         self.object.write_root_pose_to_sim(object_pose, env_ids=env_ids)
+
+    def _ensure_adept_noise_buffers(self):
+        """Allocate per-coordinate bias tensors before the first virtual reset."""
+
+        expected_joint_shape = (self.num_envs, self.cfg.num_actions)
+        if getattr(self, "robot_joint_pos_bias", None) is not None:
+            if self.robot_joint_pos_bias.shape != expected_joint_shape:
+                self.robot_joint_pos_bias = torch.zeros(
+                    expected_joint_shape, device=self.device
+                )
+                self.robot_joint_vel_bias = torch.zeros_like(
+                    self.robot_joint_pos_bias
+                )
+
+    def _apply_adept_observation_noise(self):
+        """Apply ADEPT's Gaussian sensor noise with valid SO(3) rotations."""
+
+        position_std = self.dextrah_adr.get_custom_param_value(
+            "robot_state_noise", "robot_joint_pos_noise"
+        )
+        velocity_std = self.dextrah_adr.get_custom_param_value(
+            "robot_state_noise", "robot_joint_vel_noise"
+        )
+        self.robot_dof_pos_noisy = (
+            self.robot_dof_pos
+            + position_std * torch.randn_like(self.robot_dof_pos)
+            + self.robot_joint_pos_bias
+        )
+        self.robot_dof_vel_noisy = (
+            self.robot_dof_vel
+            + velocity_std * torch.randn_like(self.robot_dof_vel)
+            + self.robot_joint_vel_bias
+        )
+        self.hand_pos_noisy, hand_points_jacobian = self.hand_points_taskmap(
+            self.robot_dof_pos_noisy, None
+        )
+        self.hand_vel_noisy = torch.bmm(
+            hand_points_jacobian, self.robot_dof_vel_noisy.unsqueeze(2)
+        ).squeeze(2)
+
+        object_position_std = self.dextrah_adr.get_custom_param_value(
+            "object_state_noise", "object_pos_noise"
+        )
+        object_rotation_std = self.dextrah_adr.get_custom_param_value(
+            "object_state_noise", "object_rot_noise"
+        )
+        self.object_pos_noisy = (
+            self.object_pos
+            + object_position_std * torch.randn_like(self.object_pos)
+        )
+        rotation_noise = rotation_vector_to_quaternion_wxyz(
+            object_rotation_std
+            * torch.randn(self.num_envs, 3, device=self.device)
+        )
+        self.object_rot_noisy = torch.nn.functional.normalize(
+            quaternion_multiply_wxyz(self.object_rot, rotation_noise), dim=-1
+        )
 
     def _pointcloud(self, noisy: bool) -> torch.Tensor:
         position = self.object_pos_noisy if noisy else self.object_pos

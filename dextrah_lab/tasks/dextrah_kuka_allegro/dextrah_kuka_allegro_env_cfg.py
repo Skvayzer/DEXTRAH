@@ -543,3 +543,52 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     # ADEPT states that this target is ADR-controlled but publishes only the
     # final/default value. The conservative starting value is inferred.
     adr_custom_cfg_dict["fabric_speed_control"] = {"energy_target": (0.25, 1.0)}
+
+
+@configclass
+class AdeptKukaAllegroFmbEnvCfg(AdeptKukaAllegroEnvCfg):
+    """ADEPT Stage-2 FMB post-training configuration."""
+
+    objects_dir = "adept_fmb_star"
+    valid_objects_dir = ["adept_fmb_star", "adept_fmb_square_round"]
+    object_scale_min = 1.0
+    object_scale_max = 1.0
+    deactivate_object_scaling = True
+    starting_adr_increments = 20
+    enable_adr = False  # BC pins ADR 20; the staged trainer enables it after BC.
+    fmb_variant = "star"
+    fmb_board_position = (-0.48, -0.02, 0.28)
+    inferred_preinsert_height = 0.25
+    inferred_insertion_height = 0.075
+
+    adr_custom_cfg_dict = copy.deepcopy(AdeptKukaAllegroEnvCfg.adr_custom_cfg_dict)
+    adr_custom_cfg_dict["object_wrench"] = {"max_linear_accel": (0.0, 0.0)}
+    adr_custom_cfg_dict["object_spawn"] = {
+        "x_width_spawn": (0.0, 0.30),
+        "y_width_spawn": (0.0, 0.30),
+        "rotation": (1.0, 1.0),
+    }
+    adr_custom_cfg_dict["reward_weights"] = {"object_to_goal_sharpness": (15.0, 15.0)}
+
+    fmb_board_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/receptacle",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=os.path.join(root_path, "assets/adept_fmb_receptacles/fmb_star_board.usd"),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=fmb_board_position),
+    )
+
+
+@configclass
+class AdeptKukaAllegroFmbSquareRoundEnvCfg(AdeptKukaAllegroFmbEnvCfg):
+    objects_dir = "adept_fmb_square_round"
+    fmb_variant = "square_round"
+    fmb_board_cfg = AdeptKukaAllegroFmbEnvCfg.fmb_board_cfg.replace(
+        spawn=AdeptKukaAllegroFmbEnvCfg.fmb_board_cfg.spawn.replace(
+            usd_path=os.path.join(root_path, "assets/adept_fmb_receptacles/fmb_square_round_board.usd")
+        )
+    )

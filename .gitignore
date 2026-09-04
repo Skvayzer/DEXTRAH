@@ -16,3 +16,6 @@ table_textures/
 curated_table_textures/
 eval_results/
 dextrah_lab/assets/adept_primitives/USD/
+dextrah_lab/assets/adept_fmb_star/USD/
+dextrah_lab/assets/adept_fmb_square_round/USD/
+dextrah_lab/assets/adept_fmb_receptacles/*.usd

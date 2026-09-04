@@ -47,6 +47,7 @@ PYTHON="${ADEPT_ENV_PATH}/bin/python"
 "${PYTHON}" -m pip install --no-deps -e "${FABRICS_DIR}" -e "${REPO_ROOT}"
 
 "${PYTHON}" "${REPO_ROOT}/scripts/generate_adept_primitives.py"
+"${PYTHON}" "${REPO_ROOT}/scripts/generate_adept_fmb_assets.py"
 
 "${PYTHON}" -m pytest -q "${REPO_ROOT}/tests/test_adept_action_mapping.py"
 
