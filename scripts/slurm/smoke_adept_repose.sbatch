@@ -11,14 +11,18 @@ set -euo pipefail
 
 ADEPT_ENV_PATH="${ADEPT_ENV_PATH:-${HOME}/data1/miniconda3/envs/adept_dextrah}"
 REPO_ROOT="${REPO_ROOT:-${HOME}/data1/DEXTRAH-ADEPT}"
+NUM_ENVS="${NUM_ENVS:-16}"
+MAX_ITERATIONS="${MAX_ITERATIONS:-1}"
+USE_CUDA_GRAPH="${USE_CUDA_GRAPH:-false}"
+MINIBATCH_SIZE="${MINIBATCH_SIZE:-64}"
 
 cd "${REPO_ROOT}/dextrah_lab/rl_games"
 "${ADEPT_ENV_PATH}/bin/python" train.py \
     --headless \
     --task=Adept-Kuka-Allegro-Repose \
-    --num_envs=16 \
-    --max_iterations=1 \
-    agent.params.config.minibatch_size=64 \
-    agent.params.config.central_value_config.minibatch_size=64 \
+    --num_envs="${NUM_ENVS}" \
+    --max_iterations="${MAX_ITERATIONS}" \
+    agent.params.config.minibatch_size="${MINIBATCH_SIZE}" \
+    agent.params.config.central_value_config.minibatch_size="${MINIBATCH_SIZE}" \
     agent.wandb_activate=False \
-    env.use_cuda_graph=False
+    env.use_cuda_graph="${USE_CUDA_GRAPH}"
