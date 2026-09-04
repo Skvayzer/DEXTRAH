@@ -144,12 +144,12 @@ class AdeptBodySphereRepulsion(BaseFabricTerm):
             )
         else:
             # The stock Warp query supplies a block-diagonal directional
-            # metric. ADEPT normalizes each 3x3 sphere block independently.
-            import warp as wp
-
-            raw_metric = wp.torch.to_torch(features.allocated_data["metric"])
+            # metric. Its public Torch view is globally normalized upstream;
+            # normalizing each 3x3 block again recovers ADEPT's per-sphere
+            # unit-Frobenius blocks without adding a second Warp/Torch bridge
+            # inside CUDA graph capture.
             unit_metric, active = normalize_collision_metric_per_sphere(
-                raw_metric, self.num_spheres
+                features.base_metric, self.num_spheres
             )
             prefix = "forcing" if self.is_forcing_policy else "geom"
             weights = collision_metric_weights(
