@@ -73,7 +73,7 @@ def _mesh(name, vertices, faces):
         int[] faceVertexCounts = [{counts}]
         int[] faceVertexIndices = [{indices}]
         uniform token subdivisionScheme = "none"
-        uniform token physxMeshCollision:approximation = "convexDecomposition"
+        uniform token physics:approximation = "convexDecomposition"
         prepend rel material:binding = </object/baseLink/Looks/material>
     }}'''
 
