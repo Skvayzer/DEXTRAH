@@ -103,3 +103,9 @@ wandb_group: adept-posttrain
 wandb_name: adept-fmb
 wandb_entity: ""
 wandb_project: adept
+wandb_tags: [adept, posttrain, fmb]
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

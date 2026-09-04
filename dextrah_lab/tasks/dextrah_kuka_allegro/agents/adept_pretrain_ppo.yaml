@@ -108,3 +108,9 @@ wandb_group: adept-pretrain
 wandb_name: adept-repose
 wandb_entity: ""
 wandb_project: adept
+wandb_tags: [adept, pretrain, reposing]
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

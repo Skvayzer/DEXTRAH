@@ -84,6 +84,16 @@ STAGE1_STUDENT="$PWD/logs/adept_rgb_stage1.pth" \
   sbatch scripts/slurm/train_adept_vision_dagger.sbatch
 ```
 
+The single-policy launcher enables Weights & Biases by default. Set
+`WANDB_ACTIVATE=false` for an offline validation run; use `RUN_NAME`, `SEED`,
+`NUM_ENVS`, and `MAX_ITERATIONS` to label and size a run explicitly. For
+example:
+
+```bash
+MAX_ITERATIONS=100 RUN_NAME=0_adept_repose_pilot_seed42 \
+  sbatch scripts/slurm/train_adept_repose_single.sbatch
+```
+
 Set `TASK=Adept-Kuka-Allegro-FMB-SquareRound` for the square/round teacher
 stages and append `-Vision` for its student stages. ADEPT trains each geometry
 and embodiment independently; these launchers intentionally do not mix them.

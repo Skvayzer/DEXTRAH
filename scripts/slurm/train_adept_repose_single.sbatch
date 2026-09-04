@@ -15,6 +15,7 @@ NUM_ENVS="${NUM_ENVS:-4096}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-750000}"
 SEED="${SEED:-42}"
 USE_CUDA_GRAPH="${USE_CUDA_GRAPH:-false}"
+WANDB_ACTIVATE="${WANDB_ACTIVATE:-true}"
 RUN_NAME="${RUN_NAME:-0_adept_repose_seed_${SEED}}"
 
 cd "${REPO_ROOT}/dextrah_lab/rl_games"
@@ -25,5 +26,5 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     --num_envs="${NUM_ENVS}" \
     --max_iterations="${MAX_ITERATIONS}" \
     --run_name="${RUN_NAME}" \
-    agent.wandb_activate=False \
+    agent.wandb_activate="${WANDB_ACTIVATE}" \
     env.use_cuda_graph="${USE_CUDA_GRAPH}"
