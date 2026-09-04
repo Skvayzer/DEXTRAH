@@ -28,7 +28,8 @@ BASE_HPARAMS = {
 }
 
 
-def metadata(worker_id, objective, *, frames=400_000_000, adr=worker_id):
+def metadata(worker_id, objective, *, frames=400_000_000, adr=None):
+    adr = worker_id if adr is None else adr
     return WorkerMetadata(worker_id, frames, objective, adr, f"{worker_id}.pth", dict(BASE_HPARAMS), 1.0)
 
 
@@ -87,4 +88,3 @@ def test_atomic_metadata_ignores_invalid_peers(tmp_path):
     loaded = read_population(tmp_path)
     assert loaded == [record]
     assert json.loads((tmp_path / "worker_03.json").read_text())["adr_level"] == 3
-
