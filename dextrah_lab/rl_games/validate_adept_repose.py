@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 
 from isaaclab.app import AppLauncher
@@ -114,8 +115,11 @@ def main() -> None:
         )
         peak_force = torch.maximum(peak_force, force)
 
+    print("ADEPT_VALIDATION_STAGE=contact_probe_accumulated", flush=True)
+    faulthandler.dump_traceback_later(10, repeat=True)
     index_force = float(peak_force[probe_env_ids[0], 0].item())
     thumb_force = float(peak_force[probe_env_ids[1], -1].item())
+    faulthandler.cancel_dump_traceback_later()
     if index_force <= cfg.contact_force_threshold:
         raise RuntimeError(
             f"index contact sensor did not cross {cfg.contact_force_threshold} N"
