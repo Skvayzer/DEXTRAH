@@ -38,7 +38,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": AdeptKukaAllegroEnvCfg,
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_lstm_cfg.yaml",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:adept_pretrain_ppo.yaml",
     },
 )
 
