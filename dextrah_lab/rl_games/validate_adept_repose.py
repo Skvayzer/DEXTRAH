@@ -102,14 +102,12 @@ def main() -> None:
     base.object.write_root_velocity_to_sim(velocity, env_ids=probe_env_ids)
     print("ADEPT_VALIDATION_STAGE=contact_probe_configured", flush=True)
 
+    zero_actions = torch.zeros(args.num_envs, cfg.num_actions, device=base.device)
     peak_force = torch.zeros(args.num_envs, 4, device=base.device)
     for step in range(args.contact_steps):
-        # Advance PhysX directly: placing an object inside a collision sphere is
-        # intentional here, but feeding that diagnostic penetration through
-        # the fabric's mesh-avoidance query is needlessly expensive.
-        base.sim.step(render=False)
-        base.scene.update(cfg.sim.dt)
-        base._compute_intermediate_values()
+        # Use the exact training path so controller, PhysX, contact-sensor, and
+        # observation synchronization are validated as one integration.
+        _step(env, zero_actions)
         print(f"ADEPT_VALIDATION_CONTACT_STEP={step + 1}", flush=True)
         force = torch.linalg.vector_norm(
             base.fingertip_contact_forces[:, 1:, :], dim=-1
