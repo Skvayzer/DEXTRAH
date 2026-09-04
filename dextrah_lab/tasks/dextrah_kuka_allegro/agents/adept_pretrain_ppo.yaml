@@ -57,6 +57,9 @@ params:
     schedule_type: standard
     kl_threshold: 0.010
     max_epochs: 750000
+    # ADEPT reports 8B environment steps for reposing pretraining. The much
+    # larger max_epochs value remains the paper's safety ceiling.
+    max_frames: 8000000000
     save_best_after: 100
     save_frequency: 200
     print_stats: true

@@ -107,6 +107,26 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 
+class StatefulRlGamesGpuEnv(RlGamesGpuEnv):
+    """Isaac Lab RL-Games adapter that preserves stateful curricula."""
+
+    def get_env_state(self):
+        base_env = self.env.unwrapped
+        if hasattr(base_env, "get_env_state"):
+            return base_env.get_env_state()
+        return None
+
+    def set_env_state(self, env_state):
+        base_env = self.env.unwrapped
+        if hasattr(base_env, "set_env_state"):
+            base_env.set_env_state(env_state)
+
+    def set_train_info(self, env_frames, *args, **kwargs):
+        base_env = self.env.unwrapped
+        if hasattr(base_env, "set_train_info"):
+            base_env.set_train_info(env_frames, *args, **kwargs)
+
+
 @hydra_task_config(args_cli.task, "rl_games_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with RL-Games agent."""
@@ -199,7 +219,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # register the environment to rl-games registry
     # note: in agents configuration: environment name must be "rlgpu"
     vecenv.register(
-        "IsaacRlgWrapper", lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs)
+        "IsaacRlgWrapper",
+        lambda config_name, num_actors, **kwargs: StatefulRlGamesGpuEnv(
+            config_name, num_actors, **kwargs
+        ),
     )
     env_configurations.register("rlgpu", {"vecenv_type": "IsaacRlgWrapper", "env_creator": lambda **kwargs: env})
 
