@@ -111,6 +111,7 @@ def main() -> None:
 
     zero_actions = torch.zeros(args.num_envs, cfg.num_actions, device=base.device)
     peak_force = torch.zeros(args.num_envs, 4, device=base.device)
+    minimum_center_distance = torch.full((2,), float("inf"), device=base.device)
     for step in range(args.contact_steps):
         # Use the exact training path so controller, PhysX, contact-sensor, and
         # observation synchronization are validated as one integration.
@@ -120,13 +121,31 @@ def main() -> None:
             base.fingertip_contact_forces[:, 1:, :], dim=-1
         )
         peak_force = torch.maximum(peak_force, force)
+        object_position = (
+            base.object.data.root_pos_w[probe_env_ids]
+            - base.scene.env_origins[probe_env_ids]
+        )
+        fingertip_position = torch.stack(
+            (
+                base.hand_pos[index_env_id, 1, :],
+                base.hand_pos[thumb_env_id, -1, :],
+            )
+        )
+        minimum_center_distance = torch.minimum(
+            minimum_center_distance,
+            torch.linalg.vector_norm(object_position - fingertip_position, dim=-1),
+        )
 
     print("ADEPT_VALIDATION_STAGE=contact_probe_accumulated", flush=True)
     index_force = float(peak_force[index_env_id, 0].item())
     thumb_force = float(peak_force[thumb_env_id, -1].item())
     print(
         "ADEPT_VALIDATION_STAGE=contact_probe_measured "
-        f"index_N={index_force:.6f} thumb_N={thumb_force:.6f}",
+        f"index_N={index_force:.6f} thumb_N={thumb_force:.6f} "
+        f"index_min_center_m={minimum_center_distance[0].item():.6f} "
+        f"thumb_min_center_m={minimum_center_distance[1].item():.6f} "
+        f"index_radius_m={radius_by_env[0].item():.6f} "
+        f"thumb_radius_m={radius_by_env[1].item():.6f}",
         flush=True,
     )
     if index_force <= cfg.contact_force_threshold:
