@@ -489,6 +489,9 @@ class DextrahKukaAllegroEnvCfg(DirectRLEnvCfg):
     disable_arm_randomization = False
 
 
+_DEXTRAH_DEFAULTS = DextrahKukaAllegroEnvCfg()
+
+
 @configclass
 class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     """ADEPT Stage-1 KUKA-Allegro reposing configuration."""
@@ -521,9 +524,9 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     inferred_goal_center = (-0.50, 0.0, 0.75)
     inferred_goal_position_half_width = (0.15, 0.20, 0.10)
 
-    sim = DextrahKukaAllegroEnvCfg.sim.replace(gravity=(0.0, 0.0, 0.0))
-    robot_cfg = DextrahKukaAllegroEnvCfg.robot_cfg.replace(
-        spawn=DextrahKukaAllegroEnvCfg.robot_cfg.spawn.replace(
+    sim = _DEXTRAH_DEFAULTS.sim.replace(gravity=(0.0, 0.0, 0.0))
+    robot_cfg = _DEXTRAH_DEFAULTS.robot_cfg.replace(
+        spawn=_DEXTRAH_DEFAULTS.robot_cfg.spawn.replace(
             activate_contact_sensors=True
         )
     )
@@ -536,7 +539,7 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
         history_length=1,
     )
 
-    adr_custom_cfg_dict = copy.deepcopy(DextrahKukaAllegroEnvCfg.adr_custom_cfg_dict)
+    adr_custom_cfg_dict = copy.deepcopy(_DEXTRAH_DEFAULTS.adr_custom_cfg_dict)
     adr_custom_cfg_dict["reward_weights"] = {
         "object_to_goal_sharpness": (15.0, 30.0),
     }
@@ -546,6 +549,9 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     # ADEPT states that this target is ADR-controlled but publishes only the
     # final/default value. The conservative starting value is inferred.
     adr_custom_cfg_dict["fabric_speed_control"] = {"energy_target": (0.25, 1.0)}
+
+
+_ADEPT_DEFAULTS = AdeptKukaAllegroEnvCfg()
 
 
 @configclass
@@ -564,7 +570,7 @@ class AdeptKukaAllegroFmbEnvCfg(AdeptKukaAllegroEnvCfg):
     inferred_preinsert_height = 0.25
     inferred_insertion_height = 0.075
 
-    adr_custom_cfg_dict = copy.deepcopy(AdeptKukaAllegroEnvCfg.adr_custom_cfg_dict)
+    adr_custom_cfg_dict = copy.deepcopy(_ADEPT_DEFAULTS.adr_custom_cfg_dict)
     adr_custom_cfg_dict["object_wrench"] = {"max_linear_accel": (0.0, 0.0)}
     adr_custom_cfg_dict["object_spawn"] = {
         "x_width_spawn": (0.0, 0.30),
@@ -586,12 +592,15 @@ class AdeptKukaAllegroFmbEnvCfg(AdeptKukaAllegroEnvCfg):
     )
 
 
+_ADEPT_FMB_DEFAULTS = AdeptKukaAllegroFmbEnvCfg()
+
+
 @configclass
 class AdeptKukaAllegroFmbSquareRoundEnvCfg(AdeptKukaAllegroFmbEnvCfg):
     objects_dir = "adept_fmb_square_round"
     fmb_variant = "square_round"
-    fmb_board_cfg = AdeptKukaAllegroFmbEnvCfg.fmb_board_cfg.replace(
-        spawn=AdeptKukaAllegroFmbEnvCfg.fmb_board_cfg.spawn.replace(
+    fmb_board_cfg = _ADEPT_FMB_DEFAULTS.fmb_board_cfg.replace(
+        spawn=_ADEPT_FMB_DEFAULTS.fmb_board_cfg.spawn.replace(
             usd_path=os.path.join(root_path, "assets/adept_fmb_receptacles/fmb_square_round_board.usd")
         )
     )
