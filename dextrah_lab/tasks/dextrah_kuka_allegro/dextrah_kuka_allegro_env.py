@@ -1207,7 +1207,9 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
             )
 
             rand_rots = np.random.uniform(
-                -2, 2, size=(num_ids, 3)
+                -self.cfg.camera_right_rand_rot_range,
+                self.cfg.camera_right_rand_rot_range,
+                size=(num_ids, 3),
             )
             new_rots = rand_rots + self.camera_right_rot_eul_orig
             new_rots_quat = R.from_euler('xyz', new_rots, degrees=True).as_quat()
@@ -1216,7 +1218,8 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
             new_pos = self.camera_right_pos_orig + torch.empty(
                 num_ids, 3, device=self.device
             ).uniform_(
-                -3e-3, 3e-3
+                -self.cfg.camera_right_rand_pos_range,
+                self.cfg.camera_right_rand_pos_range,
             )
             self.camera_right_pose[np_env_ids, :3, :3] = R.from_euler(
                 'xyz', new_rots, degrees=True

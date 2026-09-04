@@ -261,6 +261,8 @@ class DextrahKukaAllegroEnvCfg(DirectRLEnvCfg):
     del tf # this is hacky but it needs to be done because omega conf doesn't support np.ndarray as a primitive
     camera_rand_rot_range = 3
     camera_rand_pos_range = 0.03
+    camera_right_rand_rot_range = 2
+    camera_right_rand_pos_range = 0.003
 
     # horizontal fov: 48, vertical fov is h:w ratio
     horizontal_aperture = 21.02
@@ -518,6 +520,8 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     keypoint_half_extent = 0.15
     object_goal_tol = 0.10
     num_pointcloud_points = 64
+    camera_right_rand_rot_range = 3
+    camera_right_rand_pos_range = 0.03
 
     # The paper illustrates, but does not numerically specify, the Stage-1 goal
     # sampling box. These ranges are therefore explicitly marked as inferred.

@@ -43,6 +43,8 @@ class VisualRandomization:
     robot_link_color_and_roughness: bool = True
     peg_diffuse_rgb: tuple[float, float] = (0.90, 1.0)
     board_diffuse_rgb: tuple[float, float] = (0.04, 0.12)
+    camera_position_jitter_m: float = 0.03
+    camera_rotation_jitter_deg: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -56,4 +58,3 @@ class DistillationRandomization:
 
 
 ADEPT_DISTILLATION_RANDOMIZATION = DistillationRandomization()
-
