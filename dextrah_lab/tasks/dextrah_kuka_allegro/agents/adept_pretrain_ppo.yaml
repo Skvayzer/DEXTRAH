@@ -35,6 +35,9 @@ params:
   load_path: ""
   config:
     name: adept_kuka_allegro_repose
+    # Required by the Play2Perfect RL-Games fork installed on the TL server;
+    # standard PPO exploration remains the configured Gaussian policy.
+    expl_type: none
     env_name: rlgpu
     device: cuda:0
     device_name: cuda:0

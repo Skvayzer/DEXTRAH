@@ -59,9 +59,10 @@ def generate_asset(output_path: Path, shape: str, dimensions, color) -> None:
 
 def Xform "object"
 {{
-def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
 {{
     bool physxArticulation:articulationEnabled = false
+    float physics:density = 500.0
     def Scope "Looks"
     {{
         def Material "material"

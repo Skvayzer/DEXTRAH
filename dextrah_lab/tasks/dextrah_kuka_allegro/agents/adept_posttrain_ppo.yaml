@@ -35,6 +35,7 @@ params:
   load_path: ""
   config:
     name: adept_kuka_allegro_fmb
+    expl_type: none
     env_name: rlgpu
     device: cuda:0
     device_name: cuda:0
