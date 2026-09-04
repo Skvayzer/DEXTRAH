@@ -129,6 +129,7 @@ def Xform "object"
 {{
 def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysxContactReportAPI"])
 {{
+    bool physxArticulation:articulationEnabled = false
     float physics:mass = {mass}
 {_material(color)}
 {mesh}

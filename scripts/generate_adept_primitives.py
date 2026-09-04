@@ -61,6 +61,7 @@ def Xform "object"
 {{
 def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
 {{
+    bool physxArticulation:articulationEnabled = false
     def Scope "Looks"
     {{
         def Material "material"
