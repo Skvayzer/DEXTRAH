@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import faulthandler
 import json
-import signal
+import os
+import traceback
 
 from isaaclab.app import AppLauncher
 
@@ -21,7 +21,6 @@ parser.add_argument("--use_cuda_graph", action="store_true")
 parser.add_argument("--disable_fabric", action="store_true", default=False)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
-faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
@@ -125,6 +124,11 @@ def main() -> None:
     print("ADEPT_VALIDATION_STAGE=contact_probe_accumulated", flush=True)
     index_force = float(peak_force[index_env_id, 0].item())
     thumb_force = float(peak_force[thumb_env_id, -1].item())
+    print(
+        "ADEPT_VALIDATION_STAGE=contact_probe_measured "
+        f"index_N={index_force:.6f} thumb_N={thumb_force:.6f}",
+        flush=True,
+    )
     if index_force <= cfg.contact_force_threshold:
         raise RuntimeError(
             f"index contact sensor did not cross {cfg.contact_force_threshold} N"
@@ -192,5 +196,10 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except BaseException:
+        # Isaac Sim 5 can block in SimulationApp.close() after an exception,
+        # hiding the actual validation failure until Slurm kills the job.
+        traceback.print_exc()
+        os._exit(1)
     finally:
         simulation_app.close()
