@@ -21,5 +21,4 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     agent.params.config.minibatch_size=64 \
     agent.params.config.central_value_config.minibatch_size=64 \
     agent.wandb_activate=False \
-    env.objects_dir=visdex_objects \
     env.use_cuda_graph=False

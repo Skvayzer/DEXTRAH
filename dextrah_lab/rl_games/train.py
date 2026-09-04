@@ -29,6 +29,8 @@ parser.add_argument(
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--sigma", type=str, default=None, help="The policy's initial standard deviation.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--pbt_worker_id", type=int, default=None, help="Enable ADEPT PBT for this population worker.")
+parser.add_argument("--pbt_dir", type=str, default=None, help="Shared filesystem directory for ADEPT PBT metadata.")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -180,6 +182,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create runner from rl-games
 
     observers = [IsaacAlgoObserver()]
+
+    if args_cli.pbt_worker_id is not None:
+        if args_cli.pbt_dir is None:
+            raise ValueError("--pbt_dir is required when --pbt_worker_id is set")
+        from dextrah_lab.adept.pbt_observer import AdeptPBTObserver
+
+        observers.append(
+            AdeptPBTObserver(
+                args_cli.pbt_worker_id,
+                args_cli.pbt_dir,
+                seed=agent_cfg["params"]["seed"],
+            )
+        )
 
     if agent_cfg["wandb_activate"]:
         if not args_cli.distributed or int(app_launcher.local_rank) == 0:

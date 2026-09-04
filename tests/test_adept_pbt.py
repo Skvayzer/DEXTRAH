@@ -2,6 +2,7 @@ import json
 import random
 
 import pytest
+import torch
 
 from dextrah_lab.adept.pbt import (
     PBTConfig,
@@ -12,6 +13,7 @@ from dextrah_lab.adept.pbt import (
     pbt_check_due,
     read_population,
 )
+from dextrah_lab.adept.pbt_observer import AdeptPBTObserver
 
 
 BASE_HPARAMS = {
@@ -88,3 +90,45 @@ def test_atomic_metadata_ignores_invalid_peers(tmp_path):
     loaded = read_population(tmp_path)
     assert loaded == [record]
     assert json.loads((tmp_path / "worker_03.json").read_text())["adr_level"] == 3
+
+
+class FakeOptimizer:
+    param_groups = [{"lr": 1e-3}]
+
+
+class FakeAlgo:
+    global_rank = 0
+    learning_rate = 1e-3
+    last_lr = 1e-3
+    grad_norm = 1.0
+    entropy_coef = 1e-3
+    critic_coef = 4.0
+    bounds_loss_coef = 1e-4
+    kl_threshold = 0.01
+    e_clip = 0.2
+    mini_epochs_num = 5
+    gamma = 0.998
+    tau = 0.95
+    is_adaptive_lr = False
+    optimizer = FakeOptimizer()
+
+    def save(self, path):
+        with open(path, "wb") as stream:
+            stream.write(b"checkpoint")
+
+
+def test_rlgames_observer_publishes_true_objective_and_adr(tmp_path):
+    observer = AdeptPBTObserver(
+        0,
+        tmp_path,
+        cfg=PBTConfig(start_frames=10, interval_frames=10),
+    )
+    observer.after_init(FakeAlgo())
+    observer.process_infos(
+        {"true_objective": torch.tensor(0.6), "adr_level": torch.tensor(7)}, []
+    )
+    observer.after_print_stats(10, 1, 0.0)
+    record = read_population(tmp_path)[0]
+    assert record.objective == pytest.approx(0.6)
+    assert record.adr_level == 7
+    assert (tmp_path / "checkpoints" / "worker_00_10.pth").is_file()

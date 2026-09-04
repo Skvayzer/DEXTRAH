@@ -219,7 +219,20 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
         self.extras["keypoint_pose_error"] = self.object_keypoint_error.mean()
         self.extras["num_adr_increases"] = self.dextrah_adr.num_increments()
         self.extras["in_success_region"] = self.in_success_region.float().mean()
+        # PBT must rank on unshaped success, never on reward magnitude.
+        self.extras["true_objective"] = self.in_success_region.float().mean()
+        self.extras["adr_level"] = self.dextrah_adr.num_increments()
         return total
+
+    def get_env_state(self):
+        return {"adr_level": self.dextrah_adr.num_increments()}
+
+    def set_env_state(self, state):
+        if state is None:
+            return
+        adr_level = int(state["adr_level"])
+        self.dextrah_adr.set_num_increments(adr_level)
+        self.local_adr_increment.fill_(adr_level)
 
     def compute_policy_observations(self):
         return torch.cat(
