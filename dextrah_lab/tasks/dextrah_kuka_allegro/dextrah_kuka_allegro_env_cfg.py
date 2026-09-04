@@ -573,6 +573,8 @@ class AdeptKukaAllegroFmbEnvCfg(AdeptKukaAllegroEnvCfg):
     fmb_board_position = (-0.48, -0.02, 0.28)
     inferred_preinsert_height = 0.25
     inferred_insertion_height = 0.075
+    peg_diffuse_rgb_range = (0.90, 1.0)
+    board_diffuse_rgb_range = (0.04, 0.12)
 
     adr_custom_cfg_dict = copy.deepcopy(_ADEPT_DEFAULTS.adr_custom_cfg_dict)
     adr_custom_cfg_dict["object_wrench"] = {"max_linear_accel": (0.0, 0.0)}

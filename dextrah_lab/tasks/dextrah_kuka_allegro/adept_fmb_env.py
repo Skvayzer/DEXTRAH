@@ -262,6 +262,8 @@ class AdeptKukaAllegroFmbEnv(AdeptKukaAllegroReposeEnv):
         )
 
     def _get_observations(self):
+        if self.use_camera:
+            self._randomize_fmb_render_materials()
         observations = super()._get_observations()
         # The raw Gym environment exposes both non-nested observation spaces
         # during Algorithm-1 BC. RL-Games continues to consume policy/critic.
@@ -269,6 +271,31 @@ class AdeptKukaAllegroFmbEnv(AdeptKukaAllegroReposeEnv):
             self.compute_pretraining_teacher_observations()
         )
         return observations
+
+    def _randomize_fmb_render_materials(self):
+        """Apply Appendix-I peg/board RGB ranges at each camera frame."""
+
+        from pxr import Gf
+
+        peg_low, peg_high = self.cfg.peg_diffuse_rgb_range
+        board_low, board_high = self.cfg.board_diffuse_rgb_range
+        for env_id in range(self.num_envs):
+            peg_rgb = torch.empty(3).uniform_(peg_low, peg_high).tolist()
+            board_rgb = torch.empty(3).uniform_(board_low, board_high).tolist()
+            object_name = self.object_names[0]
+            peg_shader = self.stage.GetPrimAtPath(
+                f"/World/envs/env_{env_id}/object/object_{env_id}_{object_name}"
+                "/baseLink/Looks/material/Shader"
+            )
+            peg_color = peg_shader.GetAttribute("inputs:diffuseColor")
+            if peg_color.IsValid():
+                peg_color.Set(Gf.Vec3f(*peg_rgb))
+            board_shader = self.stage.GetPrimAtPath(
+                f"/World/envs/env_{env_id}/receptacle/baseLink/Looks/material/Shader"
+            )
+            board_color = board_shader.GetAttribute("inputs:diffuseColor")
+            if board_color.IsValid():
+                board_color.Set(Gf.Vec3f(*board_rgb))
 
     def compute_critic_observations(self):
         contact_force = getattr(
