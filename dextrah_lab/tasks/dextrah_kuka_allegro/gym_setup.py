@@ -14,7 +14,29 @@ from .dextrah_kuka_allegro_env_cfg import (
     AdeptKukaAllegroEnvCfg,
     AdeptKukaAllegroFmbEnvCfg,
     AdeptKukaAllegroFmbSquareRoundEnvCfg,
+    AdeptKukaAllegroFmbSquareRoundVisionEnvCfg,
+    AdeptKukaAllegroFmbVisionEnvCfg,
     DextrahKukaAllegroEnvCfg,
+)
+
+gym.register(
+    id="Adept-Kuka-Allegro-FMB-Star-Vision",
+    entry_point="dextrah_lab.tasks.dextrah_kuka_allegro.adept_fmb_env:AdeptKukaAllegroFmbEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": AdeptKukaAllegroFmbVisionEnvCfg,
+        "rl_games_cfg_entry_point": f"{agents.__name__}:adept_posttrain_ppo.yaml",
+    },
+)
+
+gym.register(
+    id="Adept-Kuka-Allegro-FMB-SquareRound-Vision",
+    entry_point="dextrah_lab.tasks.dextrah_kuka_allegro.adept_fmb_env:AdeptKukaAllegroFmbEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": AdeptKukaAllegroFmbSquareRoundVisionEnvCfg,
+        "rl_games_cfg_entry_point": f"{agents.__name__}:adept_posttrain_ppo.yaml",
+    },
 )
 
 gym.register(

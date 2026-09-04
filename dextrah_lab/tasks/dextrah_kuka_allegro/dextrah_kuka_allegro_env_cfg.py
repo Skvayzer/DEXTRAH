@@ -610,3 +610,30 @@ class AdeptKukaAllegroFmbSquareRoundEnvCfg(AdeptKukaAllegroFmbEnvCfg):
             )
         )
     )
+
+
+@configclass
+class AdeptKukaAllegroFmbVisionEnvCfg(AdeptKukaAllegroFmbEnvCfg):
+    """Stage-3 two-camera KUKA student environment (Table 6)."""
+
+    distillation = True
+    simulate_stereo = True
+
+
+_ADEPT_FMB_VISION_DEFAULTS = AdeptKukaAllegroFmbVisionEnvCfg()
+
+
+@configclass
+class AdeptKukaAllegroFmbSquareRoundVisionEnvCfg(
+    AdeptKukaAllegroFmbVisionEnvCfg
+):
+    objects_dir = "adept_fmb_square_round"
+    fmb_variant = "square_round"
+    fmb_board_cfg = _ADEPT_FMB_VISION_DEFAULTS.fmb_board_cfg.replace(
+        spawn=_ADEPT_FMB_VISION_DEFAULTS.fmb_board_cfg.spawn.replace(
+            usd_path=os.path.join(
+                _ADEPT_FMB_VISION_DEFAULTS.root_path,
+                "assets/adept_fmb_receptacles/fmb_square_round_board.usd",
+            )
+        )
+    )

@@ -122,6 +122,23 @@ def pose_keypoints(
     return quaternion_apply_wxyz(quaternion, offsets) + position.unsqueeze(-2)
 
 
+def box_pose_keypoints(
+    position: torch.Tensor,
+    quaternion: torch.Tensor,
+    half_extents: tuple[float, float, float],
+) -> torch.Tensor:
+    """Return tight oriented-box corners for the distillation auxiliary target."""
+
+    signs = torch.tensor(
+        list(product((-1.0, 1.0), repeat=3)),
+        device=position.device,
+        dtype=position.dtype,
+    )
+    extent = torch.tensor(half_extents, device=position.device, dtype=position.dtype)
+    offsets = (signs * extent).expand(position.shape[:-1] + signs.shape)
+    return quaternion_apply_wxyz(quaternion, offsets) + position.unsqueeze(-2)
+
+
 def keypoint_pose_error(
     position: torch.Tensor,
     quaternion: torch.Tensor,

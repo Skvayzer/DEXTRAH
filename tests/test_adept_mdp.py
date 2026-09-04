@@ -4,6 +4,7 @@ import torch
 
 from dextrah_lab.tasks.dextrah_kuka_allegro.adept_mdp import (
     ADEPT_PRIMITIVES,
+    box_pose_keypoints,
     contact_gate,
     keypoint_pose_error,
     pose_keypoints,
@@ -44,6 +45,16 @@ def test_pose_keypoints_and_orientation_error():
         torch.full((1,), math.sqrt(0.18)),
     )
     assert keypoint_pose_error(position, identity, position, quarter_turn_z).item() > 0
+
+
+def test_tight_box_keypoints_use_per_axis_extents():
+    points = box_pose_keypoints(
+        torch.tensor([[1.0, 2.0, 3.0]]),
+        torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        (0.1, 0.2, 0.3),
+    )
+    torch.testing.assert_close(points.amin(dim=1), torch.tensor([[0.9, 1.8, 2.7]]))
+    torch.testing.assert_close(points.amax(dim=1), torch.tensor([[1.1, 2.2, 3.3]]))
 
 
 def test_contact_gate_requires_thumb_and_another_finger():

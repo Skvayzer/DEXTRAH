@@ -29,6 +29,7 @@ class AdeptKukaAllegroFmbEnv(AdeptKukaAllegroReposeEnv):
     def __init__(self, cfg, render_mode=None, **kwargs):
         self.goal_path_enabled = True
         self.force_final_goal = False
+        self.student_distillation_phase = "downstream"
         super().__init__(cfg, render_mode, **kwargs)
         if not hasattr(self, "object_receptacle_contact_force"):
             self.object_receptacle_contact_force = torch.zeros(
@@ -93,6 +94,11 @@ class AdeptKukaAllegroFmbEnv(AdeptKukaAllegroReposeEnv):
         preinsert[:, 2] += self.cfg.inferred_preinsert_height
         insertion = self.receptacle_pos.clone()
         insertion[:, 2] += self.cfg.inferred_insertion_height
+        if self.student_distillation_phase == "vision_pretrain":
+            self.object_goal = preinsert
+            self.object_goal_quat.zero_()
+            self.object_goal_quat[:, 0] = 1.0
+            return
         level = 50 if self.force_final_goal else self.dextrah_adr.num_increments()
         self.object_goal = l_shaped_goal_path(
             level, self.goal_path_start, preinsert, insertion
@@ -111,6 +117,8 @@ class AdeptKukaAllegroFmbEnv(AdeptKukaAllegroReposeEnv):
         )
         self.object.write_root_pose_to_sim(object_pose, env_ids=env_ids)
         fraction = self.dextrah_adr.num_increments() / self.cfg.num_adr_increments
+        if self.student_distillation_phase == "vision_pretrain":
+            fraction = 0.0  # Appendix I: one fixed receptacle in student Stage 1.
         nominal = torch.tensor(self.cfg.fmb_board_position, device=self.device)
         x_range = torch.tensor((-0.07, 0.12), device=self.device) * fraction
         y_range = torch.tensor((-0.30, 0.10), device=self.device) * fraction
@@ -144,6 +152,19 @@ class AdeptKukaAllegroFmbEnv(AdeptKukaAllegroReposeEnv):
             self.cfg.enable_adr = True
         else:
             raise ValueError(f"unknown post-training phase: {phase}")
+
+    def set_student_distillation_phase(self, phase: str):
+        if phase == "vision_pretrain":
+            self.student_distillation_phase = phase
+            self.goal_path_enabled = False
+            self.force_final_goal = False
+            self.cfg.enable_adr = False
+            self.dextrah_adr.set_num_increments(self.cfg.num_adr_increments)
+        elif phase == "downstream":
+            self.student_distillation_phase = phase
+            self.set_post_training_phase("ppo")
+        else:
+            raise ValueError(f"unknown student distillation phase: {phase}")
 
     def compute_intermediate_reward_values(self):
         self.object_keypoint_error = keypoint_pose_error(
