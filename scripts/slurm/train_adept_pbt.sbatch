@@ -22,6 +22,6 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     --num_envs=4096 \
     --pbt_worker_id="${SLURM_ARRAY_TASK_ID}" \
     --pbt_dir="${PBT_SHARED_DIR}" \
-    agent.params.config.full_experiment_name="pbt_${SLURM_ARRAY_TASK_ID}" \
+    agent.params.config.full_experiment_name="${SLURM_ARRAY_TASK_ID}_pbt" \
     agent.wandb_activate=False \
     env.use_cuda_graph=True
