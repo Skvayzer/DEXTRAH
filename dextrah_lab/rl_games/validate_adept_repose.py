@@ -27,6 +27,7 @@ import torch
 from isaaclab_tasks.utils import parse_env_cfg
 
 import dextrah_lab.tasks.dextrah_kuka_allegro.gym_setup  # noqa: F401, E402
+from dextrah_lab.tasks.dextrah_kuka_allegro.adept_mdp import ADEPT_PRIMITIVES
 
 
 def _assert_finite(name: str, tensor: torch.Tensor) -> None:
@@ -53,12 +54,32 @@ def main() -> None:
     env.reset()
     print("ADEPT_VALIDATION_STAGE=environment_ready", flush=True)
 
-    # Place alternating objects directly over the index and thumb sensor
-    # origins. This is a diagnostic-only penetration that must produce an
-    # unambiguous contact response after PhysX resolves it.
+    # Place the bottom surface of alternating objects slightly into the index
+    # and thumb tips.  Offsetting by each primitive's axial support avoids the
+    # pathological solver case caused by centering a rigid object around an
+    # entire fingertip while retaining a small, unambiguous penetration.
     base._compute_intermediate_values()
     local_position = base.hand_pos[:, 1, :].clone()
     local_position[1::2] = base.hand_pos[1::2, -1, :]
+    axial_support = []
+    for spec in ADEPT_PRIMITIVES:
+        if spec.shape == "cuboid":
+            axial_support.append(0.5 * spec.dimensions[2])
+        elif spec.shape == "sphere":
+            axial_support.append(spec.dimensions[0])
+        elif spec.shape == "capsule":
+            axial_support.append(spec.dimensions[0] + 0.5 * spec.dimensions[1])
+        elif spec.shape == "cone":
+            axial_support.append(0.5 * spec.dimensions[1])
+        else:
+            raise RuntimeError(f"unknown ADEPT primitive shape: {spec.shape}")
+    support_by_spec = torch.tensor(axial_support, device=base.device)
+    spec_index = torch.round(
+        base.object_id_scalar[:, 0] * (len(ADEPT_PRIMITIVES) - 1)
+    ).long()
+    local_position[:, 2] += (
+        support_by_spec[spec_index] * base.object_scale[:, 0] + 0.006
+    )
     world_position = local_position + base.scene.env_origins
     orientation = torch.zeros(args.num_envs, 4, device=base.device)
     orientation[:, 0] = 1.0
