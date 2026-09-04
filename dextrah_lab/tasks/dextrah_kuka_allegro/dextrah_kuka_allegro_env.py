@@ -35,10 +35,12 @@ from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, 
 from isaacsim.core.utils.prims import set_prim_attribute_value
 
 from .dextrah_kuka_allegro_env_cfg import DextrahKukaAllegroEnvCfg
+from .adept_cspace_fabric import AdeptKukaAllegroCspaceFabric
 from .dextrah_kuka_allegro_utils import (
     assert_equals,
     scale,
     compute_absolute_action,
+    compute_relative_cspace_target,
     to_torch
 )
 from .dextrah_kuka_allegro_constants import (
@@ -73,7 +75,12 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         self.num_robot_dofs = self.robot.num_joints
-        self.cfg.num_actions = 11
+        expected_actions = 23 if self.cfg.control_space == "cspace" else 11
+        if self.cfg.num_actions != expected_actions:
+            raise ValueError(
+                f"{self.cfg.control_space} control requires {expected_actions} actions; "
+                f"configured {self.cfg.num_actions}"
+            )
 
         self.num_actions = self.cfg.num_actions
         self.num_observations = (
@@ -295,19 +302,25 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         return num_unique_objects
 
     def _setup_policy_params(self):
+        if self.cfg.control_space not in {"pose_pca", "cspace"}:
+            raise ValueError(
+                "control_space must be either 'pose_pca' or 'cspace'; "
+                f"got {self.cfg.control_space!r}"
+            )
+
         # Determine number of unique objects in target object dir
         if self.cfg.objects_dir not in self.cfg.valid_objects_dir:
             raise ValueError(f"Need to specify valid directory of objects for training: {self.cfg.valid_objects_dir}")
 
         num_unique_objects = self.find_num_unique_objects(self.cfg.objects_dir)
 
-        self.cfg.num_student_observations = 159
-        self.cfg.num_teacher_observations = 167 + num_unique_objects
+        self.cfg.num_student_observations = 148 + self.cfg.num_actions
+        self.cfg.num_teacher_observations = 156 + self.cfg.num_actions + num_unique_objects
         if self.cfg.distillation:
             self.cfg.num_observations = self.cfg.num_student_observations
         else:
             self.cfg.num_observations = self.cfg.num_teacher_observations
-        self.cfg.num_states = 214 + num_unique_objects
+        self.cfg.num_states = 203 + self.cfg.num_actions + num_unique_objects
 
         self.cfg.state_space = self.cfg.num_states
         self.cfg.observation_space = self.cfg.num_observations
@@ -336,9 +349,14 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         #self.timestep = self.sim.get_physics_dt()
         self.timestep = self.cfg.fabrics_dt
 
-        # Create Kuka-Allegro fabric palm pose and finger PCA action spaces
-        self.kuka_allegro_fabric =\
-            KukaAllegroPoseFabric(self.num_envs, self.device, self.timestep, graph_capturable=True)
+        fabric_class = (
+            AdeptKukaAllegroCspaceFabric
+            if self.cfg.control_space == "cspace"
+            else KukaAllegroPoseFabric
+        )
+        self.kuka_allegro_fabric = fabric_class(
+            self.num_envs, self.device, self.timestep, graph_capturable=True
+        )
         num_joints = self.kuka_allegro_fabric.num_joints
                     
         # Create integrator for the fabric dynamics.
@@ -350,12 +368,19 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         self.fabric_qd = torch.zeros(self.num_envs, num_joints, device=self.device)
         self.fabric_qdd = torch.zeros(self.num_envs, num_joints, device=self.device)
 
-        # Pre-allocate target tensors
-        pca_dim = 5
-        self.hand_pca_targets = torch.zeros(self.num_envs, pca_dim, device=self.device)
-        # Palm target is (origin, Euler ZYX)
-        pose_dim = 6
-        self.palm_pose_targets = torch.zeros(self.num_envs, pose_dim, device=self.device)
+        # Pre-allocate target tensors for the selected policy interface.
+        if self.cfg.control_space == "cspace":
+            self.cspace_targets = self.fabric_q.clone()
+        else:
+            pca_dim = 5
+            self.hand_pca_targets = torch.zeros(
+                self.num_envs, pca_dim, device=self.device
+            )
+            # Palm target is (origin, Euler ZYX)
+            pose_dim = 6
+            self.palm_pose_targets = torch.zeros(
+                self.num_envs, pose_dim, device=self.device
+            )
 
         # Fabric cspace damping gain
         self.fabric_damping_gain =\
@@ -367,10 +392,7 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         # of the fabric
         if self.cfg.use_cuda_graph:
             # Establish inputs
-            self.inputs = [self.hand_pca_targets, self.palm_pose_targets, "euler_zyx", # actions in
-                           self.fabric_q.detach(), self.fabric_qd.detach(), # fabric state
-                           self.object_ids, self.object_indicator, # world model
-                           self.fabric_damping_gain]
+            self.inputs = self._get_fabric_inputs()
             # Capture the forward pass of evaluating the fabric given the inputs and integrating one step
             # in time
             self.g, self.fabric_q_new, self.fabric_qd_new, self.fabric_qdd_new =\
@@ -387,6 +409,28 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         self.fabric_q_for_obs = torch.clone(self.fabric_q)
         self.fabric_qd_for_obs = torch.clone(self.fabric_qd)
         self.fabric_qdd_for_obs = torch.clone(self.fabric_qdd)
+
+    def _get_fabric_inputs(self):
+        if self.cfg.control_space == "cspace":
+            return [
+                self.cspace_targets,
+                self.fabric_q.detach(),
+                self.fabric_qd.detach(),
+                self.object_ids,
+                self.object_indicator,
+                self.fabric_damping_gain,
+            ]
+
+        return [
+            self.hand_pca_targets,
+            self.palm_pose_targets,
+            "euler_zyx",
+            self.fabric_q.detach(),
+            self.fabric_qd.detach(),
+            self.object_ids,
+            self.object_indicator,
+            self.fabric_damping_gain,
+        ]
     
     def _set_pos_marker(self, pos):
         pos = pos + self.scene.env_origins
@@ -644,10 +688,7 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
 
         # Evaluate fabric without cuda graph
         if not self.cfg.use_cuda_graph:
-            self.inputs = [self.hand_pca_targets, self.palm_pose_targets, "euler_zyx", # actions in
-                           self.fabric_q.detach(), self.fabric_qd.detach(), # fabric state
-                           self.object_ids, self.object_indicator, # world model
-                           self.fabric_damping_gain]
+            self.inputs = self._get_fabric_inputs()
             self.kuka_allegro_fabric.set_features(*self.inputs)
             for i in range(self.cfg.fabric_decimation):
                 self.fabric_q, self.fabric_qd, self.fabric_qdd = self.kuka_allegro_integrator.step(
@@ -1411,6 +1452,18 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
 
     def compute_actions(self, actions: torch.Tensor) -> None: #torch.Tensor:
         assert_equals(actions.shape, (self.num_envs, self.cfg.num_actions))
+
+        if self.cfg.control_space == "cspace":
+            self.cspace_targets.copy_(
+                compute_relative_cspace_target(
+                    raw_actions=actions,
+                    previous_fabric_position=self.fabric_q,
+                    lower_limits=self.robot_dof_lower_limits[0],
+                    upper_limits=self.robot_dof_upper_limits[0],
+                    max_joint_delta=self.cfg.max_joint_delta,
+                )
+            )
+            return
 
         # Slice out the actions for the palm and the hand
         palm_actions = actions[:, : (NUM_XYZ + NUM_RPY)]

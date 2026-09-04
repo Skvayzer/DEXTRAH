@@ -8,7 +8,10 @@ import gymnasium as gym
 
 from . import agents
 from .dextrah_kuka_allegro_env import DextrahKukaAllegroEnv
-from .dextrah_kuka_allegro_env_cfg import DextrahKukaAllegroEnvCfg
+from .dextrah_kuka_allegro_env_cfg import (
+    AdeptKukaAllegroEnvCfg,
+    DextrahKukaAllegroEnvCfg,
+)
 
 ##
 # Register Gym environments.
@@ -25,6 +28,16 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_lstm_cfg.yaml",
         # "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_lstm_scratch_cnn_aux.yaml",
         #"rsl_rl_cfg_entry_point": agents.rsl_rl_ppo_cfg.ShadowHandPPORunnerCfg,
+    },
+)
+
+gym.register(
+    id="Adept-Kuka-Allegro-Repose",
+    entry_point="dextrah_lab.tasks.dextrah_kuka_allegro.dextrah_kuka_allegro_env:DextrahKukaAllegroEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": AdeptKukaAllegroEnvCfg,
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_lstm_cfg.yaml",
     },
 )
 

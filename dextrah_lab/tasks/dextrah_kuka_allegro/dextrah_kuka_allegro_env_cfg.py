@@ -127,7 +127,9 @@ class DextrahKukaAllegroEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10. #10.0
     fabric_decimation = 2 # number of fabric steps per physics step
     num_sim_steps_to_render=2 # renders every 4 sim steps, so 60 Hz
+    control_space = "pose_pca"
     num_actions = 11 # 6 palm pose + 5 PCA
+    max_joint_delta = 0.1
     success_timeout = 2.
     # num_observations = 94
     distillation = False
@@ -484,3 +486,12 @@ class DextrahKukaAllegroEnvCfg(DirectRLEnvCfg):
     disable_out_of_reach_done = False
     disable_dome_light_randomization = False
     disable_arm_randomization = False
+
+
+@configclass
+class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
+    """DextrAH reposing task with ADEPT's full-joint action interface."""
+
+    control_space = "cspace"
+    num_actions = 23
+    max_joint_delta = 0.1
