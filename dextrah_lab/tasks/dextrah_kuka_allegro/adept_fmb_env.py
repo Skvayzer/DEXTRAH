@@ -240,6 +240,15 @@ class AdeptKukaAllegroFmbEnv(AdeptKukaAllegroReposeEnv):
             dim=-1,
         )
 
+    def _get_observations(self):
+        observations = super()._get_observations()
+        # The raw Gym environment exposes both non-nested observation spaces
+        # during Algorithm-1 BC. RL-Games continues to consume policy/critic.
+        observations["pretraining_policy"] = (
+            self.compute_pretraining_teacher_observations()
+        )
+        return observations
+
     def compute_critic_observations(self):
         contact_force = getattr(
             self,

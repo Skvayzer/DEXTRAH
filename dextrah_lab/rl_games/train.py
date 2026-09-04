@@ -31,6 +31,17 @@ parser.add_argument("--sigma", type=str, default=None, help="The policy's initia
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--pbt_worker_id", type=int, default=None, help="Enable ADEPT PBT for this population worker.")
 parser.add_argument("--pbt_dir", type=str, default=None, help="Shared filesystem directory for ADEPT PBT metadata.")
+parser.add_argument(
+    "--adept_posttrain",
+    action="store_true",
+    help="Run ADEPT's 20-epoch frozen-actor critic warm-up before PPO.",
+)
+parser.add_argument(
+    "--adept_actor_checkpoint",
+    type=str,
+    default=None,
+    help="Actor-only checkpoint produced by ADEPT Stage-2 BC.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -182,6 +193,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create runner from rl-games
 
     observers = [IsaacAlgoObserver()]
+
+    if args_cli.adept_posttrain:
+        from dextrah_lab.adept.post_training_observer import AdeptPostTrainingObserver
+
+        if args_cli.adept_actor_checkpoint is None:
+            raise ValueError(
+                "--adept_actor_checkpoint is required with --adept_posttrain"
+            )
+        observers.append(
+            AdeptPostTrainingObserver(
+                actor_checkpoint=retrieve_file_path(args_cli.adept_actor_checkpoint)
+            )
+        )
 
     if args_cli.pbt_worker_id is not None:
         if args_cli.pbt_dir is None:
