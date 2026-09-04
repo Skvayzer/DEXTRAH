@@ -582,7 +582,10 @@ class AdeptKukaAllegroFmbEnvCfg(AdeptKukaAllegroEnvCfg):
     fmb_board_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/receptacle",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=os.path.join(root_path, "assets/adept_fmb_receptacles/fmb_star_board.usd"),
+            usd_path=os.path.join(
+                _ADEPT_DEFAULTS.root_path,
+                "assets/adept_fmb_receptacles/fmb_star_board.usd",
+            ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True,
                 disable_gravity=True,
@@ -601,6 +604,9 @@ class AdeptKukaAllegroFmbSquareRoundEnvCfg(AdeptKukaAllegroFmbEnvCfg):
     fmb_variant = "square_round"
     fmb_board_cfg = _ADEPT_FMB_DEFAULTS.fmb_board_cfg.replace(
         spawn=_ADEPT_FMB_DEFAULTS.fmb_board_cfg.spawn.replace(
-            usd_path=os.path.join(root_path, "assets/adept_fmb_receptacles/fmb_square_round_board.usd")
+            usd_path=os.path.join(
+                _ADEPT_FMB_DEFAULTS.root_path,
+                "assets/adept_fmb_receptacles/fmb_square_round_board.usd",
+            )
         )
     )
