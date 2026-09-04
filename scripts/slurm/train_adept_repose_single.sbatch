@@ -16,7 +16,9 @@ NUM_ENVS="${NUM_ENVS:-4096}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-750000}"
 MAX_FRAMES="${MAX_FRAMES:-8000000000}"
 SEED="${SEED:-42}"
-USE_CUDA_GRAPH="${USE_CUDA_GRAPH:-true}"
+# NVIDIA FABRICS' Torch/Warp graph currently fails on the workstation's
+# Isaac Sim 5 / driver combination. Eager mode is validated at full scale.
+USE_CUDA_GRAPH="${USE_CUDA_GRAPH:-false}"
 WANDB_ACTIVATE="${WANDB_ACTIVATE:-true}"
 RUN_NAME="${RUN_NAME:-0_adept_repose_seed_${SEED}}"
 AUTO_RESUME="${AUTO_RESUME:-true}"
