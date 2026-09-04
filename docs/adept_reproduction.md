@@ -60,6 +60,9 @@ wrong upstream run.
 # Stage 1: 16-policy reposing PBT population
 sbatch scripts/slurm/train_adept_pbt.sbatch
 
+# Or validate/train one policy before allocating a full PBT population
+sbatch scripts/slurm/train_adept_repose_single.sbatch
+
 # Stage 2a: new FMB actor, supervised by the selected Stage-1 actor
 TEACHER_CHECKPOINT=/absolute/path/repose.pth \
   sbatch scripts/slurm/train_adept_fmb_bc.sbatch
@@ -92,7 +95,7 @@ and embodiment independently; these launchers intentionally do not mix them.
 - [x] Isolate DextrAH with Isaac Lab v2.2.1 and NVIDIA FABRICS.
 - [x] Preserve the original 11-D palm-pose + hand-PCA task as an upstream baseline.
 - [x] Add shape and action-contract tests that do not require launching Isaac Sim.
-- [ ] Pass the one-epoch GPU smoke test.
+- [x] Pass the one-epoch GPU smoke test (Slurm job 217, 2026-09-04).
 
 ### M1 — full configuration-space fabric
 
