@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import faulthandler
 import json
 
 from isaaclab.app import AppLauncher
@@ -83,6 +82,8 @@ def main() -> None:
             base.hand_pos[probe_env_ids[1], -1, :],
         )
     )
+    if not bool((local_position.abs() < 2.0).all()):
+        raise RuntimeError("fingertip positions are not environment-local coordinates")
     sphere_radius = torch.tensor(
         [radius for _index, radius in sphere_specs], device=base.device
     )
@@ -116,10 +117,8 @@ def main() -> None:
         peak_force = torch.maximum(peak_force, force)
 
     print("ADEPT_VALIDATION_STAGE=contact_probe_accumulated", flush=True)
-    faulthandler.dump_traceback_later(10, repeat=True)
     index_force = float(peak_force[probe_env_ids[0], 0].item())
     thumb_force = float(peak_force[probe_env_ids[1], -1].item())
-    faulthandler.cancel_dump_traceback_later()
     if index_force <= cfg.contact_force_threshold:
         raise RuntimeError(
             f"index contact sensor did not cross {cfg.contact_force_threshold} N"

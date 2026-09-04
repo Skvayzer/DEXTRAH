@@ -1376,9 +1376,13 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         )
 
         # Robot fingertip and palm position. NOTE: currently not adding orientation
-        self.hand_pos = self.robot.data.body_pos_w[:, self.hand_bodies]
-        self.hand_pos -= self.scene.env_origins.repeat((1, self.num_hand_bodies
-            )).reshape(self.num_envs, self.num_hand_bodies, 3)
+        # Do not subtract in place: body_pos_w is an Isaac Lab-owned cached
+        # tensor, and mutating this indexed view corrupts subsequent world
+        # positions until the next physics refresh.
+        self.hand_pos = (
+            self.robot.data.body_pos_w[:, self.hand_bodies]
+            - self.scene.env_origins[:, None, :]
+        )
 
         # Robot fingertip and palm velocity. 6D
         self.hand_vel = self.robot.data.body_vel_w[:, self.hand_bodies]
