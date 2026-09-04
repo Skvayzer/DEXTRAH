@@ -22,13 +22,14 @@ COLORS = (
 
 
 def _geometry_usda(shape: str, dimensions: tuple[float, ...]) -> str:
+    material_binding = 'prepend rel material:binding = </baseLink/Looks/material>'
     if shape == "cuboid":
         return (
             'def Cube "geometry" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {\n'
             '        double size = 1\n'
             f'        float3 xformOp:scale = ({dimensions[0]}, {dimensions[1]}, {dimensions[2]})\n'
             '        uniform token[] xformOpOrder = ["xformOp:scale"]\n'
-            '        __COLOR__\n'
+            f'        {material_binding}\n'
             '    }'
         )
     usd_type = {"sphere": "Sphere", "capsule": "Capsule", "cone": "Cone"}.get(shape)
@@ -41,16 +42,14 @@ def _geometry_usda(shape: str, dimensions: tuple[float, ...]) -> str:
     return (
         f'def {usd_type} "geometry" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {{\n'
         f"        {body}\n"
-        '        __COLOR__\n'
+        f'        {material_binding}\n'
         '    }'
     )
 
 
 def generate_asset(output_path: Path, shape: str, dimensions, color) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    geometry = _geometry_usda(shape, dimensions).replace(
-        "__COLOR__", f"color3f[] primvars:displayColor = [({color[0]}, {color[1]}, {color[2]})]"
-    )
+    geometry = _geometry_usda(shape, dimensions)
     content = f'''#usda 1.0
 (
     defaultPrim = "baseLink"
@@ -60,6 +59,20 @@ def generate_asset(output_path: Path, shape: str, dimensions, color) -> None:
 
 def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
 {{
+    def Scope "Looks"
+    {{
+        def Material "material"
+        {{
+            token outputs:surface.connect = </baseLink/Looks/material/Shader.outputs:surface>
+            def Shader "Shader"
+            {{
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = ({color[0]}, {color[1]}, {color[2]})
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }}
+        }}
+    }}
     {geometry}
 }}
 '''
