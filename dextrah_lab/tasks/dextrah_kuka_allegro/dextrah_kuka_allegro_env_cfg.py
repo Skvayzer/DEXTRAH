@@ -509,6 +509,10 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     # inherited configclass fields through the base type is not supported by
     # Isaac Lab after configclass processing.
     min_steps_for_dr_change = 5 * 4 * 60
+    # ADEPT says ADR uses a running success rate but does not publish the
+    # window length. Five completed episodes per environment matches the
+    # inherited minimum dwell time and is explicit experiment provenance.
+    adr_success_window_episodes_per_env = 5
 
     objects_dir = "adept_primitives"
     valid_objects_dir = ["adept_primitives"]

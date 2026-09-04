@@ -9,6 +9,8 @@ import torch
 
 import isaaclab.sim as sim_utils
 
+from dextrah_lab.adept.curriculum import RollingSuccessRate
+
 from .adept_mdp import (
     ADEPT_PRIMITIVES,
     contact_gate,
@@ -47,6 +49,8 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             self.num_envs, len(self.cfg.hand_body_names), 3, device=self.device
         )
         self._last_gravity_adr = None
+        self._adept_curriculum_started = True
+        self._ensure_adept_curriculum_buffers()
 
     def _build_local_object_pointcloud(self):
         point_bank = primitive_surface_points(self.cfg.num_pointcloud_points, device=self.device)
@@ -105,7 +109,48 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             ]
 
     def _adr_fraction(self) -> float:
-        return self.dextrah_adr.num_increments() / float(self.cfg.num_adr_increments)
+        return min(
+            1.0,
+            self.dextrah_adr.num_increments() / float(self.cfg.num_adr_increments),
+        )
+
+    def _ensure_adept_curriculum_buffers(self) -> None:
+        if not hasattr(self, "_episode_success"):
+            self._episode_success = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
+        if not hasattr(self, "_adr_success_window"):
+            capacity = self.cfg.adr_success_window_episodes_per_env * self.num_envs
+            self._adr_success_window = RollingSuccessRate(capacity, self.device)
+            self._adr_running_success_rate = 0.0
+            self._adr_level_control_steps = 0
+
+    def _record_completed_episodes(self, env_ids: torch.Tensor) -> None:
+        self._adr_success_window.update(self._episode_success[env_ids])
+        self._adr_running_success_rate = self._adr_success_window.rate
+        self._episode_success[env_ids] = False
+
+    def _maybe_advance_adr(self) -> bool:
+        if not self.cfg.enable_adr:
+            return False
+        if self.dextrah_adr.num_increments() >= self.cfg.num_adr_increments:
+            return False
+        if self._adr_level_control_steps < self.cfg.min_steps_for_dr_change:
+            return False
+        if not self._adr_success_window.ready:
+            return False
+        if self._adr_running_success_rate <= self.cfg.success_for_adr:
+            return False
+        if bool(self.local_adr_increment != self.global_min_adr_increment):
+            return False
+
+        self.dextrah_adr.increase_ranges(increase_counter=True)
+        self.local_adr_increment.fill_(self.dextrah_adr.num_increments())
+        self._adr_level_control_steps = 0
+        self._adr_success_window.clear()
+        self._adr_running_success_rate = 0.0
+        self._last_gravity_adr = None
+        return True
 
     def _update_global_fabric_curriculum(self):
         adr_level = self.dextrah_adr.num_increments()
@@ -122,6 +167,9 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
         self._last_gravity_adr = adr_level
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        self._ensure_adept_curriculum_buffers()
+        if getattr(self, "_adept_curriculum_started", False):
+            self._adr_level_control_steps += 1
         self._update_global_fabric_curriculum()
         super()._pre_physics_step(actions)
 
@@ -130,6 +178,13 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             env_ids = self.robot._ALL_INDICES
 
         self._ensure_adept_noise_buffers()
+        self._ensure_adept_curriculum_buffers()
+
+        # Consume terminal episode outcomes before the inherited reset clears
+        # success signals. Initial construction resets have no prior episode.
+        if getattr(self, "_adept_curriculum_started", False):
+            self._record_completed_episodes(env_ids)
+            self._maybe_advance_adr()
 
         # DirectRLEnv may dispatch reset before this subclass constructor has
         # allocated goal buffers.
@@ -140,7 +195,15 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             self.object_goal_quat = torch.zeros(self.num_envs, 4, device=self.device)
             self.object_goal_quat[:, 0] = 1.0
 
-        super()._reset_idx(env_ids)
+        # DextrAH's inherited ADR condition samples instantaneous success after
+        # clearing it and increments a reset counter rather than control steps.
+        # This task owns the paper-aligned rolling episodic implementation.
+        enable_adr = self.cfg.enable_adr
+        self.cfg.enable_adr = False
+        try:
+            super()._reset_idx(env_ids)
+        finally:
+            self.cfg.enable_adr = enable_adr
 
         # Appendix-I biases are independently sampled per observed joint and
         # held for the rollout.  The inherited DextrAH implementation samples
@@ -282,6 +345,8 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             thumb_index=-1,
         )
         self.in_success_region = self.object_keypoint_error < self.cfg.object_goal_tol
+        if hasattr(self, "_episode_success"):
+            self._episode_success.logical_or_(self.in_success_region)
         self.time_in_success_region = torch.where(
             self.in_success_region,
             self.time_in_success_region + self.cfg.sim.dt * self.cfg.decimation,
@@ -302,23 +367,59 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
         self.extras["object_to_goal_reward"] = goal.mean()
         self.extras["contact_bonus"] = contact_bonus.mean()
         self.extras["contact_gate"] = self.contact_gate.float().mean()
+        fingertip_force = torch.linalg.vector_norm(
+            self.fingertip_contact_forces[:, 1:, :], dim=-1
+        )
+        above_threshold = fingertip_force > self.cfg.contact_force_threshold
+        self.extras["thumb_contact"] = above_threshold[:, -1].float().mean()
+        self.extras["other_finger_contact"] = (
+            above_threshold[:, :-1].any(dim=-1).float().mean()
+        )
+        self.extras["max_fingertip_force"] = fingertip_force.max(dim=-1).values.mean()
         self.extras["keypoint_pose_error"] = self.object_keypoint_error.mean()
         self.extras["num_adr_increases"] = self.dextrah_adr.num_increments()
         self.extras["in_success_region"] = self.in_success_region.float().mean()
-        # PBT must rank on unshaped success, never on reward magnitude.
-        self.extras["true_objective"] = self.in_success_region.float().mean()
+        self.extras["episode_success_rate"] = self._adr_running_success_rate
+        self.extras["adr_window_episodes"] = self._adr_success_window.count
+        self.extras["adr_level_control_steps"] = self._adr_level_control_steps
+        # PBT must rank on rolling, unshaped success, never reward magnitude.
+        self.extras["true_objective"] = self._adr_running_success_rate
         self.extras["adr_level"] = self.dextrah_adr.num_increments()
         return total
 
     def get_env_state(self):
-        return {"adr_level": self.dextrah_adr.num_increments()}
+        self._ensure_adept_curriculum_buffers()
+        return {
+            "version": 1,
+            "adr_level": self.dextrah_adr.num_increments(),
+            "adr_level_control_steps": self._adr_level_control_steps,
+            "adr_success_window": self._adr_success_window.state_dict(),
+        }
 
     def set_env_state(self, state):
         if state is None:
             return
+        self._ensure_adept_curriculum_buffers()
         adr_level = int(state["adr_level"])
+        if not 0 <= adr_level <= self.cfg.num_adr_increments:
+            raise ValueError(f"invalid checkpoint ADR level: {adr_level}")
         self.dextrah_adr.set_num_increments(adr_level)
         self.local_adr_increment.fill_(adr_level)
+        self.global_min_adr_increment.fill_(adr_level)
+        self._adr_level_control_steps = int(
+            state.get("adr_level_control_steps", 0)
+        )
+        success_window = state.get("adr_success_window")
+        if success_window is not None:
+            self._adr_success_window.load_state_dict(success_window)
+        else:
+            self._adr_success_window.clear()
+        self._adr_running_success_rate = self._adr_success_window.rate
+        # Physics state is recreated on process resume, so only completed
+        # episode history—not the interrupted episode outcome—is restored.
+        self._episode_success.zero_()
+        self._last_gravity_adr = None
+        self._update_global_fabric_curriculum()
 
     def compute_policy_observations(self):
         return torch.cat(

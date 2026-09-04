@@ -470,6 +470,10 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         # Create the objects for grasping
         # self._setup_metropolis_objects()
         self._setup_objects()
+        # Heterogeneous per-environment objects require replicate_physics=False,
+        # which disables the cloner's automatic collision filtering. Explicitly
+        # isolate environments while retaining collision with the global ground.
+        self.scene.filter_collisions(global_prim_paths=["/World/ground"])
         if self.cfg.distillation:
             import omni.replicator.core as rep
             rep.settings.set_render_rtx_realtime(antialiasing="DLAA")
