@@ -541,7 +541,8 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     contact_sensor = ContactSensorCfg(
         prim_path=(
             "/World/envs/env_.*/Robot/"
-            "(palm_link|index_biotac_tip|middle_biotac_tip|ring_biotac_tip|thumb_biotac_tip)"
+            "(palm_link|index_link_3|middle_link_3|ring_link_3|thumb_link_3|"
+            "index_biotac_tip|middle_biotac_tip|ring_biotac_tip|thumb_biotac_tip)"
         ),
         update_period=0.0,
         history_length=1,

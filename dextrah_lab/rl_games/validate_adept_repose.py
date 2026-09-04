@@ -115,6 +115,9 @@ def main() -> None:
     print("ADEPT_VALIDATION_STAGE=contact_probe_configured", flush=True)
 
     peak_force = torch.zeros(args.num_envs, 4, device=base.device)
+    peak_sensor_force = torch.zeros(
+        args.num_envs, base.contact_sensor.num_bodies, device=base.device
+    )
     minimum_center_distance = torch.full((2,), float("inf"), device=base.device)
     for step in range(args.contact_steps):
         # Sample every physics step so a short collision impulse cannot fall
@@ -127,6 +130,10 @@ def main() -> None:
             base.fingertip_contact_forces[:, 1:, :], dim=-1
         )
         peak_force = torch.maximum(peak_force, force)
+        sensor_force = torch.linalg.vector_norm(
+            base.contact_sensor.data.net_forces_w, dim=-1
+        )
+        peak_sensor_force = torch.maximum(peak_sensor_force, sensor_force)
         object_position = (
             base.object.data.root_pos_w[probe_env_ids]
             - base.scene.env_origins[probe_env_ids]
@@ -145,13 +152,19 @@ def main() -> None:
     print("ADEPT_VALIDATION_STAGE=contact_probe_accumulated", flush=True)
     index_force = float(peak_force[index_env_id, 0].item())
     thumb_force = float(peak_force[thumb_env_id, -1].item())
+    raw_index_peak, raw_index_body = peak_sensor_force[index_env_id].max(dim=0)
+    raw_thumb_peak, raw_thumb_body = peak_sensor_force[thumb_env_id].max(dim=0)
     print(
         "ADEPT_VALIDATION_STAGE=contact_probe_measured "
         f"index_N={index_force:.6f} thumb_N={thumb_force:.6f} "
         f"index_min_center_m={minimum_center_distance[0].item():.6f} "
         f"thumb_min_center_m={minimum_center_distance[1].item():.6f} "
         f"index_radius_m={radius_by_env[0].item():.6f} "
-        f"thumb_radius_m={radius_by_env[1].item():.6f}",
+        f"thumb_radius_m={radius_by_env[1].item():.6f} "
+        f"index_raw_N={raw_index_peak.item():.6f} "
+        f"index_raw_body={base.contact_sensor.body_names[raw_index_body.item()]} "
+        f"thumb_raw_N={raw_thumb_peak.item():.6f} "
+        f"thumb_raw_body={base.contact_sensor.body_names[raw_thumb_body.item()]}",
         flush=True,
     )
     if index_force <= cfg.contact_force_threshold:
