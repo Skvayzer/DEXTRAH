@@ -15,6 +15,7 @@ REPO_ROOT="${REPO_ROOT:-${HOME}/data1/DEXTRAH-ADEPT}"
 NUM_ENVS="${NUM_ENVS:-4096}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-750000}"
 MAX_FRAMES="${MAX_FRAMES:-8000000000}"
+SAVE_FREQUENCY="${SAVE_FREQUENCY:-50}"
 SEED="${SEED:-42}"
 # NVIDIA FABRICS' Torch/Warp graph currently fails on the workstation's
 # Isaac Sim 5 / driver combination. Eager mode is validated at full scale.
@@ -26,9 +27,11 @@ CHECKPOINT="${CHECKPOINT:-}"
 
 RUN_ROOT="${REPO_ROOT}/dextrah_lab/rl_games/logs/rl_games/adept_kuka_allegro_repose/${RUN_NAME}"
 if [[ -z "${CHECKPOINT}" && "${AUTO_RESUME}" == "true" ]]; then
-    LAST_CHECKPOINT="${RUN_ROOT}/last/model.pth"
-    if [[ -f "${LAST_CHECKPOINT}" ]]; then
-        CHECKPOINT="${LAST_CHECKPOINT}"
+    if [[ -d "${RUN_ROOT}/nn" ]]; then
+        CHECKPOINT="$({
+            find "${RUN_ROOT}/nn" -maxdepth 1 -type f -name 'last_*.pth' \
+                -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-
+        } || true)"
     fi
 fi
 
@@ -55,4 +58,5 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     "${RESUME_ARGS[@]}" \
     agent.wandb_activate="${WANDB_ACTIVATE}" \
     agent.params.config.max_frames="${MAX_FRAMES}" \
+    agent.params.config.save_frequency="${SAVE_FREQUENCY}" \
     env.use_cuda_graph="${USE_CUDA_GRAPH}"

@@ -16,6 +16,16 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-1}"
 USE_CUDA_GRAPH="${USE_CUDA_GRAPH:-false}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-64}"
 RUN_NAME="${RUN_NAME:-0_adept_smoke_${SLURM_JOB_ID}}"
+CHECKPOINT="${CHECKPOINT:-}"
+
+RESUME_ARGS=()
+if [[ -n "${CHECKPOINT}" ]]; then
+    if [[ ! -f "${CHECKPOINT}" ]]; then
+        echo "Checkpoint does not exist: ${CHECKPOINT}" >&2
+        exit 2
+    fi
+    RESUME_ARGS+=(--checkpoint="${CHECKPOINT}")
+fi
 
 cd "${REPO_ROOT}/dextrah_lab/rl_games"
 "${ADEPT_ENV_PATH}/bin/python" train.py \
@@ -24,6 +34,7 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     --num_envs="${NUM_ENVS}" \
     --max_iterations="${MAX_ITERATIONS}" \
     --run_name="${RUN_NAME}" \
+    "${RESUME_ARGS[@]}" \
     agent.params.config.minibatch_size="${MINIBATCH_SIZE}" \
     agent.params.config.central_value_config.minibatch_size="${MINIBATCH_SIZE}" \
     agent.wandb_activate=False \
