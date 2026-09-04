@@ -12,8 +12,8 @@ params:
     separate: false
     space:
       continuous:
-        mu_activation: null
-        sigma_activation: null
+        mu_activation: None
+        sigma_activation: None
         mu_init: {name: default}
         sigma_init: {name: const_initializer, val: 0}
         fixed_sigma: true
