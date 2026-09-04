@@ -46,6 +46,8 @@ PYTHON="${ADEPT_ENV_PATH}/bin/python"
     PyOpenGL==3.1.0
 "${PYTHON}" -m pip install --no-deps -e "${FABRICS_DIR}" -e "${REPO_ROOT}"
 
+"${PYTHON}" "${REPO_ROOT}/scripts/generate_adept_primitives.py"
+
 "${PYTHON}" -m pytest -q "${REPO_ROOT}/tests/test_adept_action_mapping.py"
 
 echo "ADEPT environment ready: ${ADEPT_ENV_PATH}"

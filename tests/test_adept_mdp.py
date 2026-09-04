@@ -9,6 +9,7 @@ from dextrah_lab.tasks.dextrah_kuka_allegro.adept_mdp import (
     pose_keypoints,
     primitive_surface_points,
     reposing_reward,
+    sample_uniform_quaternion,
     transform_pointcloud,
 )
 
@@ -74,3 +75,10 @@ def test_pointcloud_transform_applies_scale_rotation_and_translation():
         local, position, quarter_turn_z, torch.tensor([[2.0]])
     )
     torch.testing.assert_close(transformed, torch.tensor([[[1.0, 4.0, 3.0]]]))
+
+
+def test_uniform_quaternion_samples_are_normalized():
+    samples = sample_uniform_quaternion(1024, "cpu")
+    torch.testing.assert_close(
+        torch.linalg.vector_norm(samples, dim=-1), torch.ones(1024)
+    )

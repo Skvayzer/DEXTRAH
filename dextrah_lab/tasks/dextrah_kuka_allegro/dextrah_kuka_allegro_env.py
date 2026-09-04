@@ -28,7 +28,7 @@ import omni.usd
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv
-from isaaclab.sensors import TiledCamera
+from isaaclab.sensors import ContactSensor, TiledCamera
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
@@ -453,6 +453,9 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         # add articultion to scene - we must register to scene to randomize with EventManager
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["table"] = self.table
+        if getattr(self.cfg, "contact_sensor", None) is not None:
+            self.contact_sensor = ContactSensor(self.cfg.contact_sensor)
+            self.scene.sensors["contact_sensor"] = self.contact_sensor
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=1000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -521,6 +524,7 @@ class DextrahKukaAllegroEnv(DirectRLEnv):
         sub_dirs = [object_name for object_name in sub_dirs if os.path.isdir(
             os.path.join(objects_full_path, object_name))]
 
+        self.object_names = sub_dirs
         self.num_unique_objects = len(sub_dirs)
 
         # This creates a 1D tensor array of length self.num_envs with values:

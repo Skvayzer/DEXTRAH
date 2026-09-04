@@ -9,6 +9,7 @@
 
 import os
 import pathlib
+import copy
 import numpy as np
 import warp as wp
 import math
@@ -22,7 +23,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import TiledCameraCfg
+from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
@@ -490,8 +491,50 @@ class DextrahKukaAllegroEnvCfg(DirectRLEnvCfg):
 
 @configclass
 class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
-    """DextrAH reposing task with ADEPT's full-joint action interface."""
+    """ADEPT Stage-1 KUKA-Allegro reposing configuration."""
 
     control_space = "cspace"
     num_actions = 23
     max_joint_delta = 0.1
+    episode_length_s = 4.0
+    min_steps_for_dr_change = 5 * int(episode_length_s / (DextrahKukaAllegroEnvCfg.decimation * DextrahKukaAllegroEnvCfg.sim_dt))
+
+    objects_dir = "adept_primitives"
+    valid_objects_dir = ["adept_primitives"]
+    object_scale_min = 0.5
+    object_scale_max = 1.0
+    deactivate_object_scaling = False
+
+    contact_force_threshold = 1.0
+    keypoint_half_extent = 0.15
+    object_goal_tol = 0.10
+    num_pointcloud_points = 64
+
+    # The paper illustrates, but does not numerically specify, the Stage-1 goal
+    # sampling box. These ranges are therefore explicitly marked as inferred.
+    inferred_goal_center = (-0.50, 0.0, 0.75)
+    inferred_goal_position_half_width = (0.15, 0.20, 0.10)
+
+    sim = DextrahKukaAllegroEnvCfg.sim.replace(gravity=(0.0, 0.0, 0.0))
+    robot_cfg = DextrahKukaAllegroEnvCfg.robot_cfg.replace(
+        spawn=DextrahKukaAllegroEnvCfg.robot_cfg.spawn.replace(
+            activate_contact_sensors=True
+        )
+    )
+    contact_sensor = ContactSensorCfg(
+        prim_path=(
+            "/World/envs/env_.*/Robot/"
+            "(palm_link|index_biotac_tip|middle_biotac_tip|ring_biotac_tip|thumb_biotac_tip)"
+        ),
+        update_period=0.0,
+        history_length=1,
+    )
+
+    adr_custom_cfg_dict = copy.deepcopy(DextrahKukaAllegroEnvCfg.adr_custom_cfg_dict)
+    adr_custom_cfg_dict["reward_weights"] = {
+        "object_to_goal_sharpness": (15.0, 30.0),
+    }
+    adr_custom_cfg_dict["gravity"] = {"z": (0.0, -9.81)}
+    # ADEPT states that this target is ADR-controlled but publishes only the
+    # final/default value. The conservative starting value is inferred.
+    adr_custom_cfg_dict["fabric_speed_control"] = {"energy_target": (0.25, 1.0)}

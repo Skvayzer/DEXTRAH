@@ -53,6 +53,29 @@ def quaternion_apply_wxyz(quaternion: torch.Tensor, points: torch.Tensor) -> tor
     return points + 2.0 * (scalar * uv + uuv)
 
 
+def sample_uniform_quaternion(
+    count: int,
+    device: torch.device | str,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Sample rotations uniformly from SO(3), returned in wxyz order."""
+    uniform = torch.rand(count, 3, device=device, dtype=dtype)
+    root_one = torch.sqrt(1.0 - uniform[:, 0])
+    root_two = torch.sqrt(uniform[:, 0])
+    angle_one = 2.0 * torch.pi * uniform[:, 1]
+    angle_two = 2.0 * torch.pi * uniform[:, 2]
+    # Shoemake sampling produces xyzw; reorder to Isaac's wxyz convention.
+    return torch.stack(
+        (
+            root_two * torch.cos(angle_two),
+            root_one * torch.sin(angle_one),
+            root_one * torch.cos(angle_one),
+            root_two * torch.sin(angle_two),
+        ),
+        dim=-1,
+    )
+
+
 def pose_keypoints(
     position: torch.Tensor,
     quaternion: torch.Tensor,

@@ -8,6 +8,7 @@ import gymnasium as gym
 
 from . import agents
 from .dextrah_kuka_allegro_env import DextrahKukaAllegroEnv
+from .adept_repose_env import AdeptKukaAllegroReposeEnv
 from .dextrah_kuka_allegro_env_cfg import (
     AdeptKukaAllegroEnvCfg,
     DextrahKukaAllegroEnvCfg,
@@ -33,7 +34,7 @@ gym.register(
 
 gym.register(
     id="Adept-Kuka-Allegro-Repose",
-    entry_point="dextrah_lab.tasks.dextrah_kuka_allegro.dextrah_kuka_allegro_env:DextrahKukaAllegroEnv",
+    entry_point="dextrah_lab.tasks.dextrah_kuka_allegro.adept_repose_env:AdeptKukaAllegroReposeEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": AdeptKukaAllegroEnvCfg,
