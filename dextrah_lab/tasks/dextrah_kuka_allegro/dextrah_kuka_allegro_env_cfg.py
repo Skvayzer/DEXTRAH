@@ -500,7 +500,10 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     # a palm-angle action.
     max_pose_angle = 45.0
     episode_length_s = 4.0
-    min_steps_for_dr_change = 5 * int(episode_length_s / (DextrahKukaAllegroEnvCfg.decimation * DextrahKukaAllegroEnvCfg.sim_dt))
+    # Five complete four-second episodes at 60 policy steps/s.  Referencing
+    # inherited configclass fields through the base type is not supported by
+    # Isaac Lab after configclass processing.
+    min_steps_for_dr_change = 5 * 4 * 60
 
     objects_dir = "adept_primitives"
     valid_objects_dir = ["adept_primitives"]
