@@ -22,7 +22,7 @@ COLORS = (
 
 
 def _geometry_usda(shape: str, dimensions: tuple[float, ...]) -> str:
-    material_binding = 'prepend rel material:binding = </baseLink/Looks/material>'
+    material_binding = 'prepend rel material:binding = </object/baseLink/Looks/material>'
     if shape == "cuboid":
         return (
             'def Cube "geometry" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {\n'
@@ -52,18 +52,20 @@ def generate_asset(output_path: Path, shape: str, dimensions, color) -> None:
     geometry = _geometry_usda(shape, dimensions)
     content = f'''#usda 1.0
 (
-    defaultPrim = "baseLink"
+    defaultPrim = "object"
     metersPerUnit = 1
     upAxis = "Z"
 )
 
+def Xform "object"
+{{
 def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
 {{
     def Scope "Looks"
     {{
         def Material "material"
         {{
-            token outputs:surface.connect = </baseLink/Looks/material/Shader.outputs:surface>
+            token outputs:surface.connect = </object/baseLink/Looks/material/Shader.outputs:surface>
             def Shader "Shader"
             {{
                 uniform token info:id = "UsdPreviewSurface"
@@ -74,6 +76,7 @@ def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
         }}
     }}
     {geometry}
+}}
 }}
 '''
     output_path.write_text(content)

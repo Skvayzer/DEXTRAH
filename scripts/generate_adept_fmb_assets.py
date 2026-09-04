@@ -51,7 +51,7 @@ def _material(color):
     {{
         def Material "material"
         {{
-            token outputs:surface.connect = </baseLink/Looks/material/Shader.outputs:surface>
+            token outputs:surface.connect = </object/baseLink/Looks/material/Shader.outputs:surface>
             def Shader "Shader"
             {{
                 uniform token info:id = "UsdPreviewSurface"
@@ -74,7 +74,7 @@ def _mesh(name, vertices, faces):
         int[] faceVertexIndices = [{indices}]
         uniform token subdivisionScheme = "none"
         uniform token physxMeshCollision:approximation = "convexDecomposition"
-        prepend rel material:binding = </baseLink/Looks/material>
+        prepend rel material:binding = </object/baseLink/Looks/material>
     }}'''
 
 
@@ -120,16 +120,19 @@ def _write_asset(path: Path, mesh: str, color, mass: float):
     path.write_text(
         f'''#usda 1.0
 (
-    defaultPrim = "baseLink"
+    defaultPrim = "object"
     metersPerUnit = 1
     upAxis = "Z"
 )
 
+def Xform "object"
+{{
 def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysxContactReportAPI"])
 {{
     float physics:mass = {mass}
 {_material(color)}
 {mesh}
+}}
 }}
 '''
     )
