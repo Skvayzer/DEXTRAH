@@ -69,12 +69,14 @@ def main() -> None:
         torch.zeros(args.num_envs, 6, device=base.device)
     )
 
-    zero_actions = torch.zeros(
-        args.num_envs, cfg.num_actions, device=base.device
-    )
     peak_force = torch.zeros(args.num_envs, 4, device=base.device)
     for _ in range(args.contact_steps):
-        _step(env, zero_actions)
+        # Advance PhysX directly: placing an object inside a collision sphere is
+        # intentional here, but feeding that diagnostic penetration through
+        # the fabric's mesh-avoidance query is needlessly expensive.
+        base.sim.step(render=False)
+        base.scene.update(cfg.sim.dt)
+        base._compute_intermediate_values()
         force = torch.linalg.vector_norm(
             base.fingertip_contact_forces[:, 1:, :], dim=-1
         )
