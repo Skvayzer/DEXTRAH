@@ -13,6 +13,8 @@ parser.add_argument("--task", default="Adept-Kuka-Allegro-Repose")
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--rollout_steps", type=int, default=64)
 parser.add_argument("--contact_steps", type=int, default=32)
+parser.add_argument("--contact_gap", type=float, default=0.02)
+parser.add_argument("--contact_velocity", type=float, default=-1.0)
 parser.add_argument("--use_cuda_graph", action="store_true")
 parser.add_argument("--disable_fabric", action="store_true", default=False)
 AppLauncher.add_app_launcher_args(parser)
@@ -92,7 +94,7 @@ def main() -> None:
         .long()
         .argmax(dim=1)
     ] * base.object_scale[probe_env_ids, 0]
-    local_position[:, 2] += radius_by_env + 0.02
+    local_position[:, 2] += radius_by_env + args.contact_gap
     world_position = local_position + base.scene.env_origins[probe_env_ids]
     orientation = torch.zeros(2, 4, device=base.device)
     orientation[:, 0] = 1.0
@@ -100,7 +102,7 @@ def main() -> None:
         torch.cat((world_position, orientation), dim=-1), env_ids=probe_env_ids
     )
     velocity = torch.zeros(2, 6, device=base.device)
-    velocity[:, 2] = -1.0
+    velocity[:, 2] = args.contact_velocity
     base.object.write_root_velocity_to_sim(velocity, env_ids=probe_env_ids)
     print("ADEPT_VALIDATION_STAGE=contact_probe_configured", flush=True)
 
