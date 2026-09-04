@@ -21,22 +21,53 @@ The implementation keeps three kinds of settings visibly separate:
 
 Every inferred choice must be documented next to its configuration field.
 
+## Current runnable target
+
+The Gym task `Adept-Kuka-Allegro-Repose` keeps DextrAH's reposing scene and
+reward but replaces its policy/controller boundary with ADEPT's 23-D relative
+C-space interface. The original `Dextrah-Kuka-Allegro` task remains unchanged
+as the 11-D baseline.
+
+On the TL server, create the isolated environment and hydrate Git LFS assets:
+
+```bash
+cd ~/data1/DEXTRAH-ADEPT
+./scripts/setup_adept_env.sh
+```
+
+Do not install FABRICS into another Isaac environment: its legacy `urdfpy`
+metadata requests dependency versions that conflict with Isaac Sim 5. The
+setup script retains Isaac Sim's NumPy 1.26, NetworkX 3.3, and PyCollada 0.9.3;
+the controller contains the one runtime compatibility shim urdfpy needs.
+
+Submit the one-epoch, 16-environment smoke test through Slurm:
+
+```bash
+cd ~/data1/DEXTRAH-ADEPT
+sbatch scripts/slurm/smoke_adept_repose.sbatch
+```
+
+The smoke test intentionally disables CUDA graph capture. Enable it only after
+the eager controller and observation/action contracts pass.
+
 ## Milestones
 
 ### M0 — reproducible baseline
 
-- Pin and smoke-test DextrAH with Isaac Lab v2.2.1 and NVIDIA FABRICS.
-- Preserve the original 11-D palm-pose + hand-PCA task as an upstream baseline.
-- Add shape and action-contract tests that do not require launching Isaac Sim.
+- [x] Isolate DextrAH with Isaac Lab v2.2.1 and NVIDIA FABRICS.
+- [x] Preserve the original 11-D palm-pose + hand-PCA task as an upstream baseline.
+- [x] Add shape and action-contract tests that do not require launching Isaac Sim.
+- [ ] Pass the one-epoch GPU smoke test.
 
 ### M1 — full configuration-space fabric
 
-- Replace the 11-D action with 23 relative joint deltas.
-- Map actions using `q_target = clamp(q_fabric + 0.1 * action, limits)`.
-- Drive separate arm and hand C-space forcing attractors while retaining
+- [x] Replace the 11-D action with 23 relative joint deltas.
+- [x] Map actions using `q_target = clamp(q_fabric + 0.1 * action, limits)`.
+- [x] Drive separate arm and hand C-space forcing attractors while retaining
   geometric posture, collision avoidance, joint limits, damping, and speed
   control.
-- Keep the controller at 60 Hz with two fabric integration steps.
+- [x] Keep the controller at 60 Hz with two fabric integration steps.
+- [ ] Validate eager and CUDA-graph rollouts for finite states and joint limits.
 
 ### M2 — reposing pre-training MDP
 
