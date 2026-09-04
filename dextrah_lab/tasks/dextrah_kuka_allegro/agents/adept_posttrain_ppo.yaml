@@ -16,7 +16,7 @@ params:
         sigma_activation: None
         mu_init: {name: default}
         sigma_init: {name: const_initializer, val: -2}
-        fixed_sigma: true
+        fixed_sigma: fixed
     mlp:
       units: [512, 512]
       activation: elu
