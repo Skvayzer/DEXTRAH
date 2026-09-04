@@ -77,11 +77,12 @@ def main() -> None:
     probe_env_ids = torch.nonzero(sphere_env_mask, as_tuple=False).flatten()[:2]
     if len(probe_env_ids) != 2:
         raise RuntimeError("contact validation requires both ADEPT sphere environments")
+    index_env_id, thumb_env_id = probe_env_ids.cpu().tolist()
 
     local_position = torch.stack(
         (
-            base.hand_pos[probe_env_ids[0], 1, :],
-            base.hand_pos[probe_env_ids[1], -1, :],
+            base.hand_pos[index_env_id, 1, :],
+            base.hand_pos[thumb_env_id, -1, :],
         )
     )
     if not bool((local_position.abs() < 2.0).all()):
@@ -119,8 +120,8 @@ def main() -> None:
         peak_force = torch.maximum(peak_force, force)
 
     print("ADEPT_VALIDATION_STAGE=contact_probe_accumulated", flush=True)
-    index_force = float(peak_force[probe_env_ids[0], 0].item())
-    thumb_force = float(peak_force[probe_env_ids[1], -1].item())
+    index_force = float(peak_force[index_env_id, 0].item())
+    thumb_force = float(peak_force[thumb_env_id, -1].item())
     if index_force <= cfg.contact_force_threshold:
         raise RuntimeError(
             f"index contact sensor did not cross {cfg.contact_force_threshold} N"
