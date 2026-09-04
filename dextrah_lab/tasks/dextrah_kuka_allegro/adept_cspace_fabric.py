@@ -8,7 +8,13 @@ while replacing DextrAH's palm-pose + hand-PCA policy interface with separate
 arm and hand configuration-space attractors.
 """
 
+import numpy as np
 import torch
+
+# urdfpy 0.0.22 still uses the alias removed in NumPy 1.24. Isaac Sim 5 pins
+# NumPy 1.26, so retain compatibility without downgrading the simulator stack.
+if not hasattr(np, "float"):
+    np.float = float  # type: ignore[attr-defined]
 
 from fabrics_sim.energy.euclidean_energy import EuclideanEnergy
 from fabrics_sim.fabric_terms.attractor import Attractor
