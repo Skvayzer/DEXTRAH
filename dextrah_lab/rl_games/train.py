@@ -143,7 +143,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs
-    log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    # The Play2Perfect RL-Games fork used by this environment parses the
+    # leading experiment-name component as a numeric policy index.
+    default_policy_index = args_cli.pbt_worker_id or 0
+    default_run_name = (
+        f"{default_policy_index}_"
+        + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    )
+    log_dir = agent_cfg["params"]["config"].get(
+        "full_experiment_name", default_run_name
+    )
     # set directory into agent config
     # logging directory path: <train_dir>/<full_experiment_name>
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
