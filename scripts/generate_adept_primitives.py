@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from pxr import Gf, Usd, UsdGeom, UsdPhysics
-
 from dextrah_lab.tasks.dextrah_kuka_allegro.adept_mdp import ADEPT_PRIMITIVES
 
 
@@ -23,45 +21,49 @@ COLORS = (
 )
 
 
-def _define_geometry(stage: Usd.Stage, shape: str, dimensions: tuple[float, ...]):
-    path = "/baseLink/geometry"
+def _geometry_usda(shape: str, dimensions: tuple[float, ...]) -> str:
     if shape == "cuboid":
-        geometry = UsdGeom.Cube.Define(stage, path)
-        geometry.GetSizeAttr().Set(1.0)
-        geometry.AddScaleOp().Set(Gf.Vec3f(*dimensions))
-    elif shape == "sphere":
-        geometry = UsdGeom.Sphere.Define(stage, path)
-        geometry.GetRadiusAttr().Set(dimensions[0])
-    elif shape == "capsule":
-        geometry = UsdGeom.Capsule.Define(stage, path)
-        geometry.GetAxisAttr().Set("Z")
-        geometry.GetRadiusAttr().Set(dimensions[0])
-        geometry.GetHeightAttr().Set(dimensions[1])
-    elif shape == "cone":
-        geometry = UsdGeom.Cone.Define(stage, path)
-        geometry.GetAxisAttr().Set("Z")
-        geometry.GetRadiusAttr().Set(dimensions[0])
-        geometry.GetHeightAttr().Set(dimensions[1])
-    else:
+        return (
+            'def Cube "geometry" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {\n'
+            '        double size = 1\n'
+            f'        float3 xformOp:scale = ({dimensions[0]}, {dimensions[1]}, {dimensions[2]})\n'
+            '        uniform token[] xformOpOrder = ["xformOp:scale"]\n'
+            '        __COLOR__\n'
+            '    }'
+        )
+    usd_type = {"sphere": "Sphere", "capsule": "Capsule", "cone": "Cone"}.get(shape)
+    if usd_type is None:
         raise ValueError(f"Unsupported shape: {shape}")
-    return geometry
+    attributes = [f"double radius = {dimensions[0]}"]
+    if shape in {"capsule", "cone"}:
+        attributes.extend((f"double height = {dimensions[1]}", 'uniform token axis = "Z"'))
+    body = "\n        ".join(attributes)
+    return (
+        f'def {usd_type} "geometry" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {{\n'
+        f"        {body}\n"
+        '        __COLOR__\n'
+        '    }'
+    )
 
 
 def generate_asset(output_path: Path, shape: str, dimensions, color) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    stage = Usd.Stage.CreateNew(str(output_path))
-    stage.SetMetadata("upAxis", "Z")
-    stage.SetMetadata("metersPerUnit", 1.0)
+    geometry = _geometry_usda(shape, dimensions).replace(
+        "__COLOR__", f"color3f[] primvars:displayColor = [({color[0]}, {color[1]}, {color[2]})]"
+    )
+    content = f'''#usda 1.0
+(
+    defaultPrim = "baseLink"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
 
-    root = UsdGeom.Xform.Define(stage, "/baseLink").GetPrim()
-    stage.SetDefaultPrim(root)
-    UsdPhysics.RigidBodyAPI.Apply(root)
-
-    geometry = _define_geometry(stage, shape, dimensions)
-    geometry.GetDisplayColorAttr().Set([Gf.Vec3f(*color)])
-    UsdPhysics.CollisionAPI.Apply(geometry.GetPrim())
-
-    stage.GetRootLayer().Save()
+def Xform "baseLink" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+{{
+    {geometry}
+}}
+'''
+    output_path.write_text(content)
 
 
 def main() -> None:
