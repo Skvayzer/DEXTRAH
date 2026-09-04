@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--task", default="Adept-Kuka-Allegro-Repose")
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--rollout_steps", type=int, default=64)
-parser.add_argument("--contact_steps", type=int, default=32)
+parser.add_argument("--contact_steps", type=int, default=64)
 parser.add_argument("--contact_gap", type=float, default=0.02)
 parser.add_argument("--contact_velocity", type=float, default=-1.0)
 parser.add_argument("--use_cuda_graph", action="store_true")
@@ -109,13 +109,14 @@ def main() -> None:
     base.object.write_root_velocity_to_sim(velocity, env_ids=probe_env_ids)
     print("ADEPT_VALIDATION_STAGE=contact_probe_configured", flush=True)
 
-    zero_actions = torch.zeros(args.num_envs, cfg.num_actions, device=base.device)
     peak_force = torch.zeros(args.num_envs, 4, device=base.device)
     minimum_center_distance = torch.full((2,), float("inf"), device=base.device)
     for step in range(args.contact_steps):
-        # Use the exact training path so controller, PhysX, contact-sensor, and
-        # observation synchronization are validated as one integration.
-        _step(env, zero_actions)
+        # Sample every physics step so a short collision impulse cannot fall
+        # between the environment's four-substep control observations.
+        base.sim.step(render=False)
+        base.scene.update(cfg.sim.dt)
+        base._compute_intermediate_values()
         print(f"ADEPT_VALIDATION_CONTACT_STEP={step + 1}", flush=True)
         force = torch.linalg.vector_norm(
             base.fingertip_contact_forces[:, 1:, :], dim=-1
