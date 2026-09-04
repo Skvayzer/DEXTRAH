@@ -271,6 +271,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner.reset()
     # train the agent
     if args_cli.checkpoint is not None:
+        # RL-Games restores its cached observation from the checkpoint and
+        # therefore skips the normal initial environment reset. Gymnasium's
+        # order-enforcing wrapper still requires one before the first step.
+        env.reset()
         runner.run({"train": True, "play": False, "sigma": train_sigma, "checkpoint": resume_path})
     else:
         runner.run({"train": True, "play": False, "sigma": train_sigma})
