@@ -57,6 +57,11 @@ def main() -> None:
     base = env.unwrapped
     env.reset()
     print("ADEPT_VALIDATION_STAGE=environment_ready", flush=True)
+    print(f"ADEPT_VALIDATION_ROBOT_BODIES={base.robot.body_names}", flush=True)
+    print(
+        f"ADEPT_VALIDATION_CONTACT_BODIES={base.contact_sensor.body_names}",
+        flush=True,
+    )
 
     # Fire the two spherical primitives downward through the index/thumb tip
     # origins.  Starting outside the fingers and letting PhysX establish the
