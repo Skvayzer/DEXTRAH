@@ -50,6 +50,41 @@ sbatch scripts/slurm/smoke_adept_repose.sbatch
 The smoke test intentionally disables CUDA graph capture. Enable it only after
 the eager controller and observation/action contracts pass.
 
+## Training sequence
+
+Run each stage only after its smoke/validation gate passes. Checkpoint paths are
+explicit environment variables so a downstream job cannot silently select the
+wrong upstream run.
+
+```bash
+# Stage 1: 16-policy reposing PBT population
+sbatch scripts/slurm/train_adept_pbt.sbatch
+
+# Stage 2a: new FMB actor, supervised by the selected Stage-1 actor
+TEACHER_CHECKPOINT=/absolute/path/repose.pth \
+  sbatch scripts/slurm/train_adept_fmb_bc.sbatch
+
+# Stage 2b/c: fresh critic warm-up for 20 epochs, then conservative PPO
+BC_CHECKPOINT="$PWD/logs/adept_fmb_bc.pth" \
+  sbatch scripts/slurm/train_adept_fmb_posttrain.sbatch
+
+# Stage 3a: perception pretraining from the reposing teacher
+TEACHER_STAGE=pretraining \
+TEACHER_CHECKPOINT=/absolute/path/repose.pth \
+OUTPUT_CHECKPOINT="$PWD/logs/adept_rgb_stage1.pth" \
+  sbatch scripts/slurm/train_adept_vision_dagger.sbatch
+
+# Stage 3b: FMB teacher distillation, initializing only the visual encoder
+TEACHER_STAGE=downstream \
+TEACHER_CHECKPOINT=/absolute/path/fmb_posttrained.pth \
+STAGE1_STUDENT="$PWD/logs/adept_rgb_stage1.pth" \
+  sbatch scripts/slurm/train_adept_vision_dagger.sbatch
+```
+
+Set `TASK=Adept-Kuka-Allegro-FMB-SquareRound` for the square/round teacher
+stages and append `-Vision` for its student stages. ADEPT trains each geometry
+and embodiment independently; these launchers intentionally do not mix them.
+
 ## Milestones
 
 ### M0 — reproducible baseline
