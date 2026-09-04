@@ -76,7 +76,7 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
         self.cfg.action_space = self.cfg.num_actions
 
     def _ordered_contact_body_indices(self):
-        if self._contact_body_indices is None:
+        if getattr(self, "_contact_body_indices", None) is None:
             indices = []
             for body_name in self.cfg.hand_body_names:
                 body_indices, _ = self.contact_sensor.find_bodies(body_name)
@@ -240,6 +240,34 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
                 self.object_id_scalar,
                 self.object_scale,
                 self._pointcloud(noisy=True).flatten(1),
+            ),
+            dim=-1,
+        )
+
+    def compute_student_policy_observations(self):
+        """Exact 206-D KUKA vision-student low-dimensional observation."""
+
+        nominal_hand_position, _ = self.hand_points_taskmap(
+            self.robot_start_joint_pos, None
+        )
+        nominal_delta = torch.cat(
+            (
+                self.robot_dof_pos_noisy - self.robot_start_joint_pos,
+                self.hand_pos_noisy - nominal_hand_position,
+            ),
+            dim=-1,
+        )
+        return torch.cat(
+            (
+                self.robot_dof_pos_noisy,
+                self.robot_dof_vel_noisy,
+                self.hand_pos_noisy,
+                self.hand_vel_noisy,
+                self.actions,
+                self.fabric_q_for_obs,
+                self.fabric_qd_for_obs,
+                self.fabric_qdd_for_obs,
+                nominal_delta,
             ),
             dim=-1,
         )

@@ -496,6 +496,9 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
     control_space = "cspace"
     num_actions = 23
     max_joint_delta = 0.1
+    # The base class validates this even though C-space mode does not consume
+    # a palm-angle action.
+    max_pose_angle = 45.0
     episode_length_s = 4.0
     min_steps_for_dr_change = 5 * int(episode_length_s / (DextrahKukaAllegroEnvCfg.decimation * DextrahKukaAllegroEnvCfg.sim_dt))
 
@@ -535,6 +538,8 @@ class AdeptKukaAllegroEnvCfg(DextrahKukaAllegroEnvCfg):
         "object_to_goal_sharpness": (15.0, 30.0),
     }
     adr_custom_cfg_dict["gravity"] = {"z": (0.0, -9.81)}
+    # ADEPT consumes velocities and fabric derivatives at every ADR level.
+    adr_custom_cfg_dict["observation_annealing"] = {"coefficient": (1.0, 1.0)}
     # ADEPT states that this target is ADR-controlled but publishes only the
     # final/default value. The conservative starting value is inferred.
     adr_custom_cfg_dict["fabric_speed_control"] = {"energy_target": (0.25, 1.0)}
