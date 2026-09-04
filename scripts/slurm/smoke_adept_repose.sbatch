@@ -15,6 +15,7 @@ NUM_ENVS="${NUM_ENVS:-16}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-1}"
 USE_CUDA_GRAPH="${USE_CUDA_GRAPH:-false}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-64}"
+RUN_NAME="${RUN_NAME:-0_adept_smoke_${SLURM_JOB_ID}}"
 
 cd "${REPO_ROOT}/dextrah_lab/rl_games"
 "${ADEPT_ENV_PATH}/bin/python" train.py \
@@ -22,6 +23,7 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     --task=Adept-Kuka-Allegro-Repose \
     --num_envs="${NUM_ENVS}" \
     --max_iterations="${MAX_ITERATIONS}" \
+    --run_name="${RUN_NAME}" \
     agent.params.config.minibatch_size="${MINIBATCH_SIZE}" \
     agent.params.config.central_value_config.minibatch_size="${MINIBATCH_SIZE}" \
     agent.wandb_activate=False \
