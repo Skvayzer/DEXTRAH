@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
+import signal
 
 from isaaclab.app import AppLauncher
 
@@ -19,6 +21,7 @@ parser.add_argument("--use_cuda_graph", action="store_true")
 parser.add_argument("--disable_fabric", action="store_true", default=False)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
