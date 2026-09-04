@@ -12,7 +12,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--task", default="Adept-Kuka-Allegro-Repose")
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--rollout_steps", type=int, default=64)
-parser.add_argument("--contact_steps", type=int, default=8)
+parser.add_argument("--contact_steps", type=int, default=32)
 parser.add_argument("--use_cuda_graph", action="store_true")
 parser.add_argument("--disable_fabric", action="store_true", default=False)
 AppLauncher.add_app_launcher_args(parser)
@@ -54,41 +54,53 @@ def main() -> None:
     env.reset()
     print("ADEPT_VALIDATION_STAGE=environment_ready", flush=True)
 
-    # Place the bottom surface of alternating objects slightly into the index
-    # and thumb tips.  Offsetting by each primitive's axial support avoids the
-    # pathological solver case caused by centering a rigid object around an
-    # entire fingertip while retaining a small, unambiguous penetration.
+    # Fire the two spherical primitives downward through the index/thumb tip
+    # origins.  Starting outside the fingers and letting PhysX establish the
+    # contact is both representative and much better conditioned than
+    # teleporting an object into an overlapping collision configuration.
     base._compute_intermediate_values()
-    local_position = base.hand_pos[:, 1, :].clone()
-    local_position[1::2] = base.hand_pos[1::2, -1, :]
-    axial_support = []
-    for spec in ADEPT_PRIMITIVES:
-        if spec.shape == "cuboid":
-            axial_support.append(0.5 * spec.dimensions[2])
-        elif spec.shape == "sphere":
-            axial_support.append(spec.dimensions[0])
-        elif spec.shape == "capsule":
-            axial_support.append(spec.dimensions[0] + 0.5 * spec.dimensions[1])
-        elif spec.shape == "cone":
-            axial_support.append(0.5 * spec.dimensions[1])
-        else:
-            raise RuntimeError(f"unknown ADEPT primitive shape: {spec.shape}")
-    support_by_spec = torch.tensor(axial_support, device=base.device)
     spec_index = torch.round(
         base.object_id_scalar[:, 0] * (len(ADEPT_PRIMITIVES) - 1)
     ).long()
-    local_position[:, 2] += (
-        support_by_spec[spec_index] * base.object_scale[:, 0] + 0.006
+    sphere_specs = [
+        (index, spec.dimensions[0])
+        for index, spec in enumerate(ADEPT_PRIMITIVES)
+        if spec.shape == "sphere"
+    ]
+    sphere_spec_indices = torch.tensor(
+        [index for index, _radius in sphere_specs], device=base.device
     )
-    world_position = local_position + base.scene.env_origins
-    orientation = torch.zeros(args.num_envs, 4, device=base.device)
+    sphere_env_mask = torch.any(
+        spec_index[:, None] == sphere_spec_indices[None, :], dim=1
+    )
+    probe_env_ids = torch.nonzero(sphere_env_mask, as_tuple=False).flatten()[:2]
+    if len(probe_env_ids) != 2:
+        raise RuntimeError("contact validation requires both ADEPT sphere environments")
+
+    local_position = torch.stack(
+        (
+            base.hand_pos[probe_env_ids[0], 1, :],
+            base.hand_pos[probe_env_ids[1], -1, :],
+        )
+    )
+    sphere_radius = torch.tensor(
+        [radius for _index, radius in sphere_specs], device=base.device
+    )
+    radius_by_env = sphere_radius[
+        (spec_index[probe_env_ids, None] == sphere_spec_indices[None, :])
+        .long()
+        .argmax(dim=1)
+    ] * base.object_scale[probe_env_ids, 0]
+    local_position[:, 2] += radius_by_env + 0.02
+    world_position = local_position + base.scene.env_origins[probe_env_ids]
+    orientation = torch.zeros(2, 4, device=base.device)
     orientation[:, 0] = 1.0
     base.object.write_root_pose_to_sim(
-        torch.cat((world_position, orientation), dim=-1)
+        torch.cat((world_position, orientation), dim=-1), env_ids=probe_env_ids
     )
-    base.object.write_root_velocity_to_sim(
-        torch.zeros(args.num_envs, 6, device=base.device)
-    )
+    velocity = torch.zeros(2, 6, device=base.device)
+    velocity[:, 2] = -1.0
+    base.object.write_root_velocity_to_sim(velocity, env_ids=probe_env_ids)
 
     peak_force = torch.zeros(args.num_envs, 4, device=base.device)
     for _ in range(args.contact_steps):
@@ -103,8 +115,8 @@ def main() -> None:
         )
         peak_force = torch.maximum(peak_force, force)
 
-    index_force = float(peak_force[0::2, 0].max().item())
-    thumb_force = float(peak_force[1::2, -1].max().item())
+    index_force = float(peak_force[probe_env_ids[0], 0].item())
+    thumb_force = float(peak_force[probe_env_ids[1], -1].item())
     if index_force <= cfg.contact_force_threshold:
         raise RuntimeError(
             f"index contact sensor did not cross {cfg.contact_force_threshold} N"
