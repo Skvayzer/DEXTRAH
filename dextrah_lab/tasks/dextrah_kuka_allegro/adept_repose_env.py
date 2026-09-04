@@ -87,14 +87,29 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
 
     def _ordered_contact_body_indices(self):
         if getattr(self, "_contact_body_indices", None) is None:
+            body_groups = (
+                ("palm_link",),
+                ("index_link_3", "index_biotac_tip"),
+                ("middle_link_3", "middle_biotac_tip"),
+                ("ring_link_3", "ring_biotac_tip"),
+                ("thumb_link_3", "thumb_biotac_tip"),
+            )
             indices = []
-            for body_name in self.cfg.hand_body_names:
-                body_indices, _ = self.contact_sensor.find_bodies(body_name)
-                if len(body_indices) != 1:
+            for body_names in body_groups:
+                group = []
+                for body_name in body_names:
+                    body_indices, _ = self.contact_sensor.find_bodies(body_name)
+                    if len(body_indices) != 1:
+                        raise RuntimeError(
+                            f"Expected one contact-sensor body for {body_name}, "
+                            f"got {body_indices}"
+                        )
+                    group.append(body_indices[0])
+                if not group:
                     raise RuntimeError(
-                        f"Expected one contact-sensor body for {body_name}, got {body_indices}"
+                        f"No contact-sensor bodies found for {body_names}"
                     )
-                indices.append(body_indices[0])
+                indices.append(group)
             self._contact_body_indices = indices
         return self._contact_body_indices
 
@@ -103,10 +118,14 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
         if hasattr(self, "robot_joint_pos_bias"):
             self._apply_adept_observation_noise()
         if hasattr(self, "contact_sensor"):
-            indices = self._ordered_contact_body_indices()
-            self.fingertip_contact_forces = self.contact_sensor.data.net_forces_w[
-                :, indices, :
-            ]
+            raw_forces = self.contact_sensor.data.net_forces_w
+            self.fingertip_contact_forces = torch.stack(
+                [
+                    raw_forces[:, indices, :].sum(dim=1)
+                    for indices in self._ordered_contact_body_indices()
+                ],
+                dim=1,
+            )
 
     def _adr_fraction(self) -> float:
         return min(
