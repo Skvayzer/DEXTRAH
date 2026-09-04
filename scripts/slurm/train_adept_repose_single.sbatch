@@ -24,6 +24,6 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     --seed="${SEED}" \
     --num_envs="${NUM_ENVS}" \
     --max_iterations="${MAX_ITERATIONS}" \
-    agent.params.config.full_experiment_name="${RUN_NAME}" \
+    --run_name="${RUN_NAME}" \
     agent.wandb_activate=False \
     env.use_cuda_graph="${USE_CUDA_GRAPH}"

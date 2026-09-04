@@ -29,6 +29,12 @@ parser.add_argument(
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--sigma", type=str, default=None, help="The policy's initial standard deviation.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--run_name",
+    type=str,
+    default=None,
+    help="Explicit RL-Games run-directory name (must begin with the numeric ADEPT policy index).",
+)
 parser.add_argument("--pbt_worker_id", type=int, default=None, help="Enable ADEPT PBT for this population worker.")
 parser.add_argument("--pbt_dir", type=str, default=None, help="Shared filesystem directory for ADEPT PBT metadata.")
 parser.add_argument(
@@ -150,7 +156,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"{default_policy_index}_"
         + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     )
-    log_dir = agent_cfg["params"]["config"].get(
+    log_dir = args_cli.run_name or agent_cfg["params"]["config"].get(
         "full_experiment_name", default_run_name
     )
     # set directory into agent config
