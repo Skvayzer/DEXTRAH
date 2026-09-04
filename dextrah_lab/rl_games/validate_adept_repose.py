@@ -110,8 +110,7 @@ def main() -> None:
         base.sim.step(render=False)
         base.scene.update(cfg.sim.dt)
         base._compute_intermediate_values()
-        if step == 0:
-            print("ADEPT_VALIDATION_STAGE=contact_probe_stepped", flush=True)
+        print(f"ADEPT_VALIDATION_CONTACT_STEP={step + 1}", flush=True)
         force = torch.linalg.vector_norm(
             base.fingertip_contact_forces[:, 1:, :], dim=-1
         )
