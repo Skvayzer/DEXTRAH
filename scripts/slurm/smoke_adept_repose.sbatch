@@ -17,7 +17,7 @@ cd "${REPO_ROOT}/dextrah_lab/rl_games"
     --headless \
     --task=Adept-Kuka-Allegro-Repose \
     --num_envs=16 \
-    agent.params.config.max_epochs=1 \
+    --max_iterations=1 \
     agent.params.config.minibatch_size=64 \
     agent.params.config.central_value_config.minibatch_size=64 \
     agent.wandb_activate=False \
