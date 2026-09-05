@@ -172,6 +172,18 @@ class Revo2Kinematics:
         root = ET.parse(self.urdf_path).getroot()
         joints = tuple(self._parse_joint(element) for element in root.findall("joint"))
         self._joints = {joint.name: joint for joint in joints}
+        link_names = {element.attrib["name"] for element in root.findall("link")}
+        resolved_fingertips = []
+        for link in self.fingertip_link_names:
+            if link in link_names:
+                resolved_fingertips.append(link)
+            elif link.endswith("_link") and link.removesuffix("_link") in link_names:
+                # The G1-integrated URDF calls these links right_*_tip, while
+                # BrainCo's standalone URDF calls them right_*_tip_link.
+                resolved_fingertips.append(link.removesuffix("_link"))
+            else:
+                resolved_fingertips.append(link)
+        self.fingertip_link_names = tuple(resolved_fingertips)
         child_to_joint = {joint.child: joint for joint in joints}
         if len(child_to_joint) != len(joints):
             raise ValueError("URDF contains a link with multiple parent joints")
@@ -187,7 +199,10 @@ class Revo2Kinematics:
                 if joint.kind not in {"fixed", "revolute", "continuous"}:
                     raise ValueError(f"unsupported Revo2 joint type {joint.kind!r}")
                 if joint.kind != "fixed" and joint.name not in self._actuated_index:
-                    if joint.mimic is None or joint.mimic.joint not in self._actuated_index:
+                    if not self._is_locked(joint) and (
+                        joint.mimic is None
+                        or joint.mimic.joint not in self._actuated_index
+                    ):
                         raise ValueError(
                             f"joint {joint.name!r} is neither actuated nor coupled to an actuator"
                         )
@@ -250,9 +265,20 @@ class Revo2Kinematics:
     def _joint_angle(self, joint: _Joint, q: torch.Tensor) -> torch.Tensor:
         if joint.name in self._actuated_index:
             return q[..., self._actuated_index[joint.name]]
+        if self._is_locked(joint):
+            assert joint.lower is not None
+            return torch.zeros_like(q[..., 0]) + joint.lower
         assert joint.mimic is not None
         source = q[..., self._actuated_index[joint.mimic.joint]]
         return source * joint.mimic.multiplier + joint.mimic.offset
+
+    @staticmethod
+    def _is_locked(joint: _Joint) -> bool:
+        return (
+            joint.lower is not None
+            and joint.upper is not None
+            and abs(joint.upper - joint.lower) <= 1.0e-12
+        )
 
     def fingertip_positions(self, q: torch.Tensor) -> torch.Tensor:
         """Return palm-fixed fingertip positions with shape ``[..., 5, 3]``."""
