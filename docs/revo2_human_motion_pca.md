@@ -42,8 +42,10 @@ pre-grasp frames. A numeric `--scale` bypasses that calibration.
 
 DexYCB is CC BY-NC 4.0 and the complete release is about 119 GB. Its official
 release contains 1,000 grasping sequences from 10 subjects and 20 YCB objects.
-The loader uses the 500 right-hand sequences when all subject archives are
-present. Download and extract them with:
+The loader keeps every capture whose official `mano_sides` metadata says
+`right`. In the downloaded release this yields 501 unique captures: 50 for
+each subject except subject 08, whose 100 captures are labeled 51 right and 49
+left. Download and extract all subject archives with:
 
 ```bash
 scripts/download_dexycb_retargeting_data.sh \
@@ -77,6 +79,7 @@ python scripts/retarget_dexycb_revo2.py \
   --modes power,precision \
   --iterations 250 \
   --minimum-iterations 40 \
+  --trajectory-batch-size 16 \
   --pca-components 5 \
   --device cpu
 ```
@@ -93,16 +96,36 @@ This matters: the G1-integrated file has different thumb transforms, mimic
 ratios, and limits from the latest standalone BrainCo file. The artifact stores
 the selected URDF's SHA-256 checksum so the two profiles cannot be confused.
 
-The optimizer batches all frames in a trajectory. This preserves independent
-per-frame Adam variables and is much faster than Python-level sequential warm
-starts. Use `--optimizer-execution sequential` to compare against warm-started
-optimization. For this six-variable problem CPU is normally faster than paying
-GPU kernel-launch overhead.
+The optimizer batches all frames from up to `--trajectory-batch-size` captures,
+while restarting gamma at every capture boundary. Adam variables and gradient
+clipping remain independent per frame, so the result does not depend on the
+batch grouping. Use `--optimizer-execution sequential` to compare against
+warm-started optimization. For this six-variable problem CPU is normally
+faster than paying GPU kernel-launch overhead.
 
 The run emits one pickle-free NPZ per trajectory/mode, `summary.json`, and
 `revo2_human_motion_pca.npz`. The artifact includes joint names, the matrix,
 mean, all explained-variance ratios, coordinate bounds, joint limits, run
 provenance, and URDF checksum.
+
+### Verified full G1 run
+
+The exact combined Play2Perfect G1/Revo2 URDF was used for the completed run at
+`/data2/users/konstantin.smirnov/dex-ycb/revo2-g1-full-v1`. Its results are:
+
+- 501 source captures, 1,002 power/precision trajectories, and 62,892 robot
+  configurations;
+- calibrated human-to-Revo2 scale `alpha=0.90`;
+- five components retaining 99.8081% of configuration variance;
+- 0.01017 rad mean PCA projection RMSE;
+- 13.98 mm mean pure-imitation endpoint fingertip error;
+- exact FK replay and zero joint-limit violation;
+- PCA artifact SHA-256
+  `8cea2fe7602958bbefec826fd331a100c15145c7dd837c68406a07895a2237b3`.
+
+`validation.json` in that directory contains the aggregate result and every
+per-trajectory check. The combined URDF checksum recorded in the artifact is
+`6ae8280de78808fe6105524785d5e904763caa1c012747cd072844e4b856e879`.
 
 ## Validate and inspect
 
