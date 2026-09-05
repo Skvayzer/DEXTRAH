@@ -78,7 +78,7 @@ def test_adam_recovers_synthetic_revo2_fingertips_at_imitation_endpoint():
     assert np.all(result.joint_positions < hand.upper.numpy())
 
 
-def test_optimizer_sequence_is_warm_started_and_finite():
+def test_batched_optimizer_sequence_is_finite():
     hand = Revo2Kinematics(URDF)
     targets = hand.fingertip_positions(
         torch.stack(
@@ -99,3 +99,22 @@ def test_optimizer_sequence_is_warm_started_and_finite():
     assert result.joint_positions.shape == (3, 6)
     assert np.isfinite(result.total_loss).all()
     np.testing.assert_allclose(result.gamma, [1.0, 0.5, 0.0])
+    assert not np.allclose(result.joint_positions[0], hand.lower.numpy())
+
+
+def test_sequential_optimizer_remains_available_for_warm_starting():
+    hand = Revo2Kinematics(URDF)
+    target = hand.fingertip_positions(
+        hand.lower + 0.4 * (hand.upper - hand.lower)
+    ).unsqueeze(0)
+    result = Revo2Retargeter(
+        hand,
+        RetargetingConfig(
+            optimizer_execution="sequential",
+            iterations=30,
+            minimum_iterations=5,
+        ),
+    ).retarget(target)
+
+    assert result.joint_positions.shape == (1, 6)
+    assert np.isfinite(result.total_loss).all()

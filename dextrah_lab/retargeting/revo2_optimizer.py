@@ -17,6 +17,7 @@ from .revo2_kinematics import (
 
 GraspMode = Literal["power", "precision", "precision_tripod"]
 GammaSchedule = Literal["endpoint", "paper_literal"]
+OptimizerExecution = Literal["batched", "sequential"]
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class RetargetingConfig:
     convergence_tolerance: float = 1.0e-9
     gamma_schedule: GammaSchedule = "endpoint"
     gradient_clip_norm: float = 10.0
+    optimizer_execution: OptimizerExecution = "batched"
 
     def validate(self) -> None:
         if self.mode not in {"power", "precision", "precision_tripod"}:
@@ -48,6 +50,10 @@ class RetargetingConfig:
             raise ValueError("optimizer tolerances must be non-negative/positive")
         if self.gamma_schedule not in {"endpoint", "paper_literal"}:
             raise ValueError(f"unsupported gamma schedule {self.gamma_schedule!r}")
+        if self.optimizer_execution not in {"batched", "sequential"}:
+            raise ValueError(
+                f"unsupported optimizer execution {self.optimizer_execution!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -123,23 +129,26 @@ def estimate_fingertip_scale(
     human_fingertips: np.ndarray | torch.Tensor,
     robot_reference_fingertips: np.ndarray | torch.Tensor,
 ) -> float:
-    """Estimate one robust global scale from wrist-to-tip RMS extents."""
+    """Estimate one robust scale from matching wrist-to-tip lengths.
+
+    Taking the median of per-finger ratios avoids letting the Revo2 thumb's
+    large lateral offset dominate the morphology calibration.
+    """
 
     human = torch.as_tensor(human_fingertips, dtype=torch.float64)
     robot = torch.as_tensor(robot_reference_fingertips, dtype=torch.float64)
     if human.shape[-2:] != (5, 3) or robot.shape[-2:] != (5, 3):
         raise ValueError("human and robot fingertips must end in shape (5, 3)")
-    human_extent = torch.sqrt(human.square().sum(dim=-1).mean(dim=-1))
-    robot_extent = torch.sqrt(robot.square().sum(dim=-1).mean(dim=-1))
-    human_median = torch.median(human_extent)
-    robot_median = torch.median(robot_extent)
-    if human_median <= 1.0e-8 or robot_median <= 1.0e-8:
+    human_extent = torch.linalg.vector_norm(human, dim=-1)
+    robot_extent = torch.linalg.vector_norm(robot, dim=-1)
+    if torch.any(human_extent <= 1.0e-8) or torch.any(robot_extent <= 1.0e-8):
         raise ValueError("cannot estimate scale from degenerate fingertips")
-    return float((robot_median / human_median).item())
+    ratios = robot_extent / human_extent
+    return float(torch.median(ratios).item())
 
 
 class Revo2Retargeter:
-    """Warm-started, per-frame Adam retargeter with no PPO dependency."""
+    """Per-frame Adam retargeter with no PPO dependency."""
 
     def __init__(self, hand: Revo2Kinematics, config: RetargetingConfig) -> None:
         config.validate()
@@ -199,7 +208,11 @@ class Revo2Retargeter:
         closure_target, closure_mask = self._closure_target_and_mask(q_regularization)
 
         if initial_position is None:
-            previous = self.hand.lower.to(human.device).clone()
+            # Do not initialize exactly on a tanh-saturated joint limit: its
+            # near-zero derivative can trap Adam at the open-hand boundary.
+            lower = self.hand.lower.to(human.device)
+            upper = self.hand.upper.to(human.device)
+            previous = lower + 0.05 * (upper - lower)
         else:
             previous = torch.as_tensor(
                 initial_position, dtype=human.dtype, device=human.device
@@ -210,6 +223,16 @@ class Revo2Retargeter:
                 previous,
                 self.hand.lower.to(human.device),
                 self.hand.upper.to(human.device),
+            )
+
+        if self.config.optimizer_execution == "batched":
+            return self._retarget_batched(
+                human,
+                gamma,
+                q_regularization,
+                closure_target,
+                closure_mask,
+                previous,
             )
 
         q_frames: list[torch.Tensor] = []
@@ -300,4 +323,90 @@ class Revo2Retargeter:
             regularization_loss=np.asarray(regularization_losses),
             optimizer_iterations=np.asarray(iteration_counts, dtype=np.int64),
             converged=np.asarray(converged_flags, dtype=bool),
+        )
+
+    def _retarget_batched(
+        self,
+        human: torch.Tensor,
+        gamma: torch.Tensor,
+        q_regularization: torch.Tensor,
+        closure_target: torch.Tensor,
+        closure_mask: torch.Tensor,
+        initial_position: torch.Tensor,
+    ) -> RetargetingResult:
+        """Optimize every frame independently in one vectorized Adam solve."""
+
+        lower = self.hand.lower.to(human.device)
+        upper = self.hand.upper.to(human.device)
+        initial = initial_position.expand(len(human), -1)
+        unconstrained = torch.nn.Parameter(
+            unsaturate_joint_position(initial, lower, upper).detach().clone()
+        )
+        optimizer = torch.optim.Adam([unconstrained], lr=self.config.learning_rate)
+        old_loss: torch.Tensor | None = None
+        converged = torch.zeros(len(human), dtype=torch.bool, device=human.device)
+        completed_iterations = 0
+
+        for iteration in range(self.config.iterations):
+            optimizer.zero_grad(set_to_none=True)
+            q = saturate_joint_position(unconstrained, lower, upper)
+            robot_tips = self.hand.fingertip_positions(q)
+            imitation = (robot_tips - human).square().sum(dim=(-2, -1))
+            closure = (
+                robot_tips[:, closure_mask] - closure_target[closure_mask]
+            ).square().sum(dim=(-2, -1))
+            regularization = torch.linalg.vector_norm(
+                q - q_regularization, dim=-1
+            )
+            total = (
+                gamma * imitation
+                + (1.0 - gamma) * closure
+                + self.config.regularization_weight * regularization
+            )
+            total.sum().backward()
+            torch.nn.utils.clip_grad_norm_(
+                [unconstrained], self.config.gradient_clip_norm
+            )
+            optimizer.step()
+            completed_iterations = iteration + 1
+            if (
+                old_loss is not None
+                and completed_iterations >= self.config.minimum_iterations
+            ):
+                converged = torch.abs(old_loss - total.detach()) <= (
+                    self.config.convergence_tolerance
+                )
+                if bool(torch.all(converged)):
+                    break
+            old_loss = total.detach().clone()
+
+        with torch.no_grad():
+            q = saturate_joint_position(unconstrained, lower, upper)
+            robot_tips = self.hand.fingertip_positions(q)
+            imitation = (robot_tips - human).square().sum(dim=(-2, -1))
+            closure = (
+                robot_tips[:, closure_mask] - closure_target[closure_mask]
+            ).square().sum(dim=(-2, -1))
+            regularization = torch.linalg.vector_norm(
+                q - q_regularization, dim=-1
+            )
+            total = (
+                gamma * imitation
+                + (1.0 - gamma) * closure
+                + self.config.regularization_weight * regularization
+            )
+
+        return RetargetingResult(
+            joint_positions=q.cpu().numpy(),
+            robot_fingertips=robot_tips.cpu().numpy(),
+            scaled_human_fingertips=human.cpu().numpy(),
+            gamma=gamma.cpu().numpy(),
+            total_loss=total.cpu().numpy(),
+            imitation_loss=imitation.cpu().numpy(),
+            closure_loss=closure.cpu().numpy(),
+            regularization_loss=regularization.cpu().numpy(),
+            optimizer_iterations=np.full(
+                len(human), completed_iterations, dtype=np.int64
+            ),
+            converged=converged.cpu().numpy(),
         )
