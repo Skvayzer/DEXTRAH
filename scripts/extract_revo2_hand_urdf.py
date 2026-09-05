@@ -68,6 +68,11 @@ def extract_hand_subtree(
             if not resolved.is_file():
                 raise FileNotFoundError(f"Revo2 mesh does not exist: {resolved}")
             mesh.set("filename", str(resolved))
+        elif filename and not Path(filename).is_absolute():
+            resolved = (source.parent / filename).resolve()
+            if not resolved.is_file():
+                raise FileNotFoundError(f"relative mesh does not exist: {resolved}")
+            mesh.set("filename", str(resolved))
 
     output.parent.mkdir(parents=True, exist_ok=True)
     ET.indent(result, space="  ")

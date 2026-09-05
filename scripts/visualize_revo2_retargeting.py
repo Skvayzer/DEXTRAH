@@ -147,11 +147,18 @@ def main() -> None:
         mesh_color_override=(0.68, 0.72, 0.80),
     )
     urdf_joint_names = tuple(robot_urdf.get_actuated_joint_names())
-    if urdf_joint_names != REVO2_RIGHT_ACTUATED_JOINTS:
+    missing_visual_joints = set(REVO2_RIGHT_ACTUATED_JOINTS).difference(
+        urdf_joint_names
+    )
+    if missing_visual_joints:
         raise RuntimeError(
-            "Viser URDF joint order does not match hardware order: "
-            f"{urdf_joint_names}"
+            "Viser URDF is missing Revo2 command joints: "
+            f"{sorted(missing_visual_joints)}"
         )
+    visual_joint_indices = tuple(
+        urdf_joint_names.index(name) for name in REVO2_RIGHT_ACTUATED_JOINTS
+    )
+    visual_configuration = np.zeros(len(urdf_joint_names), dtype=np.float64)
 
     human_markers = [
         server.add_icosphere(
@@ -194,7 +201,8 @@ def main() -> None:
                 if selected_display.startswith("five-component"):
                     assert q_pca is not None
                     q = q_pca[frame]
-                robot_urdf.update_cfg(q)
+                visual_configuration[list(visual_joint_indices)] = q
+                robot_urdf.update_cfg(visual_configuration)
                 tips = hand.fingertip_positions(
                     torch.as_tensor(q, dtype=torch.float64)
                 ).numpy()
