@@ -182,6 +182,7 @@ class Revo2Retargeter:
         human_fingertips: np.ndarray | torch.Tensor,
         *,
         initial_position: np.ndarray | torch.Tensor | None = None,
+        gamma_override: np.ndarray | torch.Tensor | None = None,
     ) -> RetargetingResult:
         """Retarget one complete palm-relative human grasp trajectory."""
 
@@ -202,6 +203,14 @@ class Revo2Retargeter:
             dtype=human.dtype,
             device=human.device,
         )
+        if gamma_override is not None:
+            gamma = torch.as_tensor(
+                gamma_override, dtype=human.dtype, device=human.device
+            )
+            if gamma.shape != (len(human),):
+                raise ValueError("gamma_override must contain one value per frame")
+            if torch.any((gamma < 0.0) | (gamma > 1.0)):
+                raise ValueError("gamma_override values must lie in [0, 1]")
         q_regularization = nominal_revo2_configuration(
             self.hand, self.config.mode
         ).to(human.device)

@@ -43,9 +43,20 @@ def test_nominal_grasps_respect_limits_and_power_is_more_curled():
     assert power[2:].sum() > precision[2:].sum()
 
 
-def test_fingertip_scale_matches_rms_extent():
+def test_fingertip_scale_matches_uniform_extent_ratio():
     robot = np.ones((5, 3)) * 2.0
     human = np.ones((3, 5, 3))
+
+    scale = estimate_fingertip_scale(human, robot)
+
+    assert scale == pytest.approx(2.0)
+
+
+def test_fingertip_scale_is_robust_to_one_morphology_outlier():
+    human = np.zeros((2, 5, 3))
+    human[..., 2] = 1.0
+    robot = np.zeros((5, 3))
+    robot[:, 2] = [8.0, 2.0, 2.0, 2.0, 2.0]
 
     scale = estimate_fingertip_scale(human, robot)
 
@@ -118,3 +129,19 @@ def test_sequential_optimizer_remains_available_for_warm_starting():
 
     assert result.joint_positions.shape == (1, 6)
     assert np.isfinite(result.total_loss).all()
+
+
+def test_gamma_override_supports_pure_imitation_calibration():
+    hand = Revo2Kinematics(URDF)
+    target = hand.fingertip_positions(
+        hand.lower + 0.3 * (hand.upper - hand.lower)
+    ).repeat(4, 1, 1)
+    result = Revo2Retargeter(
+        hand, RetargetingConfig(iterations=10, minimum_iterations=2)
+    ).retarget(target, gamma_override=np.ones(4))
+
+    np.testing.assert_array_equal(result.gamma, np.ones(4))
+    with pytest.raises(ValueError, match="one value per frame"):
+        Revo2Retargeter(
+            hand, RetargetingConfig(iterations=1, minimum_iterations=0)
+        ).retarget(target, gamma_override=np.ones(3))

@@ -30,7 +30,6 @@ from dextrah_lab.retargeting import (  # noqa: E402
     RetargetingConfig,
     Revo2Kinematics,
     Revo2Retargeter,
-    estimate_fingertip_scale,
     fit_pca_action_space,
     iter_sequences,
 )
@@ -61,8 +60,13 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--scale",
         default="auto",
-        help="human-to-robot spatial scale, or 'auto' for morphology RMS matching",
+        help="human-to-robot spatial scale, or 'auto' for pre-grasp IK search",
     )
+    parser.add_argument("--scale-search-min", type=float, default=0.65)
+    parser.add_argument("--scale-search-max", type=float, default=1.25)
+    parser.add_argument("--scale-search-steps", type=int, default=13)
+    parser.add_argument("--scale-calibration-frames", type=int, default=64)
+    parser.add_argument("--scale-search-iterations", type=int, default=150)
     parser.add_argument("--regularization-weight", type=float, default=1.0e-3)
     parser.add_argument("--learning-rate", type=float, default=3.0e-2)
     parser.add_argument("--iterations", type=int, default=250)
@@ -136,6 +140,67 @@ def _prepare_output(output_dir: Path, *, overwrite: bool) -> Path:
     trajectories = output_dir / "trajectories"
     trajectories.mkdir(parents=True, exist_ok=True)
     return trajectories
+
+
+def _calibrate_scale(
+    hand: Revo2Kinematics,
+    fingertips: list[np.ndarray],
+    args: argparse.Namespace,
+) -> tuple[float, dict[str, object]]:
+    """Choose alpha by minimizing pure-imitation IK error on pre-grasp frames."""
+
+    if not 0.0 < args.scale_search_min < args.scale_search_max:
+        raise ValueError("scale search requires 0 < min < max")
+    if args.scale_search_steps < 2:
+        raise ValueError("scale search steps must be at least two")
+    if args.scale_calibration_frames <= 0 or args.scale_search_iterations <= 0:
+        raise ValueError("scale calibration frames/iterations must be positive")
+    pregrasp = np.stack([tips[0] for tips in fingertips])
+    if len(pregrasp) > args.scale_calibration_frames:
+        selected = np.linspace(
+            0, len(pregrasp) - 1, args.scale_calibration_frames, dtype=np.int64
+        )
+        pregrasp = pregrasp[selected]
+    candidates = np.linspace(
+        args.scale_search_min, args.scale_search_max, args.scale_search_steps
+    )
+    scores: list[float] = []
+    for candidate in candidates:
+        config = RetargetingConfig(
+            mode="power",
+            scale=float(candidate),
+            regularization_weight=0.0,
+            learning_rate=args.learning_rate,
+            iterations=args.scale_search_iterations,
+            minimum_iterations=min(40, args.scale_search_iterations),
+            convergence_tolerance=args.convergence_tolerance,
+            gamma_schedule=args.gamma_schedule,
+            optimizer_execution="batched",
+        )
+        result = Revo2Retargeter(hand, config).retarget(
+            pregrasp, gamma_override=np.ones(len(pregrasp))
+        )
+        score = float(result.fingertip_error.mean())
+        scores.append(score)
+        print(
+            f"Scale calibration alpha={candidate:.5f}: "
+            f"mean fingertip error={1000.0 * score:.2f} mm",
+            flush=True,
+        )
+    best_index = int(np.argmin(scores))
+    if best_index in {0, len(candidates) - 1}:
+        print(
+            "WARNING: best scale is at the search boundary; expand the range",
+            flush=True,
+        )
+    return float(candidates[best_index]), {
+        "method": "pregrasp_pure_imitation_ik_grid",
+        "frames": int(len(pregrasp)),
+        "iterations": int(args.scale_search_iterations),
+        "candidates": candidates.tolist(),
+        "mean_fingertip_error_m": scores,
+        "best_index": best_index,
+    }
 
 
 def _write_result(
@@ -226,10 +291,10 @@ def main() -> None:
     if not prepared:
         raise RuntimeError("frame filtering removed every DexYCB sequence")
 
+    scale_calibration = None
     if requested_scale is None:
-        open_tips = hand.fingertip_positions(hand.lower).detach().cpu().numpy()
-        scale = estimate_fingertip_scale(np.concatenate(fingertips), open_tips)
-        scale_source = "morphology_rms"
+        scale, scale_calibration = _calibrate_scale(hand, fingertips, args)
+        scale_source = "pregrasp_ik_grid_search"
     else:
         scale = requested_scale
         scale_source = "command_line"
@@ -295,6 +360,7 @@ def main() -> None:
         "grasp_modes": list(modes),
         "scale": scale,
         "scale_source": scale_source,
+        "scale_calibration": scale_calibration,
         "gamma_schedule": args.gamma_schedule,
         "optimizer_execution": args.optimizer_execution,
         "sequence_count": len(prepared),
