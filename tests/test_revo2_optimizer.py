@@ -123,6 +123,57 @@ def test_batched_optimizer_sequence_is_finite():
     assert not np.allclose(result.joint_positions[0], hand.lower.numpy())
 
 
+def test_batched_optimizer_is_invariant_to_trajectory_grouping():
+    hand = Revo2Kinematics(URDF)
+    q = torch.stack(
+        [
+            hand.lower + fraction * (hand.upper - hand.lower)
+            for fraction in (0.2, 0.4, 0.6, 0.3, 0.5)
+        ]
+    )
+    targets = hand.fingertip_positions(q)
+    config = RetargetingConfig(
+        iterations=30,
+        minimum_iterations=30,
+        convergence_tolerance=0.0,
+        gradient_clip_norm=1.0e-4,
+    )
+    retargeter = Revo2Retargeter(hand, config)
+
+    first = retargeter.retarget(targets[:3])
+    second = retargeter.retarget(targets[3:])
+    combined_gamma = np.concatenate((first.gamma, second.gamma))
+    combined = retargeter.retarget(targets, gamma_override=combined_gamma)
+
+    np.testing.assert_allclose(
+        combined.joint_positions,
+        np.concatenate((first.joint_positions, second.joint_positions)),
+        rtol=1.0e-10,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(combined.gamma, [1.0, 0.5, 0.0, 1.0, 0.0])
+
+
+def test_retargeting_result_frame_slice_preserves_diagnostics():
+    hand = Revo2Kinematics(URDF)
+    targets = hand.fingertip_positions(
+        hand.lower + 0.4 * (hand.upper - hand.lower)
+    ).repeat(4, 1, 1)
+    result = Revo2Retargeter(
+        hand, RetargetingConfig(iterations=2, minimum_iterations=2)
+    ).retarget(targets)
+
+    sliced = result.frame_slice(1, 3)
+
+    assert sliced.joint_positions.shape == (2, 6)
+    np.testing.assert_array_equal(sliced.gamma, result.gamma[1:3])
+    np.testing.assert_array_equal(
+        sliced.fingertip_error, result.fingertip_error[1:3]
+    )
+    with pytest.raises(ValueError, match="frame slice"):
+        result.frame_slice(2, 2)
+
+
 def test_sequential_optimizer_remains_available_for_warm_starting():
     hand = Revo2Kinematics(URDF)
     target = hand.fingertip_positions(

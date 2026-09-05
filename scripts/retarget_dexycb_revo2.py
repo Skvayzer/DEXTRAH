@@ -26,11 +26,14 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from dextrah_lab.retargeting import (  # noqa: E402
+    DexYCBSequence,
     REVO2_RIGHT_ACTUATED_JOINTS,
     RetargetingConfig,
+    RetargetingResult,
     Revo2Kinematics,
     Revo2Retargeter,
     fit_pca_action_space,
+    gamma_values,
     iter_sequences,
 )
 
@@ -77,6 +80,12 @@ def _arguments() -> argparse.Namespace:
         choices=("batched", "sequential"),
         default="batched",
         help="vectorized independent frames (fast) or trajectory warm starts",
+    )
+    parser.add_argument(
+        "--trajectory-batch-size",
+        type=int,
+        default=16,
+        help="captures per vectorized Adam solve (batched execution only)",
     )
     parser.add_argument(
         "--gamma-schedule", choices=("endpoint", "paper_literal"), default="endpoint"
@@ -237,6 +246,51 @@ def _write_result(
     )
 
 
+def _retarget_batch(
+    hand: Revo2Kinematics,
+    batch: list[tuple[DexYCBSequence, np.ndarray]],
+    *,
+    mode: str,
+    scale: float,
+    args: argparse.Namespace,
+) -> list[RetargetingResult]:
+    """Retarget captures together without blending their gamma schedules."""
+
+    config = RetargetingConfig(
+        mode=mode,
+        scale=scale,
+        regularization_weight=args.regularization_weight,
+        learning_rate=args.learning_rate,
+        iterations=args.iterations,
+        minimum_iterations=args.minimum_iterations,
+        convergence_tolerance=args.convergence_tolerance,
+        gamma_schedule=args.gamma_schedule,
+        optimizer_execution=args.optimizer_execution,
+    )
+    if args.optimizer_execution == "sequential":
+        if len(batch) != 1:
+            raise ValueError("sequential retargeting requires one trajectory per batch")
+        return [Revo2Retargeter(hand, config).retarget(batch[0][1])]
+
+    lengths = [len(tips) for _, tips in batch]
+    fingertips = np.concatenate([tips for _, tips in batch])
+    gamma = np.concatenate(
+        [
+            gamma_values(length, schedule=args.gamma_schedule).cpu().numpy()
+            for length in lengths
+        ]
+    )
+    combined = Revo2Retargeter(hand, config).retarget(
+        fingertips, gamma_override=gamma
+    )
+    results: list[RetargetingResult] = []
+    start = 0
+    for length in lengths:
+        results.append(combined.frame_slice(start, start + length))
+        start += length
+    return results
+
+
 def main() -> None:
     args = _arguments()
     modes = _parse_modes(args.modes)
@@ -248,6 +302,8 @@ def main() -> None:
         raise ValueError("sequence limit must be positive")
     if args.max_frames_per_sequence is not None and args.max_frames_per_sequence <= 0:
         raise ValueError("max frames per sequence must be positive")
+    if args.trajectory_batch_size <= 0:
+        raise ValueError("trajectory batch size must be positive")
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -269,7 +325,7 @@ def main() -> None:
     hand = Revo2Kinematics(args.urdf).to(device)
 
     fingertips: list[np.ndarray] = []
-    prepared: list[tuple[object, np.ndarray]] = []
+    prepared: list[tuple[DexYCBSequence, np.ndarray]] = []
     for sequence in sequences:
         indices = np.arange(len(sequence.frame_indices))[:: args.frame_stride]
         if args.max_frames_per_sequence is not None:
@@ -308,43 +364,48 @@ def main() -> None:
     all_fingertip_errors: list[np.ndarray] = []
     manifest: list[dict[str, object]] = []
     started = time.monotonic()
-    for sequence_index, (sequence, tips) in enumerate(prepared, start=1):
-        for mode in modes:
-            config = RetargetingConfig(
-                mode=mode,
-                scale=scale,
-                regularization_weight=args.regularization_weight,
-                learning_rate=args.learning_rate,
-                iterations=args.iterations,
-                minimum_iterations=args.minimum_iterations,
-                convergence_tolerance=args.convergence_tolerance,
-                gamma_schedule=args.gamma_schedule,
-                optimizer_execution=args.optimizer_execution,
-            )
-            result = Revo2Retargeter(hand, config).retarget(tips)
-            filename = f"{sequence.subject}_{sequence.capture}_{mode}.npz"
-            output_path = trajectory_dir / filename
-            _write_result(output_path, sequence=sequence, mode=mode, result=result)
-            all_joint_positions.append(result.joint_positions)
-            all_fingertip_errors.append(result.fingertip_error)
-            manifest.append(
-                {
-                    "subject": sequence.subject,
-                    "capture": sequence.capture,
-                    "camera_serial": sequence.camera_serial,
-                    "grasp_mode": mode,
-                    "frames": int(len(result.joint_positions)),
-                    "ycb_grasp_id": sequence.ycb_grasp_id,
-                    "mean_fingertip_error_m": float(result.fingertip_error.mean()),
-                    "p95_fingertip_error_m": float(
-                        np.percentile(result.fingertip_error, 95.0)
-                    ),
-                    "trajectory": str(output_path.relative_to(args.output_dir)),
-                }
-            )
+    batch_size = (
+        1
+        if args.optimizer_execution == "sequential"
+        else min(args.trajectory_batch_size, len(prepared))
+    )
+    for batch_start in range(0, len(prepared), batch_size):
+        batch = prepared[batch_start : batch_start + batch_size]
+        results_by_mode = {
+            mode: _retarget_batch(hand, batch, mode=mode, scale=scale, args=args)
+            for mode in modes
+        }
+        for batch_offset, (sequence, _) in enumerate(batch):
+            for mode in modes:
+                result = results_by_mode[mode][batch_offset]
+                filename = f"{sequence.subject}_{sequence.capture}_{mode}.npz"
+                output_path = trajectory_dir / filename
+                _write_result(output_path, sequence=sequence, mode=mode, result=result)
+                all_joint_positions.append(result.joint_positions)
+                all_fingertip_errors.append(result.fingertip_error)
+                manifest.append(
+                    {
+                        "subject": sequence.subject,
+                        "capture": sequence.capture,
+                        "camera_serial": sequence.camera_serial,
+                        "grasp_mode": mode,
+                        "frames": int(len(result.joint_positions)),
+                        "ycb_grasp_id": sequence.ycb_grasp_id,
+                        "mean_fingertip_error_m": float(
+                            result.fingertip_error.mean()
+                        ),
+                        "p95_fingertip_error_m": float(
+                            np.percentile(result.fingertip_error, 95.0)
+                        ),
+                        "trajectory": str(output_path.relative_to(args.output_dir)),
+                    }
+                )
         elapsed = time.monotonic() - started
+        batch_stop = batch_start + len(batch)
+        final_sequence = batch[-1][0]
         print(
-            f"[{sequence_index}/{len(prepared)}] {sequence.subject}/{sequence.capture} "
+            f"[{batch_stop}/{len(prepared)}] through "
+            f"{final_sequence.subject}/{final_sequence.capture} "
             f"({elapsed:.1f}s elapsed)",
             flush=True,
         )
@@ -363,6 +424,7 @@ def main() -> None:
         "scale_calibration": scale_calibration,
         "gamma_schedule": args.gamma_schedule,
         "optimizer_execution": args.optimizer_execution,
+        "trajectory_batch_size": batch_size,
         "sequence_count": len(prepared),
         "retargeted_trajectory_count": len(manifest),
         "frame_stride": args.frame_stride,

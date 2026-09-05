@@ -75,6 +75,24 @@ class RetargetingResult:
             self.robot_fingertips - self.scaled_human_fingertips, axis=-1
         )
 
+    def frame_slice(self, start: int, stop: int) -> RetargetingResult:
+        """Return a contiguous trajectory view from a batched solve."""
+
+        if not 0 <= start < stop <= len(self.joint_positions):
+            raise ValueError("frame slice must satisfy 0 <= start < stop <= frames")
+        return RetargetingResult(
+            joint_positions=self.joint_positions[start:stop],
+            robot_fingertips=self.robot_fingertips[start:stop],
+            scaled_human_fingertips=self.scaled_human_fingertips[start:stop],
+            gamma=self.gamma[start:stop],
+            total_loss=self.total_loss[start:stop],
+            imitation_loss=self.imitation_loss[start:stop],
+            closure_loss=self.closure_loss[start:stop],
+            regularization_loss=self.regularization_loss[start:stop],
+            optimizer_iterations=self.optimizer_iterations[start:stop],
+            converged=self.converged[start:stop],
+        )
+
 
 def gamma_values(
     num_frames: int,
@@ -375,9 +393,19 @@ class Revo2Retargeter:
                 + self.config.regularization_weight * regularization
             )
             total.sum().backward()
-            torch.nn.utils.clip_grad_norm_(
-                [unconstrained], self.config.gradient_clip_norm
+            # Appendix D optimizes every data point independently.  Clip each
+            # frame independently too, so changing the vectorization batch
+            # size cannot couple otherwise independent Adam problems.
+            if unconstrained.grad is None:  # pragma: no cover - autograd invariant
+                raise RuntimeError("retargeting gradient is unexpectedly missing")
+            gradient_norm = torch.linalg.vector_norm(
+                unconstrained.grad, dim=-1, keepdim=True
             )
+            gradient_scale = torch.clamp(
+                self.config.gradient_clip_norm / (gradient_norm + 1.0e-12),
+                max=1.0,
+            )
+            unconstrained.grad.mul_(gradient_scale)
             optimizer.step()
             completed_iterations = iteration + 1
             if (
