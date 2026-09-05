@@ -173,6 +173,30 @@ def contact_gate(
     return thumb_contact & other_contact
 
 
+def aggregate_body_contact_forces(
+    body_forces: torch.Tensor,
+    body_groups: tuple[tuple[int, ...], ...] | list[list[int]],
+) -> torch.Tensor:
+    """Sum raw contact forces into the palm/fingertip groups used by ADEPT.
+
+    The public Allegro USD reports BioTac-surface contacts on both the distal
+    ``*_link_3`` rigid body and the child ``*_biotac_tip`` body.  Grouping the
+    two preserves the physical resultant instead of silently dropping distal
+    contacts.
+    """
+
+    if body_forces.ndim != 3 or body_forces.shape[-1] != 3:
+        raise ValueError("body_forces must have shape (batch, bodies, 3)")
+    if not body_groups or any(not group for group in body_groups):
+        raise ValueError("every output contact group must contain a body index")
+    body_count = body_forces.shape[1]
+    if any(index < 0 or index >= body_count for group in body_groups for index in group):
+        raise IndexError("contact body index is out of range")
+    return torch.stack(
+        [body_forces[:, group, :].sum(dim=1) for group in body_groups], dim=1
+    )
+
+
 def reposing_reward(
     hand_to_object_distance: torch.Tensor,
     pose_error: torch.Tensor,

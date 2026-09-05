@@ -4,6 +4,7 @@ import torch
 
 from dextrah_lab.tasks.dextrah_kuka_allegro.adept_mdp import (
     ADEPT_PRIMITIVES,
+    aggregate_body_contact_forces,
     box_pose_keypoints,
     contact_gate,
     keypoint_pose_error,
@@ -66,6 +67,17 @@ def test_contact_gate_requires_thumb_and_another_finger():
     forces[3, 3, 0] = 1.0
     forces[3, 2, 0] = 3.0
     assert contact_gate(forces).tolist() == [False, False, True, False]
+
+
+def test_contact_aggregation_preserves_distal_and_biotac_resultant():
+    raw = torch.zeros(2, 5, 3)
+    raw[:, 1, 0] = 0.75
+    raw[:, 2, 0] = 0.50
+    raw[:, 3, 1] = -2.0
+    grouped = aggregate_body_contact_forces(raw, ((0,), (1, 2), (3, 4)))
+    assert grouped.shape == (2, 3, 3)
+    torch.testing.assert_close(grouped[:, 1, 0], torch.full((2,), 1.25))
+    torch.testing.assert_close(grouped[:, 2, 1], torch.full((2,), -2.0))
 
 
 def test_reposing_reward_gates_goal_but_not_reach():

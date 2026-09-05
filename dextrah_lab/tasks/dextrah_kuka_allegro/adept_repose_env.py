@@ -13,6 +13,7 @@ from dextrah_lab.adept.curriculum import RollingSuccessRate
 
 from .adept_mdp import (
     ADEPT_PRIMITIVES,
+    aggregate_body_contact_forces,
     contact_gate,
     keypoint_pose_error,
     primitive_surface_points,
@@ -119,12 +120,8 @@ class AdeptKukaAllegroReposeEnv(DextrahKukaAllegroEnv):
             self._apply_adept_observation_noise()
         if hasattr(self, "contact_sensor"):
             raw_forces = self.contact_sensor.data.net_forces_w
-            self.fingertip_contact_forces = torch.stack(
-                [
-                    raw_forces[:, indices, :].sum(dim=1)
-                    for indices in self._ordered_contact_body_indices()
-                ],
-                dim=1,
+            self.fingertip_contact_forces = aggregate_body_contact_forces(
+                raw_forces, self._ordered_contact_body_indices()
             )
 
     def _adr_fraction(self) -> float:
