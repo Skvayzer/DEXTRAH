@@ -23,6 +23,7 @@ from .revo2_optimizer import (
     nominal_revo2_configuration,
 )
 from .pca import PCAArtifact, fit_pca_action_space
+from .pca_control import FrozenPCAHandActionMap, load_fabric_pca_matrix
 from .validation import TrajectoryValidation, validate_trajectory_arrays
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "REVO2_RIGHT_FINGERTIP_LINKS",
     "Revo2Kinematics",
     "PCAArtifact",
+    "FrozenPCAHandActionMap",
     "RetargetingConfig",
     "RetargetingResult",
     "Revo2Retargeter",
@@ -41,6 +43,7 @@ __all__ = [
     "gamma_values",
     "iter_sequences",
     "load_sequence",
+    "load_fabric_pca_matrix",
     "palm_relative_fingertips",
     "nominal_revo2_configuration",
     "saturate_joint_position",
