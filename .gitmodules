@@ -1,0 +1,3 @@
+[submodule "dextrah_lab/assets/revo2_description"]
+	path = dextrah_lab/assets/revo2_description
+	url = https://github.com/BrainCoTech/revo2_description.git
