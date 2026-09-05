@@ -16,7 +16,7 @@ once, and PPO later consumes a frozen five-dimensional hand task map.
   regularization terms.
 - The bounded parameterization
   `q_robot = lower + 0.5 * (tanh(q) + 1) * (upper - lower)`.
-- The human-to-closure gamma schedule, separate power and precision-tripod
+- The human-to-closure gamma schedule, separate power and precision
   datasets, PCA fitting, and a frozen five-dimensional `x = A q_hand` task map.
 - Exact normalized-policy target scaling and the G1/Revo2 FABRICS matrix
   `[zeros(5, 7), A]`.
@@ -64,7 +64,7 @@ python scripts/retarget_dexycb_revo2.py \
   --output-dir /data2/users/konstantin.smirnov/dex-ycb/revo2-pilot \
   --sequence-limit 3 \
   --max-frames-per-sequence 20 \
-  --modes power,precision_tripod \
+  --modes power,precision \
   --pca-components 5
 ```
 
@@ -74,7 +74,7 @@ Then process all available right-hand captures:
 python scripts/retarget_dexycb_revo2.py \
   --dataset-root /data2/users/konstantin.smirnov/dex-ycb/data \
   --output-dir /data2/users/konstantin.smirnov/dex-ycb/revo2-full-v1 \
-  --modes power,precision_tripod \
+  --modes power,precision \
   --iterations 250 \
   --minimum-iterations 40 \
   --pca-components 5 \

@@ -48,8 +48,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF)
     parser.add_argument(
         "--modes",
-        default="power,precision_tripod",
-        help="comma-separated power, precision, and/or precision_tripod",
+        default="power,precision",
+        help="comma-separated power, precision, and/or optional precision_tripod",
     )
     parser.add_argument("--sequence-limit", type=int)
     parser.add_argument("--frame-stride", type=int, default=1)
