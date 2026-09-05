@@ -28,6 +28,11 @@ here. The default gamma schedule follows the appendix prose (first frame 1,
 last frame 0); `--gamma-schedule paper_literal` preserves its printed
 off-by-one equation.
 
+The published posture semantics are preserved: Revo2 power regularization is
+`[1.0, 0.75, 1.0, 1.0, 1.0, 1.0]` radians; precision regularization opposes the
+thumb at `[1.0, 0.75]` while keeping the four finger commands at their lower
+limits. Distal flexions follow each URDF's mimic ratios.
+
 The paper's `alpha=1.6` is specific to its human/Allegro size mismatch. In
 `--scale auto` mode this implementation records a deterministic grid search and
 chooses the Revo2 scale with the lowest pure-imitation IK error on representative

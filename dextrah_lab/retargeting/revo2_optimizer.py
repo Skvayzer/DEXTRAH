@@ -106,23 +106,25 @@ def gamma_values(
 def nominal_revo2_configuration(
     hand: Revo2Kinematics, mode: GraspMode
 ) -> torch.Tensor:
-    """Return a morphology-aware regularization posture inside URDF limits."""
+    """Map Appendix D's Allegro regularization postures to Revo2 motors.
+
+    Revo2 has one commanded flexion per non-thumb finger, with its distal
+    flexion supplied by the URDF mimic.  The paper's opposed-thumb values map
+    directly to the first two motors.  Its straight/curl values map to the four
+    commanded finger flexions.
+    """
 
     if mode == "power":
-        fraction = torch.tensor(
-            [0.82, 0.82, 0.82, 0.86, 0.90, 0.94], dtype=hand.lower.dtype
+        posture = torch.tensor(
+            [1.0, 0.75, 1.0, 1.0, 1.0, 1.0], dtype=hand.lower.dtype
         )
-    elif mode == "precision":
-        fraction = torch.tensor(
-            [0.82, 0.50, 0.48, 0.22, 0.08, 0.04], dtype=hand.lower.dtype
-        )
-    elif mode == "precision_tripod":
-        fraction = torch.tensor(
-            [0.82, 0.50, 0.48, 0.38, 0.08, 0.04], dtype=hand.lower.dtype
+    elif mode in {"precision", "precision_tripod"}:
+        posture = torch.tensor(
+            [1.0, 0.75, 0.0, 0.0, 0.0, 0.0], dtype=hand.lower.dtype
         )
     else:
         raise ValueError(f"unsupported grasp mode {mode!r}")
-    return hand.lower + fraction.to(hand.lower.device) * (hand.upper - hand.lower)
+    return torch.clamp(posture.to(hand.lower.device), hand.lower, hand.upper)
 
 
 def estimate_fingertip_scale(

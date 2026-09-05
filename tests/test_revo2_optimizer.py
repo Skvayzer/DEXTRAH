@@ -38,9 +38,19 @@ def test_nominal_grasps_respect_limits_and_power_is_more_curled():
 
     assert torch.all(power > hand.lower)
     assert torch.all(power < hand.upper)
-    assert torch.all(precision > hand.lower)
-    assert torch.all(precision < hand.upper)
+    assert torch.all(precision >= hand.lower)
+    assert torch.all(precision <= hand.upper)
     assert power[2:].sum() > precision[2:].sum()
+    torch.testing.assert_close(
+        power,
+        torch.tensor([1.0, 0.75, 1.0, 1.0, 1.0, 1.0], dtype=torch.float64),
+    )
+    torch.testing.assert_close(
+        precision[:2], torch.tensor([1.0, 0.75], dtype=torch.float64)
+    )
+    torch.testing.assert_close(
+        precision[2:], torch.zeros(4, dtype=torch.float64)
+    )
 
 
 def test_fingertip_scale_matches_uniform_extent_ratio():
