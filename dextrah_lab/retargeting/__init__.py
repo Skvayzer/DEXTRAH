@@ -23,6 +23,7 @@ from .revo2_optimizer import (
     nominal_revo2_configuration,
 )
 from .pca import PCAArtifact, fit_pca_action_space
+from .validation import TrajectoryValidation, validate_trajectory_arrays
 
 __all__ = [
     "DEXYCB_FINGERTIP_INDICES",
@@ -34,6 +35,7 @@ __all__ = [
     "RetargetingConfig",
     "RetargetingResult",
     "Revo2Retargeter",
+    "TrajectoryValidation",
     "estimate_fingertip_scale",
     "fit_pca_action_space",
     "gamma_values",
@@ -43,4 +45,5 @@ __all__ = [
     "nominal_revo2_configuration",
     "saturate_joint_position",
     "unsaturate_joint_position",
+    "validate_trajectory_arrays",
 ]
