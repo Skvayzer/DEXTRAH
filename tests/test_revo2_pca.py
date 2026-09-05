@@ -75,3 +75,14 @@ def test_pca_rejects_constant_data() -> None:
             joint_lower=np.zeros(6),
             joint_upper=np.ones(6),
         )
+
+
+def test_fixed_pca_dimension_requires_enough_samples() -> None:
+    with pytest.raises(ValueError, match="require at least 5 samples"):
+        fit_pca_action_space(
+            np.arange(18, dtype=np.float64).reshape(3, 6),
+            joint_names=tuple(f"joint_{i}" for i in range(6)),
+            joint_lower=np.zeros(6),
+            joint_upper=np.full(6, 20.0),
+            components=5,
+        )

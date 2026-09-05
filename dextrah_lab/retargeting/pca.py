@@ -208,6 +208,10 @@ def fit_pca_action_space(
     _, singular_values, right_vectors = np.linalg.svd(
         positions - mean, full_matrices=False
     )
+    if components is not None and components > right_vectors.shape[0]:
+        raise ValueError(
+            f"{components} PCA components require at least {components} samples"
+        )
     variance = np.square(singular_values)
     total_variance = float(variance.sum())
     if total_variance <= np.finfo(np.float64).eps:
