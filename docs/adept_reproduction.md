@@ -23,10 +23,10 @@ Every inferred choice must be documented next to its configuration field.
 
 ## Current runnable target
 
-The Gym task `Adept-Kuka-Allegro-Repose` keeps DextrAH's reposing scene and
-reward but replaces its policy/controller boundary with ADEPT's 23-D relative
-C-space interface. The original `Dextrah-Kuka-Allegro` task remains unchanged
-as the 11-D baseline.
+The Gym task `Adept-Kuka-Allegro-Repose` uses DextrAH's KUKA-Allegro simulator
+base with ADEPT's reposing MDP, 23-D relative C-space interface, asymmetric
+observations, contact gate, ADR, and Appendix-B fabric. The original
+`Dextrah-Kuka-Allegro` task remains available as the 11-D upstream baseline.
 
 On the TL server, create the isolated environment and hydrate Git LFS assets:
 
@@ -40,15 +40,18 @@ metadata requests dependency versions that conflict with Isaac Sim 5. The
 setup script retains Isaac Sim's NumPy 1.26, NetworkX 3.3, and PyCollada 0.9.3;
 the controller contains the one runtime compatibility shim urdfpy needs.
 
-Submit the one-epoch, 16-environment smoke test through Slurm:
+Run the physics/contact validator, then the inexpensive PPO smoke test:
 
 ```bash
 cd ~/data1/DEXTRAH-ADEPT
+sbatch scripts/slurm/validate_adept_repose.sbatch
 sbatch scripts/slurm/smoke_adept_repose.sbatch
 ```
 
-The smoke test intentionally disables CUDA graph capture. Enable it only after
-the eager controller and observation/action contracts pass.
+Both launchers request exactly one `rtx_6000_ada`. They intentionally use eager
+FABRICS evaluation. CUDA-graph replay fails on the current Isaac Sim 5 / Warp /
+driver stack in both unmodified DextrAH and this branch, so it is not a valid
+training option on this workstation.
 
 ## Training sequence
 
@@ -57,11 +60,12 @@ explicit environment variables so a downstream job cannot silently select the
 wrong upstream run.
 
 ```bash
-# Stage 1: 16-policy reposing PBT population
-sbatch scripts/slurm/train_adept_pbt.sbatch
+# Stage 1 on this workstation: one 4096-environment PPO policy
+RUN_NAME=0_adept_repose_seed42 \
+  sbatch scripts/slurm/train_adept_repose_single.sbatch
 
-# Or validate/train one policy before allocating a full PBT population
-sbatch scripts/slurm/train_adept_repose_single.sbatch
+# Paper-reference path only: requires 16 simultaneous GPUs/policies
+# sbatch scripts/slurm/train_adept_pbt.sbatch
 
 # Stage 2a: new FMB actor, supervised by the selected Stage-1 actor
 TEACHER_CHECKPOINT=/absolute/path/repose.pth \
@@ -84,15 +88,31 @@ STAGE1_STUDENT="$PWD/logs/adept_rgb_stage1.pth" \
   sbatch scripts/slurm/train_adept_vision_dagger.sbatch
 ```
 
-The single-policy launcher enables Weights & Biases by default. Set
-`WANDB_ACTIVATE=false` for an offline validation run; use `RUN_NAME`, `SEED`,
-`NUM_ENVS`, and `MAX_ITERATIONS` to label and size a run explicitly. For
-example:
+The single-policy launcher enables Weights & Biases by default and uses the
+stable run name as the W&B resume ID. It stops at 8 billion environment frames,
+saves every 50 epochs, restores PPO and ADR state from the newest complete
+checkpoint, and requests one RTX 6000 Ada. Re-submit the same command after a
+node interruption or time limit; `AUTO_RESUME=true` is the default. Set
+`WANDB_ACTIVATE=false` only for an offline run.
+
+Useful short run:
 
 ```bash
 MAX_ITERATIONS=100 RUN_NAME=0_adept_repose_pilot_seed42 \
   sbatch scripts/slurm/train_adept_repose_single.sbatch
 ```
+
+The full-scale gate measured about 21,557 total environment frames/s after
+startup. At that rate, 100 epochs take about 10 minutes of training plus the
+roughly 11-minute cold scene build; 8 billion frames take about 4.3 days. Treat
+that as a planning estimate, because contacts, ADR progression, filesystem
+load, and preemption can change throughput.
+
+One GPU cannot reproduce ADEPT's decentralized 16-policy PBT search. The
+single-GPU run fixes the reported Table-5 PPO hyperparameters and reproduces
+the policy, MDP, fabric, and frame budget as closely as the released artifacts
+permit. Its learning curve is therefore not expected to be numerically
+identical to the paper's selected PBT worker.
 
 Set `TASK=Adept-Kuka-Allegro-FMB-SquareRound` for the square/round teacher
 stages and append `-Vision` for its student stages. ADEPT trains each geometry
@@ -115,7 +135,9 @@ and embodiment independently; these launchers intentionally do not mix them.
   geometric posture, collision avoidance, joint limits, damping, and speed
   control.
 - [x] Keep the controller at 60 Hz with two fabric integration steps.
-- [ ] Validate eager and CUDA-graph rollouts for finite states and joint limits.
+- [x] Validate eager rollouts for finite states and joint limits.
+- [x] Establish that CUDA-graph replay is unavailable on this workstation by
+  reproducing the same failure on the pre-ADEPT DextrAH controller.
 
 ### M2 — reposing pre-training MDP
 
@@ -125,8 +147,8 @@ and embodiment independently; these launchers intentionally do not mix them.
 - [x] Implement the paper's 8-keypoint pose error, contact-gated reward, four-second
   episodes, and 50-step ADR curriculum.
 - [x] Configure the asymmetric PPO actor-critic and 16-worker decentralized PBT.
-- [ ] Train an asymmetric PPO actor-critic; enable PBT only after a
-  deterministic single-policy run passes.
+- [x] Validate two PPO updates with 4,096 environments on one RTX 6000 Ada.
+- [ ] Complete the 8-billion-frame single-policy run and evaluate multiple seeds.
 
 ### M3 — FMB post-training
 
@@ -159,9 +181,22 @@ and embodiment independently; these launchers intentionally do not mix them.
 
 ## Validation gates
 
-Each milestone must land as one or more focused commits and pass its local unit
+Each milestone lands as one or more focused commits and passes its local unit
 tests before long Slurm training starts. Expensive experiments are launched from
 clean, pushed commits; output checkpoints and logs are not committed.
+
+The Stage-1 implementation passed these workstation gates on 2026-09-04/05:
+
+- 51 CPU unit tests;
+- job 264: distal-link + BioTac contact aggregation, index and thumb both above
+  1 N, finite observations/rewards/fabric states, and positive joint margin;
+- jobs 229/231: checkpoint creation and continuation with restored ADR state;
+- job 232: an accelerated end-to-end ADR transition from level 0 to 1;
+- job 265: 4,096 environments and two PPO updates on one RTX 6000 Ada,
+  approximately 21,557 total frames/s and 22 GB host peak RSS.
+
+These gates establish execution readiness, not learned-task success. Success
+requires the long optimization run and checkpoint evaluation.
 
 The first scientific gate is not final insertion success. It is preservation of
 the pretrained reposing success rate during the first post-training updates.
@@ -172,12 +207,12 @@ multi-seed comparisons, or vision distillation.
 
 | ADEPT v1 section | Implementation | Fidelity / remaining validation |
 |---|---|---|
-| A.1 reposing MDP | `adept_mdp.py`, `adept_repose_env.py`, generated 16-object set | Reported reward, contact gate, 4 s episodes, 64-point cloud and 50 ADR steps are implemented. Goal sampling box is not numerically published and is marked inferred. Runtime object-scale annealing remains constrained by DextrAH's per-environment USD spawn scale. |
+| A.1 reposing MDP | `adept_mdp.py`, `adept_repose_env.py`, generated 16-object set | Reported reward, distal/BioTac contact gate, 4 s episodes, 64-point cloud and 50 ADR steps are implemented and GPU-validated. Goal sampling box is not numerically published and is marked inferred. Object scale is sampled uniformly in 0.5--1.0 per environment when USDs are spawned; PhysX tensor simulation cannot rescale active rigid bodies at episode reset, so scale does not advance dynamically with ADR. |
 | A.2 downstream FMB | `adept_fmb_mdp.py`, `adept_fmb_env.py` | L-shaped ADR goal, final insertion switch, reward and Table-6 observations are implemented. ADEPT simulation CAD/dimensions are not released; proxy dimensions and board pose are visibly marked inferred. |
 | A.3 / D post-training | `actor_bc.py`, `post_training_observer.py`, `adept_*bc.py`, Slurm launchers | 40k alternating mixed-policy BC at ADR 20; fresh critic; 20 frozen-actor epochs at final goal and log-std -2; then separate-trunk PPO with the reported optimizer settings. |
 | A.4 observations | Stage-specific builders in the two environments | KUKA flat dimensions are asserted by construction: 391/438, 392/280 and 206+images. Flexiv/Sharpa is architecture-only and is not registered as a simulator task in this KUKA-first branch. |
-| B C-space Fabric | `adept_cspace_fabric.py` | Full 23-D target interface and published metric/component constants implemented on NVIDIA FABRICS. Attractor gains omitted by the paper are marked inherited/inferred. |
-| C PBT | `pbt.py`, `pbt_observer.py`, 16-worker Slurm array | Population, interval, rank fractions, parameter mutations, true-objective ranking and recipient ADR preservation implemented. Approximate-frame tolerance is exposed because no numeric tolerance is published. |
+| B C-space Fabric | `adept_cspace_fabric.py`, `fabric_math.py` | Full 23-D target interface, 31 spheres, per-sphere metric normalization/budgeting, normalized smooth joint-limit barriers, acceleration/jerk caps, separate geometric/forcing channels, 75/25 energy allocation, damping and speed control are implemented on NVIDIA FABRICS. ADEPT omits arm/hand attractor gains, collision metric budgets and joint-limit gate constants; inherited/inferred values are marked in code. Moving-obstacle velocity is unsupported by the public FABRICS query but is not needed for the static workspace/self-collision field used here. |
+| C PBT | `pbt.py`, `pbt_observer.py`, 16-worker Slurm array | Population, interval, rank fractions, parameter mutations, true-objective ranking and recipient ADR preservation are implemented. Approximate-frame tolerance is exposed because no numeric tolerance is published. The one-GPU training route deliberately does not activate PBT. |
 | E efficiency | Experiment concern | Paper runtime/throughput figures are evaluation targets, not algorithm settings. No parity claim before full runs. |
 | F ablations | Experiment concern | Scratch/direct/low-LR/full recipes remain to be run with matched seeds and steps. |
 | G losses | `post_training.py` | Mahalanobis distribution loss, tight 8-keypoint auxiliary loss, weights 1/20 and z-mask 0.08/0.02/0.1 implemented. |
@@ -187,8 +222,10 @@ multi-seed comparisons, or vision distillation.
 
 Generated FMB files are intentionally ignored and reproducible from
 `scripts/generate_adept_fmb_assets.py`. Replace them with measured FMB CAD before
-claiming geometry or contact-dynamics parity. The GPU smoke must also pass before
-starting long training; unit tests do not validate USD/PhysX behavior.
+claiming downstream geometry or contact-dynamics parity. ADEPT's unreleased
+controller gains/checkpoints, dynamic object-scale schedule, exact goal box,
+and 16-worker PBT selection remain explicit reproduction boundaries rather
+than silently invented parity claims.
 
 ## Primary references
 

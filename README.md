@@ -2,6 +2,10 @@
 
 DextrAH is a high-performance hand-arm grasping policy. This codebase provides the machinery required to train such a policy in Isaac Lab starting with privileged RL training followed by online distillation that swaps the input space to camera data.
 
+The `adept-reproduction` branch also contains an independent ADEPT
+reimplementation and a validated single-RTX-6000-Ada training path. See
+[docs/adept_reproduction.md](docs/adept_reproduction.md) before launching it.
+
 ## Installation
 **Note**: This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
 
