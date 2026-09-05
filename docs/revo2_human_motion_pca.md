@@ -76,6 +76,18 @@ python scripts/retarget_dexycb_revo2.py \
   --device cpu
 ```
 
+For the exact G1 setup already used by Play2Perfect, pass its combined URDF
+instead of the standalone default:
+
+```bash
+  --urdf /data1/users/konstantin.smirnov/play2perfect/unitree_ros/robots/\
+g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf
+```
+
+This matters: the G1-integrated file has different thumb transforms, mimic
+ratios, and limits from the latest standalone BrainCo file. The artifact stores
+the selected URDF's SHA-256 checksum so the two profiles cannot be confused.
+
 The optimizer batches all frames in a trajectory. This preserves independent
 per-frame Adam variables and is much faster than Python-level sequential warm
 starts. Use `--optimizer-execution sequential` to compare against warm-started
@@ -101,10 +113,21 @@ error.
 
 Start Viser on the server:
 
+When the artifact was built from the combined G1 URDF, first extract its exact
+hand subtree and resolve its mesh paths:
+
+```bash
+python scripts/extract_revo2_hand_urdf.py \
+  --g1-urdf /path/to/g1_29dof_mode_15_brainco_hand.urdf \
+  --revo2-package-root /path/to/play2perfect/assets/urdf/revo2_description \
+  --output /tmp/g1_revo2_right_hand.urdf
+```
+
 ```bash
 python scripts/visualize_revo2_retargeting.py \
   --trajectory /path/to/run/trajectories/TRAJECTORY.npz \
   --pca-artifact /path/to/run/revo2_human_motion_pca.npz \
+  --urdf /tmp/g1_revo2_right_hand.urdf \
   --viser-host 127.0.0.1 \
   --viser-port 8089
 ```
