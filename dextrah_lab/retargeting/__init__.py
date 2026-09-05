@@ -22,6 +22,7 @@ from .revo2_optimizer import (
     gamma_values,
     nominal_revo2_configuration,
 )
+from .pca import PCAArtifact, fit_pca_action_space
 
 __all__ = [
     "DEXYCB_FINGERTIP_INDICES",
@@ -29,10 +30,12 @@ __all__ = [
     "REVO2_RIGHT_ACTUATED_JOINTS",
     "REVO2_RIGHT_FINGERTIP_LINKS",
     "Revo2Kinematics",
+    "PCAArtifact",
     "RetargetingConfig",
     "RetargetingResult",
     "Revo2Retargeter",
     "estimate_fingertip_scale",
+    "fit_pca_action_space",
     "gamma_values",
     "iter_sequences",
     "load_sequence",
