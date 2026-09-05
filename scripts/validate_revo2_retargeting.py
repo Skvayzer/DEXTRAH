@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -29,6 +30,14 @@ DEFAULT_URDF = (
 )
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -50,6 +59,16 @@ def main() -> None:
     failures: list[str] = []
     if artifact.joint_names != REVO2_RIGHT_ACTUATED_JOINTS:
         failures.append("artifact joint order does not match Revo2 hardware order")
+    expected_urdf_sha256 = artifact.metadata.get("urdf_sha256")
+    selected_urdf_sha256 = _sha256(args.urdf)
+    if (
+        expected_urdf_sha256 is not None
+        and expected_urdf_sha256 != selected_urdf_sha256
+    ):
+        failures.append(
+            "selected URDF checksum differs from the retargeting artifact: "
+            f"expected {expected_urdf_sha256}, got {selected_urdf_sha256}"
+        )
     if artifact.retained_variance < args.minimum_retained_variance:
         failures.append(
             f"retained variance {artifact.retained_variance:.6f} is below "
@@ -94,6 +113,7 @@ def main() -> None:
                     )
                 )
             ),
+            "urdf_sha256": selected_urdf_sha256,
         },
         "dataset": {
             "trajectories": len(validations),
