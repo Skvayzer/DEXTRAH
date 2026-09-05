@@ -53,6 +53,26 @@ def test_nominal_grasps_respect_limits_and_power_is_more_curled():
     )
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_mask"),
+    (
+        ("precision_pinch", [True, True, False, False, False]),
+        ("precision_tripod", [True, True, True, False, False]),
+        ("precision", [True, True, True, True, True]),
+    ),
+)
+def test_precision_variants_select_expected_closure_fingertips(
+    mode, expected_mask
+):
+    hand = Revo2Kinematics(URDF)
+    retargeter = Revo2Retargeter(hand, RetargetingConfig(mode=mode))
+    q_regularization = nominal_revo2_configuration(hand, mode)
+
+    _, mask = retargeter._closure_target_and_mask(q_regularization)
+
+    assert mask.tolist() == expected_mask
+
+
 def test_fingertip_scale_matches_uniform_extent_ratio():
     robot = np.ones((5, 3)) * 2.0
     human = np.ones((3, 5, 3))

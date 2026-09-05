@@ -15,7 +15,12 @@ from .revo2_kinematics import (
 )
 
 
-GraspMode = Literal["power", "precision", "precision_tripod"]
+GraspMode = Literal[
+    "power",
+    "precision",
+    "precision_pinch",
+    "precision_tripod",
+]
 GammaSchedule = Literal["endpoint", "paper_literal"]
 OptimizerExecution = Literal["batched", "sequential"]
 
@@ -36,7 +41,12 @@ class RetargetingConfig:
     optimizer_execution: OptimizerExecution = "batched"
 
     def validate(self) -> None:
-        if self.mode not in {"power", "precision", "precision_tripod"}:
+        if self.mode not in {
+            "power",
+            "precision",
+            "precision_pinch",
+            "precision_tripod",
+        }:
             raise ValueError(f"unsupported grasp mode {self.mode!r}")
         if self.scale <= 0.0:
             raise ValueError("scale must be positive")
@@ -136,7 +146,7 @@ def nominal_revo2_configuration(
         posture = torch.tensor(
             [1.0, 0.75, 1.0, 1.0, 1.0, 1.0], dtype=hand.lower.dtype
         )
-    elif mode in {"precision", "precision_tripod"}:
+    elif mode in {"precision", "precision_pinch", "precision_tripod"}:
         posture = torch.tensor(
             [1.0, 0.75, 0.0, 0.0, 0.0, 0.0], dtype=hand.lower.dtype
         )
@@ -189,7 +199,11 @@ class Revo2Retargeter:
         else:
             # The precision point lies at the center of the thumb/index pair.
             point = regularized_tips[:2].mean(dim=-2)
-            if self.config.mode == "precision_tripod":
+            if self.config.mode == "precision_pinch":
+                mask = torch.tensor(
+                    [True, True, False, False, False], device=point.device
+                )
+            elif self.config.mode == "precision_tripod":
                 mask = torch.tensor(
                     [True, True, True, False, False], device=point.device
                 )

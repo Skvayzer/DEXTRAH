@@ -52,7 +52,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--modes",
         default="power,precision",
-        help="comma-separated power, precision, and/or optional precision_tripod",
+        help=(
+            "comma-separated power, precision, and/or optional "
+            "precision_pinch/precision_tripod"
+        ),
     )
     parser.add_argument("--sequence-limit", type=int)
     parser.add_argument("--frame-stride", type=int, default=1)
@@ -108,7 +111,7 @@ def _arguments() -> argparse.Namespace:
 
 def _parse_modes(value: str) -> tuple[str, ...]:
     modes = tuple(item.strip() for item in value.split(",") if item.strip())
-    allowed = {"power", "precision", "precision_tripod"}
+    allowed = {"power", "precision", "precision_pinch", "precision_tripod"}
     unknown = set(modes).difference(allowed)
     if not modes or unknown:
         raise ValueError(f"invalid grasp modes: {sorted(unknown) if unknown else value!r}")

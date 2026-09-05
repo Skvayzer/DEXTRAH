@@ -33,6 +33,12 @@ The published posture semantics are preserved: Revo2 power regularization is
 thumb at `[1.0, 0.75]` while keeping the four finger commands at their lower
 limits. Distal flexions follow each URDF's mimic ratios.
 
+`precision_pinch` and `precision_tripod` are optional inspection presets. They
+use the same precision posture and closure point while activating respectively
+the thumb/index or thumb/index/middle closure attractors. They are explicit
+Revo2 extensions, not additional modes claimed by DextrAH-G, and were not used
+to fit the verified full-run PCA artifact.
+
 The paper's `alpha=1.6` is specific to its human/Allegro size mismatch. In
 `--scale auto` mode this implementation records a deterministic grid search and
 chooses the Revo2 scale with the lowest pure-imitation IK error on representative
@@ -159,6 +165,12 @@ python scripts/visualize_revo2_retargeting.py \
   --viser-host 127.0.0.1 \
   --viser-port 8089
 ```
+
+Repeat `--trajectory PATH --trajectory-label "DISPLAY NAME"` to add multiple
+motions to the viewer's **Motion preset** dropdown. This makes it possible to
+compare power, two-finger pinch, and tripod solutions on the same human input.
+The **Robot configuration** dropdown switches each preset between its Adam
+solution and the projection through the frozen five-component PCA artifact.
 
 From the laptop, forward the port with
 `ssh -N -L 8089:127.0.0.1:8089 konstantin.smirnov@tl-server-0`, then open
