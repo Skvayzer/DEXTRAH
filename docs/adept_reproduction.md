@@ -198,6 +198,35 @@ The Stage-1 implementation passed these workstation gates on 2026-09-04/05:
 These gates establish execution readiness, not learned-task success. Success
 requires the long optimization run and checkpoint evaluation.
 
+## Live browser inspection
+
+Unit tests and headless integration checks cannot reveal a visually misplaced
+robot, object, target, or controller collision volume. Launch the Viser inspector
+on one RTX 6000 Ada with:
+
+```bash
+cd ~/data1/DEXTRAH-ADEPT
+sbatch scripts/slurm/visualize_adept_repose.sbatch
+```
+
+After the log contains `ADEPT_VISER_READY`, forward its loopback-only web port
+from the laptop and open the printed URL:
+
+```bash
+ssh -N -L 8088:127.0.0.1:8088 konstantin.smirnov@tl-server-0
+```
+
+The default view starts paused at final ADR and includes one environment for
+each of the 16 Appendix-Fig.-8 objects. The selector switches between their
+live Isaac states. Gray is the URDF robot driven by measured joint positions;
+the colored solid is the current object; translucent green is its sampled target; cyan marks
+the actual Isaac palm/fingertip positions; and translucent orange/yellow volumes
+are the 31 FABRICS collision spheres. Red contact markers appear above the 1 N
+threshold. The optional yellow point cloud is the exact 64-point policy input.
+The orange wireframe is the explicitly inferred target-sampling volume, not a
+published ADEPT dimension. Use **Run physics** with zero actions first; small
+random actions are only a controller-motion diagnostic, not a trained policy.
+
 The first scientific gate is not final insertion success. It is preservation of
 the pretrained reposing success rate during the first post-training updates.
 Only after that gate passes do we spend compute on full ADR progression,

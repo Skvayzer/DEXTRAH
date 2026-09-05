@@ -38,6 +38,7 @@ PYTHON="${ADEPT_ENV_PATH}/bin/python"
     numpy==1.26.0 \
     networkx==3.3 \
     pycollada==0.9.3 \
+    viser==0.1.34 \
     warp-lang==1.8.1
 "${PYTHON}" -m pip install --no-deps \
     urdfpy==0.0.22 \
