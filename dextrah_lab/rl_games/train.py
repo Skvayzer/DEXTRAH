@@ -83,14 +83,17 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
-#import dextrah_lab.tasks.shadow_hand.gym_setup
-import dextrah_lab.tasks.dextrah_kuka_allegro.gym_setup
-import dextrah_lab.tasks.g1_revo2_adept.gym_setup
+# Register only the requested task family. The reduced G1 controller does not
+# require NVIDIA FABRICS, so a G1 launch should not import that optional stack.
+if args_cli.task == "Adept-G1-Revo2-SimToolReal-Repose":
+    import dextrah_lab.tasks.g1_revo2_adept.gym_setup  # noqa: F401
+else:
+    import dextrah_lab.tasks.dextrah_kuka_allegro.gym_setup  # noqa: F401
 
 import time
 import wandb
 from wandb_utils import WandbAlgoObserver
-from rl_games_utils import MultiObserver
+from rl_games_utils import MultiObserver, RLGPUAlgoObserver
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -232,6 +235,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create runner from rl-games
 
     observers = [IsaacAlgoObserver()]
+    if args_cli.task == "Adept-G1-Revo2-SimToolReal-Repose":
+        # Publishes fabric safety scalars and per-episode reward components to
+        # TensorBoard; W&B receives them through sync_tensorboard.
+        observers.append(RLGPUAlgoObserver())
 
     if args_cli.adept_posttrain:
         from dextrah_lab.adept.post_training_observer import AdeptPostTrainingObserver

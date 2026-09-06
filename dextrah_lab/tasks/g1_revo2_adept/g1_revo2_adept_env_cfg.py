@@ -149,7 +149,8 @@ class G1Revo2AdeptEnvCfg(PlayEnvCfg):
             "eraser",
             "brush",
         )
-        # SimToolReal has two distributions per semantic family: 12 x 100.
+        # SimToolReal has 12 distributions across six semantic families:
+        # hammer 2, screwdriver 2, marker 1, spatula 2, eraser 1, brush 4.
         assets.num_assets_per_type = 100
         assets.shuffle_assets = True
         assets.modify_asset_frictions = True

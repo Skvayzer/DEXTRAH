@@ -1,5 +1,5 @@
 # G1 + BrainCo/Revo2 ADEPT controller over Play2Perfect's exact SimToolReal
-# procedural pool: six families, two distributions each, x 100 = 1,200 objects.
+# procedural pool: six families, 12 distributions total, x 100 = 1,200 objects.
 
 decimation: 2
 episode_length_s: 10.0

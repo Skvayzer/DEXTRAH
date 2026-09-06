@@ -149,7 +149,7 @@ class RLGPUAlgoObserver(AlgoObserver):
         self.algo = algo
         self.writer = self.algo.writer
 
-    def process_infos(self, infos, done_indices):
+    def process_infos(self, infos, done_indices, **kwargs):
         assert isinstance(infos, dict), 'RLGPUAlgoObserver expects dict info'
         if not isinstance(infos, dict):
             return

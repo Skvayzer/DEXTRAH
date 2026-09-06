@@ -3,6 +3,10 @@
 The experimental Unitree G1 + BrainCo Revo2 human-motion/PCA pipeline is
 documented in [docs/revo2_human_motion_pca.md](docs/revo2_human_motion_pca.md).
 
+The single-GPU G1 + Revo2 ADEPT/SAPG reposing setup with the SimToolReal
+object generator is documented in
+[docs/g1_adept_sapg.md](docs/g1_adept_sapg.md).
+
 DextrAH is a high-performance hand-arm grasping policy. This codebase provides the machinery required to train such a policy in Isaac Lab starting with privileged RL training followed by online distillation that swaps the input space to camera data.
 
 The `adept-reproduction` branch also contains an independent ADEPT

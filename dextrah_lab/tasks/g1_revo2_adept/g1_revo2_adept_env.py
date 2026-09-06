@@ -11,6 +11,9 @@ from isaaclab.envs import DirectRLEnv
 
 from isaacsimenvs.tasks.play.play_env import PlayEnv
 from isaacsimenvs.tasks.play.utils.action_utils import apply_wrench_dr
+from isaacsimenvs.tasks.play.utils.object_size_distributions import (
+    OBJECT_SIZE_DISTRIBUTIONS,
+)
 from isaacsimenvs.tasks.play.utils.obs_utils import build_observations, compute_obs_dim
 from isaacsimenvs.tasks.play.utils.reset_utils import allocate_state_buffers
 from isaacsimenvs.tasks.play.utils.scene_utils import apply_physx_material_properties
@@ -60,6 +63,7 @@ class G1Revo2AdeptEnv(PlayEnv):
         # Reproduce PlayEnv.__init__, reserving augmented spaces before
         # DirectRLEnv constructs its Gym and RL-Games buffers.
         DirectRLEnv.__init__(self, cfg, render_mode, **kwargs)
+        self._validate_object_pool()
         apply_physx_material_properties(self)
         allocate_state_buffers(self)
         # Play delays only its base observation. Keep that queue at base size
@@ -77,6 +81,28 @@ class G1Revo2AdeptEnv(PlayEnv):
             device=self.device,
         )
         self._setup_adept_controller()
+
+    def _validate_object_pool(self) -> None:
+        """Fail closed if training does not contain the requested full pool."""
+
+        requested_types = set(self.cfg.assets.handle_head_types)
+        distribution_count = sum(
+            distribution.type in requested_types
+            for distribution in OBJECT_SIZE_DISTRIBUTIONS
+        )
+        expected = distribution_count * self.cfg.assets.num_assets_per_type
+        actual = len(getattr(self, "_object_urdf_paths", ()))
+        if actual != expected:
+            raise RuntimeError(
+                "SimToolReal object-pool mismatch: "
+                f"expected {expected} objects from {distribution_count} matching "
+                f"distributions x {self.cfg.assets.num_assets_per_type}, got {actual}."
+            )
+        print(
+            "[INFO] Verified SimToolReal pool: "
+            f"{actual} objects, {distribution_count} distributions, "
+            f"families={sorted(requested_types)}"
+        )
 
     def _setup_adept_controller(self) -> None:
         fabric_cfg = self.cfg.fabric
