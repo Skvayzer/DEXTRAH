@@ -1,0 +1,98 @@
+# G1 + BrainCo/Revo2 ADEPT controller over Play2Perfect's exact SimToolReal
+# procedural pool: six families, two distributions each, x 100 = 1,200 objects.
+
+decimation: 2
+episode_length_s: 10.0
+action_space: 13
+
+sim:
+  dt: 0.00833333333
+  render_interval: 2
+  gravity: [0.0, 0.0, -9.81]
+  physx:
+    solver_type: 1
+    min_position_iteration_count: 8
+    max_position_iteration_count: 8
+    min_velocity_iteration_count: 0
+    max_velocity_iteration_count: 0
+    bounce_threshold_velocity: 0.2
+    friction_offset_threshold: 0.04
+    friction_correlation_distance: 0.025
+    gpu_found_lost_pairs_capacity: 16777216
+    gpu_found_lost_aggregate_pairs_capacity: 33554432
+    gpu_total_aggregate_pairs_capacity: 16777216
+    gpu_max_rigid_contact_count: 16777216
+    gpu_max_rigid_patch_count: 4194304
+    gpu_collision_stack_size: 536870912
+
+scene:
+  num_envs: 24576
+  env_spacing: 2.4
+  replicate_physics: true
+  clone_in_fabric: false
+  filter_collisions: true
+
+assets:
+  robot_profile: "g1_brainco_right"
+  robot_urdf: "unitree_ros/robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf"
+  robot_usd: null
+  robot_init_pos: [0.0, 0.42, 0.75]
+  robot_init_rot: [0.7071068, 0.0, 0.0, -0.7071068]
+  robot_fix_base: true
+  robot_self_collision: false
+  robot_merge_fixed_joints: false
+  robot_body_collision_enabled: true
+  robot_body_collision_links: ["torso_link"]
+  robot_body_collision_base_link: "pelvis"
+  robot_body_collision_include_visuals: false
+  robot_actuate_left_hand: false
+  strip_visuals: true
+  spawn_goal_viz: false
+  replicate_single_physics_template: false
+  replicate_grouped_physics_templates: false
+  replicate_factorized_object_templates: true
+  replicate_template_object_index: 0
+  replicate_template_table_index: 0
+  table_urdf: "assets/urdf/table_narrow.urdf"
+
+  object_name: "handle_head_primitives"
+  handle_head_types: ["hammer", "screwdriver", "marker", "spatula", "eraser", "brush"]
+  num_assets_per_type: 100
+  shuffle_assets: true
+
+  modify_asset_frictions: true
+  robot_friction: 0.5
+  finger_tip_friction: 1.5
+  object_friction: 0.5
+  table_friction: 0.5
+  palm_center_offset: [0.0, 0.0, 0.0]
+  fingertip_offset: [0.0, 0.0, 0.0]
+
+action:
+  joint_limit_margin: 0.02
+
+reset:
+  table_reset_z: 0.65
+  table_reset_z_range: 0.01
+  table_object_z_offset: 0.25
+  object_spawn_xy_mins: [-0.12, 0.06]
+  object_spawn_xy_maxs: [0.12, 0.16]
+  target_volume_mins: [-0.16, 0.02, 0.90]
+  target_volume_maxs: [0.16, 0.18, 1.08]
+
+fabric:
+  enabled: true
+  timestep: 0.01666666667
+  steps_per_policy_step: 2
+  max_joint_delta: 0.10
+  velocity_target_factor: 1.0
+  tracking_error_resync_threshold: 0.35
+  table_surface_offset: 0.15
+  include_self_collision: true
+  append_state_to_observations: true
+  pca_enabled: true
+  pca_artifact_path: "/data2/users/konstantin.smirnov/dex-ycb/revo2-g1-full-v1/revo2_human_motion_pca.npz"
+  pca_artifact_sha256: "8cea2fe7602958bbefec826fd331a100c15145c7dd837c68406a07895a2237b3"
+  pca_prior_initial_weight: 0.35
+  pca_prior_final_weight: 0.05
+  pca_prior_anneal_frames: 1000000000

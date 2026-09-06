@@ -200,7 +200,12 @@ class ReducedAdeptFabric:
             raise RuntimeError("fabric state has not been reset")
         return int(self.state.position.shape[0])
 
-    def reset(self, position: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
+    def reset(
+        self,
+        position: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+        velocity: torch.Tensor | None = None,
+    ) -> None:
         """Synchronize all or selected internal states with measured joints."""
 
         if position.ndim != 2 or position.shape[1] != self.num_dof:
@@ -208,15 +213,20 @@ class ReducedAdeptFabric:
                 f"position must have shape (batch, {self.num_dof}), got {position.shape}"
             )
         bounded = torch.clamp(position, self.lower_limits, self.upper_limits)
+        if velocity is None:
+            velocity = torch.zeros_like(bounded)
+        elif velocity.shape != bounded.shape:
+            raise ValueError("reset velocity must have the same shape as position")
+        velocity = torch.clamp(velocity, -self._max_velocity, self._max_velocity)
         if env_ids is None or self.state is None:
             self.state = ReducedAdeptFabricState(
-                bounded.clone(), torch.zeros_like(bounded), torch.zeros_like(bounded)
+                bounded.clone(), velocity.clone(), torch.zeros_like(bounded)
             )
             return
         if bounded.shape[0] != env_ids.numel():
             raise ValueError("selected reset positions must match env_ids")
         self.state.position[env_ids] = bounded
-        self.state.velocity[env_ids] = 0.0
+        self.state.velocity[env_ids] = velocity
         self.state.acceleration[env_ids] = 0.0
 
     def _joint_limit_terms(

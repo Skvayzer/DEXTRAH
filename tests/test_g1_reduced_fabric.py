@@ -97,6 +97,15 @@ def test_selected_reset_only_changes_requested_environments():
     torch.testing.assert_close(fabric.state.velocity[1], torch.zeros(13))
 
 
+def test_reset_accepts_measured_velocity() -> None:
+    fabric = _fabric()
+    position = torch.zeros(2, 13)
+    velocity = torch.full((2, 13), 0.25)
+    fabric.reset(position, velocity=velocity)
+    assert fabric.state is not None
+    assert torch.equal(fabric.state.velocity, velocity)
+
+
 def test_collision_shape_validation():
     fabric = _fabric(batch=2)
     collision = CollisionBatch(

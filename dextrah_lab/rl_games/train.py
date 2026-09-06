@@ -85,6 +85,7 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 #import dextrah_lab.tasks.shadow_hand.gym_setup
 import dextrah_lab.tasks.dextrah_kuka_allegro.gym_setup
+import dextrah_lab.tasks.g1_revo2_adept.gym_setup
 
 import time
 import wandb
