@@ -17,8 +17,15 @@ with sync_playwright() as playwright:
     page = browser.new_page(viewport={"width": 1600, "height": 1100})
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda message: print("CONSOLE", message.type, message.text, flush=True))
+    page.on("requestfailed", lambda request: print("REQUEST_FAILED", request.url, request.failure, flush=True))
     page.goto(args.url, wait_until="domcontentloaded", timeout=30000)
-    page.get_by_text("G1 + Revo2 contact inspection", exact=True).wait_for(timeout=30000)
+    try:
+        page.get_by_text("G1 + Revo2 contact inspection", exact=True).wait_for(timeout=30000)
+    except Exception:
+        print("BROWSER_FAILURE", page.url, page.locator("body").inner_text(), errors, flush=True)
+        page.screenshot(path=args.screenshot)
+        raise
     page.get_by_text("Focus hand", exact=True).click()
     page.wait_for_timeout(2500)
     print("BROWSER_DOM " + json.dumps(page.locator("body").inner_text()), flush=True)
