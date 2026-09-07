@@ -226,11 +226,14 @@ class Diagnostic:
         # in a minimal empty scene. Keep its default theme for compatibility.
         server.add_gui_markdown(
             "## G1 + Revo2 contact inspection\n"
-            "**Live PhysX, scripted fixtures—not a trained policy.** Fabric and 5% soft PCA prior remain active. "
-            "Cyan: provisional Touch CAD pads. Orange: tool; blue: table; purple: probe. "
-            "Arrows are normal-contact resultants, not shear. Grey/red distal link: no contact/contact outside pad. "
-            "The 0.5 mm `tip` markers are NOT sensors. CAD windows have a provisional 2 mm tolerance."
+            "**Live PhysX; scripted fixtures, not a trained policy.** "
+            "Cyan/yellow: inactive/active pad. Orange: tool; blue: table; purple: probe; red: outside pad."
         )
+        status = server.add_gui_text("State", "initializing", disabled=True)
+        gates = server.add_gui_text("Grasp gates", "initializing", disabled=True)
+        readouts = [server.add_gui_text(name, "", disabled=True) for name in FINGERS]
+        sources = server.add_gui_text("Tool / table / probe [N]", "", disabled=True)
+        server.add_gui_markdown("R/F: raw/filtered pad resultant, L: whole distal-link resultant. Source loads above are for the selected finger. Arrows show direction only.")
         modes = ("Pad probe", "Back-of-finger probe", "Tool contact fixture", "Table contact fixture", "Free physics")
         mode = server.add_gui_dropdown("Inspection mode", modes, initial_value=modes[0])
         finger = server.add_gui_dropdown("Finger", FINGERS, initial_value="index")
@@ -241,8 +244,9 @@ class Diagnostic:
         gap = server.add_gui_slider("Fixture gap [mm]", min=-3., max=30., step=.25, initial_value=-1.)
         server.add_gui_markdown("Fixture modes reposition a test sphere/tool/table each step. Negative gap means a controlled contact test, not a safe robot command. Select Free physics for unforced motion.")
         hand = server.add_gui_dropdown("Hand target", ("Open", "Power grasp", "Thumb-index pinch", "Manual"), initial_value="Open")
-        hand_sliders = [server.add_gui_slider(name, min=-1., max=1., step=.02, initial_value=-.6)
-                        for name in ("Thumb spread", "Thumb flex", "Index flex", "Middle flex", "Ring flex", "Pinky flex")]
+        with server.add_gui_folder("Manual finger targets"):
+            hand_sliders = [server.add_gui_slider(name, min=-1., max=1., step=.02, initial_value=-.6)
+                            for name in ("Thumb spread", "Thumb flex", "Index flex", "Middle flex", "Ring flex", "Pinky flex")]
         with server.add_gui_folder("Arm target [rad]"):
             arm_sliders = [server.add_gui_slider(str(name), min=float(env._arm_lower[0, i]),
                            max=float(env._arm_upper[0, i]), step=.01,
@@ -254,10 +258,7 @@ class Diagnostic:
         focus = server.add_gui_button("Focus hand")
         focus_event = threading.Event()
         focus.on_click(lambda _: focus_event.set())
-        status = server.add_gui_text("State", "initializing", disabled=True)
-        gates = server.add_gui_text("ADEPT >1 N gates", "initializing", disabled=True)
-        readouts = [server.add_gui_text(name, "", disabled=True) for name in FINGERS]
-        server.add_gui_markdown("Readout: pad resultant raw/filtered N; O/T/P normal load N; contact duration s. Hysteresis 0.15/0.08 N and 30 ms filter are diagnostic choices, not calibrated hardware settings. Object identity and exact contact locations are simulator-only privileges; no pressure image or shear is synthesized.")
+        server.add_gui_markdown("ADEPT grasp gates: thumb + another finger >1 N. Hysteresis 0.15/0.08 N, 30 ms filter and CAD +2 mm pad windows are provisional, not hardware calibration. Fabric and 5% soft PCA stay active. No pressure image or shear is synthesized. Object identity and exact contact locations are simulator-only privileges.")
 
         camera_focus = np.asarray([0., .06, .95])
 
@@ -383,10 +384,9 @@ class Diagnostic:
                         pads[i].visible = not active_pads[i].visible
                         links[i].visible = bool(np.linalg.norm(data["net_w"][i]) > .1 and not bool(state.contact[index, i]))
                         loads = data["pad_load_n"][i]
-                        readouts[i].value = (f"{float(state.raw_n[index,i]):.2f}/{float(state.filtered_n[index,i]):.2f} N | "
-                                            f"O/T/P {loads[0]:.2f}/{loads[1]:.2f}/{loads[2]:.2f} | "
-                                            f"{float(state.duration_s[index,i]):.2f}s | "
-                                            f"link {np.linalg.norm(data['net_w'][i]):.2f} N")
+                        readouts[i].value = (f"R/F {float(state.raw_n[index,i]):.2f}/{float(state.filtered_n[index,i]):.2f} "
+                                            f"L {np.linalg.norm(data['net_w'][i]):.2f} N; "
+                                            f"{float(state.duration_s[index,i]):.1f}s")
                         for channel, color in enumerate(((245, 170, 30), (60, 150, 250), (200, 80, 250))):
                             point = data["pad_points_w"][i, channel] - origin
                             force = data["pad_pairs_w"][i, channel]
@@ -412,9 +412,10 @@ class Diagnostic:
                                     arrow.position = point
                                     arrow.wxyz = trimesh.transformations.quaternion_from_matrix(
                                         trimesh.geometry.align_vectors([0, 0, 1], force / strength))
-                    gates.value = (f"all-link={bool(data['gate_all'])} | object-link={bool(data['gate_object'])} | "
-                                   f"object-pad={bool(data['gate_pad_object'])}")
-                    status.value = f"sim {self.sim_time:.1f}s | {env.num_envs} diagnostic envs | {mode.value} | arrows show direction; force magnitude in N readouts"
+                    gates.value = (f"all={int(data['gate_all'])} object={int(data['gate_object'])} "
+                                   f"pad/object={int(data['gate_pad_object'])}")
+                    sources.value = " / ".join(f"{x:.2f}" for x in data["pad_load_n"][finger_id])
+                    status.value = f"sim {self.sim_time:.1f}s | {env.num_envs} envs | {mode.value}"
                 time.sleep(max(0., env.step_dt - (time.monotonic() - tick)))
         finally:
             server.stop()
