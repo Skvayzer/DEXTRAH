@@ -6,6 +6,7 @@ response check, not a learned grasp-success evaluation.
 """
 import argparse
 import json
+import traceback
 from types import SimpleNamespace
 
 from isaaclab.app import AppLauncher
@@ -122,5 +123,9 @@ def main():
 
 try:
     main()
-finally:
-    app.close()
+except Exception:
+    # SimulationApp.close() can terminate the interpreter before Python prints
+    # a pending exception. Preserve both the traceback and a nonzero exit code.
+    traceback.print_exc()
+    raise
+app.close()

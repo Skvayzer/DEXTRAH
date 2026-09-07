@@ -51,7 +51,8 @@ PYTHON="${ADEPT_ENV_PATH}/bin/python"
 "${PYTHON}" -m pytest -q \
     "${REPO_ROOT}/tests/test_g1_reduced_fabric.py" \
     "${REPO_ROOT}/tests/test_g1_collision_geometry.py" \
-    "${REPO_ROOT}/tests/test_g1_isaac_adapter.py"
+    "${REPO_ROOT}/tests/test_g1_isaac_adapter.py" \
+    "${REPO_ROOT}/tests/test_revo2_pca_control.py"
 "${PYTHON}" "${REPO_ROOT}/scripts/visualize_g1_adept_fabric.py" \
     --validate-only \
     --urdf "${G1_URDF}"

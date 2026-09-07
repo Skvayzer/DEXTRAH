@@ -18,7 +18,7 @@ MAX_FRAMES="${MAX_FRAMES:-8000000000}"
 SAVE_FREQUENCY="${SAVE_FREQUENCY:-250}"
 SEED="${SEED:-42}"
 WANDB_ACTIVATE="${WANDB_ACTIVATE:-true}"
-RUN_NAME="${RUN_NAME:-0_g1_adept_sapg_simtoolreal_seed_${SEED}}"
+RUN_NAME="${RUN_NAME:-0_g1_adept_sapg_simtoolreal_absolute_v2_seed_${SEED}}"
 AUTO_RESUME="${AUTO_RESUME:-true}"
 CHECKPOINT="${CHECKPOINT:-}"
 
