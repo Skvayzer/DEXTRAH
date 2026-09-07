@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import signal
 import threading
 import time
 import traceback
@@ -25,6 +26,9 @@ parser.add_argument("--viewer-fps", type=float, default=12.)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 app = AppLauncher(args).app
+stop_requested = threading.Event()
+signal.signal(signal.SIGTERM, lambda *_: stop_requested.set())
+signal.signal(signal.SIGINT, lambda *_: stop_requested.set())
 
 import numpy as np
 import torch
@@ -214,6 +218,9 @@ class Diagnostic:
     def viewer(self):
         env = self.env
         server = viser.ViserServer(host=args.viser_host, port=args.viser_port)
+        if server.get_port() != args.viser_port:
+            server.stop()
+            raise RuntimeError(f"Requested Viser port {args.viser_port} is occupied")
         server.set_up_direction("+z")
         server.configure_theme(dark_mode=True, show_logo=False, show_share_button=False)
         server.add_gui_markdown(
@@ -229,6 +236,7 @@ class Diagnostic:
         options = tuple(f"{i}: {Path(env._object_urdf_paths[self.object_ids[i]]).stem}" for i in range(env.num_envs))
         select = server.add_gui_dropdown("Environment / tool", options, initial_value=options[0])
         running = server.add_gui_checkbox("Run physics", initial_value=True)
+        show_outside = server.add_gui_checkbox("Show outside-pad contacts (red)", initial_value=True)
         gap = server.add_gui_slider("Fixture gap [mm]", min=-3., max=30., step=.25, initial_value=-1.)
         server.add_gui_markdown("Fixture modes reposition a test sphere/tool/table each step. Negative gap means a controlled contact test, not a safe robot command. Select Free physics for unforced motion.")
         hand = server.add_gui_dropdown("Hand target", ("Open", "Power grasp", "Thumb-index pinch", "Manual"), initial_value="Open")
@@ -272,23 +280,31 @@ class Diagnostic:
         objects = [server.add_mesh_simple(f"/tools/{i}", np.asarray(mesh.vertices, dtype=np.float32),
                    np.asarray(mesh.faces, dtype=np.uint32), color=(223, 158, 55), visible=False)
                    for i, mesh in enumerate(self.object_meshes)]
-        pads, links = [], []
+        pads, active_pads, links = [], [], []
         for i, (name, pad) in enumerate(zip(FINGERS, env.pad_geometry)):
             pads.append(server.add_mesh_simple(f"/pads/{name}", np.asarray(pad.mesh.vertices, dtype=np.float32),
                          np.asarray(pad.mesh.faces, dtype=np.uint32), color=(40, 215, 205), opacity=.65))
+            active_pads.append(server.add_mesh_simple(f"/active_pads/{name}", np.asarray(pad.mesh.vertices, dtype=np.float32),
+                         np.asarray(pad.mesh.faces, dtype=np.uint32), color=(255, 195, 35), opacity=.8, visible=False))
             mesh = trimesh.load(env.g1_urdf.parent / f"meshes/{TIP_BODIES[i]}.STL", force="mesh")
             links.append(server.add_mesh_simple(f"/distal/{name}", np.asarray(mesh.vertices, dtype=np.float32),
                           np.asarray(mesh.faces, dtype=np.uint32), color=(180, 70, 70), opacity=.4, visible=False))
         probe = server.add_icosphere("/probe", radius=env.probe_radius, color=(190, 70, 245))
         point_markers = [[server.add_icosphere(f"/points/{name}/{c}", radius=.002, color=color, visible=False)
                           for c, color in enumerate(((245, 170, 30), (60, 150, 250), (200, 80, 250)))] for name in FINGERS]
+        outside_markers = [[server.add_icosphere(f"/outside/{name}/{c}", radius=.002, color=(255, 75, 75), visible=False)
+                            for c in range(3)] for name in FINGERS]
         # Unit-length arrow mesh; recreate only its scaled presentation each publication.
         arrow_handles = {}
         last_publish = 0.
         previous_mode = None
         try:
-            while app.is_running():
+            while app.is_running() and not stop_requested.is_set():
                 tick = time.monotonic()
+                # No client means no need to compete with training for GPU time.
+                if self.contacts is not None and not server.get_clients():
+                    time.sleep(.1)
+                    continue
                 index, finger_id = options.index(select.value), FINGERS.index(finger.value)
                 setting = (mode.value, index, finger_id)
                 if reset_event.is_set() or setting != previous_mode:
@@ -344,10 +360,12 @@ class Diagnostic:
                     probe.visible = "probe" in mode.value.lower()
                     state = env.touch_filter
                     for i, name in enumerate(FINGERS):
-                        for handle in (pads[i], links[i]):
+                        for handle in (pads[i], active_pads[i], links[i]):
                             handle.position = data["tip_pos_w"][i] - origin
                             handle.wxyz = data["tip_quat_w"][i]
-                        pads[i].color = (255, 195, 35) if state.contact[index, i] else (40, 215, 205)
+                        # Viser 0.1 MeshHandle has no dynamic color property.
+                        active_pads[i].visible = bool(state.contact[index, i])
+                        pads[i].visible = not active_pads[i].visible
                         links[i].visible = np.linalg.norm(data["net_w"][i]) > .1 and not bool(state.contact[index, i])
                         loads = data["pad_load_n"][i]
                         readouts[i].value = (f"{float(state.raw_n[index,i]):.2f}/{float(state.filtered_n[index,i]):.2f} N | "
@@ -357,6 +375,16 @@ class Diagnostic:
                         for channel, color in enumerate(((245, 170, 30), (60, 150, 250), (200, 80, 250))):
                             point = data["pad_points_w"][i, channel] - origin
                             force = data["pad_pairs_w"][i, channel]
+                            outside = (show_outside.value and loads[channel] < .01
+                                       and np.linalg.norm(data["pairs_w"][i, channel]) > .01
+                                       and data["point_valid"][i, channel])
+                            if outside:
+                                point = data["points_w"][i, channel] - origin
+                                force = data["pairs_w"][i, channel]
+                                color = (255, 75, 75)
+                            outside_markers[i][channel].visible = bool(outside)
+                            if outside:
+                                outside_markers[i][channel].position = point
                             strength = float(np.linalg.norm(force))
                             marker = point_markers[i][channel]
                             marker.visible = loads[channel] > .01
