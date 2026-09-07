@@ -1,5 +1,12 @@
 # Human-motion PCA for Unitree G1 + BrainCo Revo2
 
+**Current integration note:** the completed artifact below is now used by SAPG
+as a 5% soft correction to six independent hand targets, not as a hard
+five-action restriction. The eleven-action interface later in this document
+describes the reference task-map pathway. See the
+[research-meeting material](revo2_pca_research_meeting.md) for verified variance
+plots, the exact dataset subset, motion videos, and current runtime semantics.
+
 This branch adapts the offline hand-action-space construction from DextrAH-G
 Appendix D to the six actuators and five fingertips of the BrainCo Revo2 right
 hand. It is deliberately separate from PPO: DexYCB retargeting and PCA happen
