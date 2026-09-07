@@ -3,7 +3,7 @@
 
 Loads the run's saved Hydra configuration and strict actor weights. Keeps the
 six trained coefficient settings, but evaluates the zero-entropy leader with
-deterministic actions. Saves measured PhysX poses for a separate CPU renderer.
+deterministic actions. Saves measured PhysX poses for a separate renderer.
 """
 import argparse
 import copy
@@ -23,6 +23,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--play2perfect-root", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--fabrics", action="store_true",
+                        help="Capture the fabric-enabled task; --config is its params directory")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=float, default=30.)
@@ -47,6 +49,7 @@ def main():
     import torch
     import yaml
     import yourdfpy
+    from dataclasses import asdict
     from isaaclab.envs.utils.spaces import (
         replace_env_cfg_spaces_with_strings, replace_strings_with_env_cfg_spaces,
     )
@@ -61,10 +64,27 @@ def main():
     torch.set_num_threads(2)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    saved = yaml.safe_load(args.config.read_text())
-    cfg = replace_env_cfg_spaces_with_strings(PlayEnvCfg())
+    if args.fabrics:
+        from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_adept_env import G1Revo2AdeptEnv
+        from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_adept_env_cfg import G1Revo2AdeptEnvCfg
+        from dextrah_lab.g1_adept.collision_geometry import (
+            G1_REVO2_DYNAMIC_SPHERES, G1_REVO2_FIXED_SPHERES, G1_REVO2_SELF_COLLISION_PAIRS,
+        )
+        class TupleLoader(yaml.SafeLoader):
+            pass
+        TupleLoader.add_constructor("tag:yaml.org,2002:python/tuple",
+                                    lambda loader, node: tuple(loader.construct_sequence(node)))
+        saved = {name: yaml.load((args.config / f"{name}.yaml").read_text(), Loader=TupleLoader)
+                 for name in ("env", "agent")}
+        cfg, env_class, expected_obs = G1Revo2AdeptEnvCfg(), G1Revo2AdeptEnv, 131
+    else:
+        saved = yaml.safe_load(args.config.read_text())
+        cfg, env_class, expected_obs = replace_env_cfg_spaces_with_strings(PlayEnvCfg()), PlayEnv, 92
+    # Isaac Lab's typed loader rejects an int over a None-typed seed default.
+    cfg.seed = saved["env"].get("seed")
     cfg.from_dict(replace_strings_with_slices(copy.deepcopy(saved["env"])))
-    cfg = replace_strings_with_env_cfg_spaces(cfg)
+    if not args.fabrics:
+        cfg = replace_strings_with_env_cfg_spaces(cfg)
     cfg.scene.num_envs = args.num_envs
     cfg.seed = args.seed
     cfg.sim.device = args.device
@@ -121,8 +141,24 @@ def main():
         "selection": "fixed seed/environment, continuous unselected rollout; not a success-rate benchmark",
         "robot_urdf": str((args.play2perfect_root / cfg.assets.robot_urdf).resolve()),
         "presentation": "Measured active-body poses; unmodeled whole body is static visual context only",
+        "fabrics_enabled": args.fabrics,
     }
-    (args.output / "source_config.yaml").write_text(args.config.read_text())
+    if args.fabrics:
+        metadata["fabric_geometry"] = dict(
+            dynamic=[asdict(s) for s in G1_REVO2_DYNAMIC_SPHERES],
+            fixed=[asdict(s) for s in G1_REVO2_FIXED_SPHERES],
+            self_pairs=G1_REVO2_SELF_COLLISION_PAIRS,
+            include_self_collision=cfg.fabric.include_self_collision,
+            influence_distance=cfg.fabric.collision_influence_distance,
+            minimum_distance=cfg.fabric.collision_minimum_distance,
+            table_surface_offset=cfg.fabric.table_surface_offset,
+        )
+        metadata["visual_static_joint_pos"] = scene_utils.G1_BODY_DEFAULT_JOINT_POS
+        metadata["fabric_config"] = asdict(cfg.fabric) if hasattr(cfg.fabric, "__dataclass_fields__") else cfg.fabric.to_dict()
+        for name in ("env", "agent"):
+            (args.output / f"source_{name}.yaml").write_text((args.config / f"{name}.yaml").read_text())
+    else:
+        (args.output / "source_config.yaml").write_text(args.config.read_text())
     (args.output / "metadata.json").write_text(json.dumps(metadata, indent=2))
     # MultiUsdFileCfg first materializes EVERY temporary template, even when
     # only six round-robin envs exist. Its first N assignments are exactly the
@@ -133,11 +169,11 @@ def main():
         return original_builder(prim_path, selected, **kwargs)
     scene_utils.build_rigid_object_cfg = evaluation_builder
     try:
-        env = PlayEnv(cfg)
+        env = env_class(cfg)
     finally:
         scene_utils.build_rigid_object_cfg = original_builder
     try:
-        assert env.observation_space.shape[-1] == 92, env.observation_space
+        assert env.observation_space.shape[-1] == expected_obs, env.observation_space
         assert env.action_space.shape[-1] == 13, env.action_space
         wrapped = register_rlgames_env(env, rl_device=args.device,
             clip_obs=float(agent["params"]["env"]["clip_observations"]),
@@ -162,7 +198,7 @@ def main():
             (args.output / f"{name}.urdf").write_text(text)
             metadata[f"{name}_source"] = str(path)
         metadata.update(joint_names=env.robot.joint_names, body_names=env.robot.body_names,
-                        actor_observations=92, actions=13,
+                        actor_observations=expected_obs, actions=13,
                         generated_object_count=len(env._object_urdf_paths),
                         object_asset_index=int(env._object_asset_index_per_env[e]),
                         skipped_only_unassigned_temporary_object_prototypes=True)
@@ -178,13 +214,24 @@ def main():
             origin = env.scene.env_origins[e]
             def pose(asset):
                 return array(torch.cat((asset.data.root_pos_w[e] - origin, asset.data.root_quat_w[e])))
-            return dict(step=step, joint_pos=array(env.robot.data.joint_pos[e]),
+            result = dict(step=step, joint_pos=array(env.robot.data.joint_pos[e]),
                 body_pos=array(env.robot.data.body_pos_w[e] - origin),
                 body_quat=array(env.robot.data.body_quat_w[e]), robot=pose(env.robot),
                 object=pose(env.object), table=pose(env.table), goal=pose(env.goal_viz),
                 reward=total_reward, goal_hits=goal_hits, resets=resets,
                 lifted=bool(env._lifted_object[e]),
                 goal_error=float(env._keypoints_max_dist[e]))
+            if args.fabrics:
+                # Sample after physics, using the training adapter itself.
+                # These are measured proxies, not lagging pre-step positions.
+                collision = env.collision_adapter.build()
+                result.update(
+                    fabric_dynamic=array(env.collision_adapter.dynamic_positions[e] - origin),
+                    fabric_fixed=array(env.collision_adapter.fixed_positions[e] - origin),
+                    fabric_clearance=array(collision.clearance[e]),
+                    fabric_table_height=float(env._table_z_per_env[e]) + cfg.fabric.table_surface_offset,
+                )
+            return result
 
         with torch.inference_mode():
             for step in range(count):
