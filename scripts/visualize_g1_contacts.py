@@ -222,7 +222,8 @@ class Diagnostic:
             server.stop()
             raise RuntimeError(f"Requested Viser port {args.viser_port} is occupied")
         server.set_up_direction("+z")
-        server.configure_theme(dark_mode=True, show_logo=False, show_share_button=False)
+        # Viser 0.1.34's theme/logo toggle triggers React hook error #300 even
+        # in a minimal empty scene. Keep its default theme for compatibility.
         server.add_gui_markdown(
             "## G1 + Revo2 contact inspection\n"
             "**Live PhysX, scripted fixtures—not a trained policy.** Fabric and 5% soft PCA prior remain active. "
