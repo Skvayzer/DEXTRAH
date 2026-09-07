@@ -55,7 +55,9 @@ with sync_playwright() as playwright:
 
     current_mode = "Pad probe"
     for target_mode in ("Back-of-finger probe", "Tool contact fixture", "Table contact fixture", "Free physics", "Pad probe"):
-        page.locator(f'input[type="text"][value="{current_mode}"]').click()
+        # Mantine omits the type attribute on its visible select input; the
+        # HTML property is "text", but a [type="text"] selector won't match.
+        page.locator(f'input[value="{current_mode}"]:visible').click()
         page.get_by_role("option", name=target_mode, exact=True).click()
         page.wait_for_function("mode => document.querySelector('input[value^=\"sim \"]').value.endsWith(mode)", arg=target_mode)
         page.wait_for_timeout(600)
