@@ -42,8 +42,21 @@ def main():
     meta = json.loads((args.recording / "metadata.json").read_text())
     if args.fabrics and not meta.get("fabrics_enabled"):
         raise ValueError("Sphere visualization requires a fabric-enabled policy recording")
-    trajectory = np.load(args.recording / "trajectory.npz", allow_pickle=False)
+    # NpzFile is lazy: indexing a member decompresses its entire trajectory.
+    # Cache once, rather than decompressing thousands of frames for every
+    # link on every frame of a long recording.
+    with np.load(args.recording / "trajectory.npz", allow_pickle=False) as archive:
+        trajectory = {name: archive[name] for name in archive.files}
     frames = min(meta["frames"], args.limit_frames or meta["frames"])
+    preview_frames = {0, 60, 150, 300, 450}
+    if "lift_height" in trajectory:
+        peak = int(np.argmax(trajectory["lift_height"][:frames]))
+        preview_frames.update(peak + round(offset * meta["fps"]) for offset in (-2., -1., 0., 1.))
+    for when in (meta.get("first_goal_seconds"), *(meta.get("longest_lift_interval_s") or [])):
+        if when is not None:
+            preview_frames.update(round((when + offset) * meta["fps"]) for offset in (-1., -.5, 0., .5))
+    goal_counts = trajectory["goal_hits"][:frames]
+    goal_event_frames = np.flatnonzero(np.diff(goal_counts, prepend=0) > 0)
     urdf = yourdfpy.URDF.load(meta["robot_urdf"])
     for joint in urdf.joint_map.values():
         joint.mimic = None
@@ -189,6 +202,8 @@ def main():
             title = "Fabrics applied to G1 RL training" if args.fabrics else "Play2Perfect SAPG | G1 + BrainCo Revo2"
             subtitle = ("14 moving spheres + 7 fixed body spheres | recorded fabric-enabled policy rollout"
                         if args.fabrics else f"Checkpoint epoch {meta['checkpoint_epoch']:,} | deterministic leader | seed {meta['seed']} | uncut rollout")
+            if args.fabrics and meta.get("selection", "").startswith("Selected"):
+                subtitle = "14 moving spheres + 7 fixed body spheres | selected continuous rollout; resets retained"
             draw.text((22, 10), title, font=title_font, fill=(25, 38, 52))
             draw.text((22, 43), subtitle,
                       font=text_font, fill=(60, 75, 90))
@@ -199,16 +214,24 @@ def main():
                     f"   |   Lifted: {'yes' if trajectory['lifted'][index] else 'no'}"
                     f"   |   Goal error: {error_text}   |   Resets: {int(trajectory['resets'][index])}")
             if args.fabrics:
-                line = (f"{seconds:05.2f} / {meta['seconds']:.0f} s  |  Min proxy gap: {gaps.min()*100:.1f} cm"
-                        f"  |  Avoidance range: {geometry['influence_distance']*100:g} cm"
+                line = (f"{seconds:05.2f} / {meta['seconds']:.0f} s  |  Goals: {int(goal_counts[index])}"
+                        f"  |  Min proxy gap: {gaps.min()*100:.1f} cm"
                         f"  |  Resets: {int(trajectory['resets'][index])}  |  Body fixed")
+                if "lift_height" in trajectory:
+                    rise = (trajectory["lift_height"][index] - .05) * 100
+                    line += f"  |  Object rise: {rise:.1f} cm"
+                recent_goal = ((index - goal_event_frames >= 0)
+                               & (index - goal_event_frames < 2 * meta["fps"])).any()
+                if recent_goal:
+                    draw.rectangle([20, 85, 400, 124], fill=(220, 246, 227))
+                    draw.text((30, 93), "Manipulation goal reached", font=text_font, fill=(20, 105, 45))
             draw.text((22, 663), line, font=text_font, fill=(25, 38, 52))
             footer = ("Blue: fixed body  |  Teal: moving arm/hand  |  Amber: within avoidance range  |  Red: proxy overlap (not a contact sensor)"
                       if args.fabrics else "Measured simulation; whole body is static context. Original training disturbances enabled. Orange: tool. Green: target.")
             draw.text((22, 694), footer,
                       font=small_font, fill=(60, 75, 90))
             encoder.stdin.write(np.asarray(image, dtype=np.uint8).tobytes())
-            if index in (0, 60, 150, 300, 450):
+            if index in preview_frames:
                 image.save(args.recording / f"preview-{index:04d}.png")
             validation["frames"] += 1
             if index % 60 == 0:

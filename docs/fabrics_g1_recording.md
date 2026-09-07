@@ -69,3 +69,26 @@ video. Nine sampled frames contain negative proxy clearance (minimum -0.05741
 m); those overlaps are rendered red rather than concealed. A proxy overlap
 alone does not establish physical mesh contact. These observations are not a
 success-rate evaluation or a collision-avoidance guarantee.
+
+## Longer, success-selected recordings
+
+Pass `--seconds 120 --select-successful-env` to capture all six environments
+and retain one **continuous** rollout, selected by completed goal count, then
+longest sustained lift above the configured reward threshold, then reward.
+This selection does not splice episodes, hide resets, change objects after
+capture, or relax the goal tolerance. The selected environment's exact object
+and table geometry are exported. All candidate trajectories and per-step
+metrics remain available in `candidates.npz` and `candidate_metrics.json`.
+
+Goal events use the episode success counter captured before automatic reset,
+including successes on terminal steps. Sustained lifting is measured using
+height on every step, not the task's latched `lifted` flag. The reward's lift
+metric includes a 5 cm offset; the video's object-rise readout removes that
+offset. The 0.15 m reward threshold therefore corresponds to a root height
+increase exceeding 0.10 m. Neither height nor a latched flag alone proves a
+stable grasp; successful segments still need visual inspection.
+
+The video shows completed goals and highlights goal events. Metadata includes
+first-goal timestamps, the longest sustained-lift interval, and all candidate
+summaries. No goal is claimed if none occurred. Fourteen selection and geometry
+tests pass. The original short recording is preserved.
