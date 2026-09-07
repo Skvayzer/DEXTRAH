@@ -92,3 +92,36 @@ The video shows completed goals and highlights goal events. Metadata includes
 first-goal timestamps, the longest sustained-lift interval, and all candidate
 summaries. No goal is claimed if none occurred. Fourteen selection and geometry
 tests pass. The original short recording is preserved.
+
+### Two-minute example
+
+`outputs/fabrics-g1-rl-training-long-20260907/fabrics-g1-rl-training-120s.mp4`
+contains the entire 120-second rollout from epoch 4,000, environment 3. It
+shows a screwdriver grasp-and-lift at approximately **81–89 seconds**, ending
+at the episode's 90-second timeout, not a goal completion. Inspection of the
+85.7- and 87.7-second frames confirms that the object is held above the table
+and moved upward with the hand. Its maximum root-height increase relative to
+the reset pose is 8.91 cm. This is qualitative grasping evidence, not a
+completed reposing goal or a crossing of the configured lift-bonus threshold.
+
+All six candidate environments completed zero goals and none crossed the
+0.15 m reward-lift threshold in this capture. The selected environment reset
+12 times; failures and resets are retained. Rendering validates all 3,600
+frames, with maximum link-position error 0.68 micrometers and sphere-center
+error 0.09 micrometers. FFprobe verifies 1280 × 720, H.264, 30 FPS and exactly
+120 seconds. The sphere model and physical motion are unchanged.
+
+Long-recording rendering now caches each compressed trajectory array once.
+The earlier implementation repeatedly decompressed entire arrays for each
+link on every frame; a five-frame profile confirmed this bottleneck. An
+interrupted preliminary encode remains separately named
+`incomplete-slow-render.mp4` on the server and is not the delivered video.
+
+For comparison, epoch 2,250 (the available checkpoint with the highest saved
+training reward) was also captured for 120 seconds across six environments.
+It likewise completed zero goals. Its longest continuous crossing of the
+lift threshold was only 0.5 seconds, at 15.5–16.0 seconds in environment 0;
+that height excursion alone is not treated as a stable grasp. Its raw capture
+is retained under `outputs/fabrics-g1-rl-training-long-best-20260907`. The
+delivered video uses the visually confirmed longer screwdriver hold from
+epoch 4,000 instead. All capture/render steps exited; job 319 was left running.
