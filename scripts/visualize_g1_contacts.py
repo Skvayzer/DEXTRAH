@@ -294,8 +294,22 @@ class Diagnostic:
                           for c, color in enumerate(((245, 170, 30), (60, 150, 250), (200, 80, 250)))] for name in FINGERS]
         outside_markers = [[server.add_icosphere(f"/outside/{name}/{c}", radius=.002, color=(255, 75, 75), visible=False)
                             for c in range(3)] for name in FINGERS]
-        # Unit-length arrow mesh; recreate only its scaled presentation each publication.
+        # Persistent glyphs: legacy Viser/React can fail when a node is removed
+        # and re-created during one render. Length is deliberately fixed; exact
+        # force magnitudes are in the readouts, not encoded as displacement.
+        arrow_mesh = trimesh.creation.cylinder(radius=.0007, height=.04, sections=8)
+        arrow_mesh.apply_translation([0, 0, .02])
+        head = trimesh.creation.cone(radius=.0025, height=.006, sections=8)
+        head.apply_translation([0, 0, .04])
+        arrow_mesh = trimesh.util.concatenate((arrow_mesh, head))
         arrow_handles = {}
+        for i in range(5):
+            for channel, color in enumerate(((245, 170, 30), (60, 150, 250), (200, 80, 250))):
+                for outside in (False, True):
+                    arrow_handles[i, channel, outside] = server.add_mesh_simple(
+                        f"/forces/{i}/{channel}/{outside}", np.asarray(arrow_mesh.vertices, dtype=np.float32),
+                        np.asarray(arrow_mesh.faces, dtype=np.uint32),
+                        color=(255, 75, 75) if outside else color, visible=False)
         last_publish = 0.
         previous_mode = None
         try:
@@ -390,24 +404,16 @@ class Diagnostic:
                             marker.visible = bool(loads[channel] > .01)
                             if marker.visible:
                                 marker.position = point
-                            key = (i, channel)
-                            if key in arrow_handles:
-                                arrow_handles.pop(key).remove()
-                            if strength > .01:
-                                length = min(.12, strength * .015)
-                                mesh = trimesh.creation.cylinder(radius=.0007, height=length, sections=8)
-                                mesh.apply_translation([0, 0, length / 2])
-                                head = trimesh.creation.cone(radius=.0025, height=.006, sections=8)
-                                head.apply_translation([0, 0, length])
-                                mesh = trimesh.util.concatenate((mesh, head))
-                                transform = trimesh.geometry.align_vectors([0, 0, 1], force / strength)
-                                transform[:3, 3] = point
-                                mesh.apply_transform(transform)
-                                arrow_handles[key] = server.add_mesh_simple(f"/forces/{i}/{channel}",
-                                    np.asarray(mesh.vertices, dtype=np.float32), np.asarray(mesh.faces, dtype=np.uint32), color=color)
+                            for is_outside in (False, True):
+                                arrow = arrow_handles[i, channel, is_outside]
+                                arrow.visible = bool(strength > .01 and bool(outside) == is_outside)
+                                if arrow.visible:
+                                    arrow.position = point
+                                    arrow.wxyz = trimesh.transformations.quaternion_from_matrix(
+                                        trimesh.geometry.align_vectors([0, 0, 1], force / strength))
                     gates.value = (f"all-link={bool(data['gate_all'])} | object-link={bool(data['gate_object'])} | "
                                    f"object-pad={bool(data['gate_pad_object'])}")
-                    status.value = f"sim {self.sim_time:.1f}s | {env.num_envs} diagnostic envs | {mode.value} | 15 mm/N arrows, capped at 120 mm"
+                    status.value = f"sim {self.sim_time:.1f}s | {env.num_envs} diagnostic envs | {mode.value} | arrows show direction; force magnitude in N readouts"
                 time.sleep(max(0., env.step_dt - (time.monotonic() - tick)))
         finally:
             server.stop()
