@@ -21,6 +21,7 @@ class PadGeometry:
     bounds: np.ndarray  # in Touch CAD frame, expanded by tolerance
     surface_point: np.ndarray  # on the ACTUAL G1 collision mesh
     outward: np.ndarray
+    back_surface_point: np.ndarray
 
 
 def load_pad_geometry(g1_urdf: Path, touch_description: Path) -> list[PadGeometry]:
@@ -53,5 +54,6 @@ def load_pad_geometry(g1_urdf: Path, touch_description: Path) -> list[PadGeometr
         outward = transform[:3, 2 if finger == "thumb" else 0]
         projection = candidates @ outward
         surface = candidates[projection.argmax()].copy()
-        pads.append(PadGeometry(mesh, transform, bounds, surface, outward.copy()))
+        back = actual.vertices[(actual.vertices @ outward).argmin()].copy()
+        pads.append(PadGeometry(mesh, transform, bounds, surface, outward.copy(), back))
     return pads

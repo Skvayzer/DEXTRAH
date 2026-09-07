@@ -74,6 +74,12 @@ class Diagnostic:
         self.contacts = None
         self.object_meshes = [urdf_mesh(path) for path in self.env._object_urdf_paths]
         self.object_ids = self.env._object_asset_index_per_env.cpu().tolist()
+        self.handle_radii = []
+        for path in self.env._object_urdf_paths:
+            geometry = ET.parse(path).getroot().find("link/collision/geometry")
+            box, cylinder = geometry.find("box"), geometry.find("cylinder")
+            self.handle_radii.append(np.fromstring(box.get("size"), sep=" ")[2] / 2
+                                     if box is not None else float(cylinder.get("radius")))
         self.sim_time = 0.
         self.park_probe()
 
@@ -108,8 +114,7 @@ class Diagnostic:
         point, normal = pad.surface_point.copy(), pad.outward.copy()
         if back:
             # Opposite ACTUAL collision surface, outside the Touch CAD window.
-            mesh = trimesh.load(env.g1_urdf.parent / f"meshes/{TIP_BODIES[finger]}.STL", force="mesh")
-            point = mesh.vertices[(mesh.vertices @ normal).argmin()].copy()
+            point = pad.back_surface_point
             normal = -normal
         vector = lambda x: torch.as_tensor(x, device=env.device, dtype=torch.float32)
         return position + quat_apply(quaternion, vector(point)), quat_apply(quaternion, vector(normal))
@@ -122,11 +127,7 @@ class Diagnostic:
         elif mode == "Tool contact fixture":
             point, normal = self.surface(env_id, finger)
             # Touch the positive-z side of the handle (not an arbitrary COM).
-            path = env._object_urdf_paths[self.object_ids[env_id]]
-            geometry = ET.parse(path).getroot().find("link/collision/geometry")
-            box, cylinder = geometry.find("box"), geometry.find("cylinder")
-            radius = (np.fromstring(box.get("size"), sep=" ")[2] / 2 if box is not None
-                      else float(cylinder.get("radius")))
+            radius = self.handle_radii[self.object_ids[env_id]]
             rotation = trimesh.geometry.align_vectors([0, 0, 1], -numpy(normal))[:3, :3]
             rotation_t = torch.as_tensor(rotation, device=env.device, dtype=torch.float32)
             root_pos = point + normal * gap - rotation_t[:, 2] * radius
@@ -241,20 +242,29 @@ class Diagnostic:
         reset = server.add_gui_button("Reset scene", color="orange")
         reset_event = threading.Event()
         reset.on_click(lambda _: reset_event.set())
+        focus = server.add_gui_button("Focus hand")
+        focus_event = threading.Event()
+        focus.on_click(lambda _: focus_event.set())
         status = server.add_gui_text("State", "initializing", disabled=True)
         gates = server.add_gui_text("ADEPT >1 N gates", "initializing", disabled=True)
         readouts = [server.add_gui_text(name, "", disabled=True) for name in FINGERS]
         server.add_gui_markdown("Readout: pad resultant raw/filtered N; O/T/P normal load N; contact duration s. Hysteresis 0.15/0.08 N and 30 ms filter are diagnostic choices, not calibrated hardware settings. Object identity and exact contact locations are simulator-only privileges; no pressure image or shear is synthesized.")
 
+        camera_focus = np.asarray([0., .06, .95])
+
         @server.on_client_connect
         def camera(client):
-            client.camera.position = (.65, -.65, 1.4)
-            client.camera.look_at = (0., .06, .95)
+            client.camera.position = camera_focus + np.asarray([.23, -.26, .18])
+            client.camera.look_at = camera_focus
             client.camera.up_direction = (0., 0., 1.)
 
         root = server.add_frame("/robot", show_axes=False)
         robot = ViserUrdf(server, env.g1_urdf, root_node_name="/robot", mesh_color_override=(.62, .65, .70))
-        visual_names = tuple(robot.get_actuated_joint_names())
+        # Only the PRESENTATION copy drops mimic constraints. The physics and
+        # training URDF are untouched; contact-loaded distal angles are measured.
+        for joint in robot._urdf.joint_map.values():
+            joint.mimic = None
+        visual_names = tuple(robot._urdf.joint_map)
         from isaacsimenvs.tasks.play.utils.scene_utils import G1_BODY_DEFAULT_JOINT_POS
         base_q = np.asarray([G1_BODY_DEFAULT_JOINT_POS.get(name, 0.) for name in visual_names])
         joint_map = {name: i for i, name in enumerate(env.robot.joint_names)}
@@ -307,9 +317,22 @@ class Diagnostic:
                     for j, name in enumerate(visual_names):
                         if name in joint_map:
                             q[j] = measured[joint_map[name]]
-                    robot.update_cfg(q)
+                    robot.update_cfg(dict(zip(visual_names, q)))
                     root.position = numpy(env.robot.data.root_pos_w[index]) - origin
                     root.wxyz = numpy(env.robot.data.root_quat_w[index])
+                    base_transform = trimesh.transformations.quaternion_matrix(root.wxyz)
+                    base_transform[:3, 3] = root.position
+                    errors = []
+                    for i, body in enumerate(TIP_BODIES):
+                        visual_pose = base_transform @ robot._urdf.get_transform(body)
+                        errors.append(np.linalg.norm(visual_pose[:3, 3] - (data["tip_pos_w"][i] - origin)))
+                    if max(errors) > .002:
+                        raise RuntimeError(f"Viser/PhysX distal-frame misalignment: {errors} meters")
+                    camera_focus = data["tip_pos_w"].mean(axis=0) - origin
+                    if focus_event.is_set():
+                        for client in server.get_clients().values():
+                            camera(client)
+                        focus_event.clear()
                     table.position = numpy(env.table.data.root_pos_w[index]) - origin
                     table.wxyz = numpy(env.table.data.root_quat_w[index])
                     for i, obj in enumerate(objects):
