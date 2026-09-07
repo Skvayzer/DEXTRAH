@@ -366,7 +366,7 @@ class Diagnostic:
                         # Viser 0.1 MeshHandle has no dynamic color property.
                         active_pads[i].visible = bool(state.contact[index, i])
                         pads[i].visible = not active_pads[i].visible
-                        links[i].visible = np.linalg.norm(data["net_w"][i]) > .1 and not bool(state.contact[index, i])
+                        links[i].visible = bool(np.linalg.norm(data["net_w"][i]) > .1 and not bool(state.contact[index, i]))
                         loads = data["pad_load_n"][i]
                         readouts[i].value = (f"{float(state.raw_n[index,i]):.2f}/{float(state.filtered_n[index,i]):.2f} N | "
                                             f"O/T/P {loads[0]:.2f}/{loads[1]:.2f}/{loads[2]:.2f} | "
@@ -387,7 +387,7 @@ class Diagnostic:
                                 outside_markers[i][channel].position = point
                             strength = float(np.linalg.norm(force))
                             marker = point_markers[i][channel]
-                            marker.visible = loads[channel] > .01
+                            marker.visible = bool(loads[channel] > .01)
                             if marker.visible:
                                 marker.position = point
                             key = (i, channel)
