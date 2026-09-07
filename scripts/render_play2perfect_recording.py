@@ -16,6 +16,7 @@ def main():
     parser.add_argument("recording", type=Path)
     parser.add_argument("--video-name", default="play2perfect-sapg.mp4")
     parser.add_argument("--limit-frames", type=int, default=0)
+    parser.add_argument("--fabrics", action="store_true", help="Show recorded training collision spheres")
     args = parser.parse_args()
     if not os.environ.get("SLURM_JOB_ID"):
         raise RuntimeError("Run rendering inside the user's Slurm GPU allocation")
@@ -39,13 +40,18 @@ def main():
     print("RENDER_EGL_DEVICE", candidates[0], "CUDA_VISIBLE_DEVICES",
           os.environ.get("CUDA_VISIBLE_DEVICES"), flush=True)
     meta = json.loads((args.recording / "metadata.json").read_text())
+    if args.fabrics and not meta.get("fabrics_enabled"):
+        raise ValueError("Sphere visualization requires a fabric-enabled policy recording")
     trajectory = np.load(args.recording / "trajectory.npz", allow_pickle=False)
     frames = min(meta["frames"], args.limit_frames or meta["frames"])
     urdf = yourdfpy.URDF.load(meta["robot_urdf"])
     for joint in urdf.joint_map.values():
         joint.mimic = None
+    if args.fabrics:
+        urdf.update_cfg(meta["visual_static_joint_pos"])
     urdf.update_cfg(dict(zip(meta["joint_names"], trajectory["joint_pos"][0])))
-    scene = pyrender.Scene(bg_color=[.94, .96, .98, 1.], ambient_light=[.4, .4, .4])
+    scene = pyrender.Scene(bg_color=[.94, .96, .98, 1.],
+                           ambient_light=[.18, .18, .18] if args.fabrics else [.4, .4, .4])
     validation = {"frames": 0, "max_fk_error_m": 0., "max_fk_angle_rad": 0.}
 
     def pose(position, quaternion):
@@ -69,6 +75,8 @@ def main():
         mesh = urdf.scene.geometry[geometry_name].copy()
         mesh.apply_transform(local)
         color = [.70, .73, .77, 1.] if "right_" in link else [.33, .38, .44, 1.]
+        if args.fabrics:
+            color[3] = .45
         handles.append((link, add_mesh(mesh, color)))
     assets = {}
     for name in ("object", "table", "goal"):
@@ -78,6 +86,26 @@ def main():
             "object": [1., .48, .08, 1.], "table": [.46, .55, .61, 1.],
             "goal": [.10, .90, .35, .25],
         }[name])
+    sphere_nodes = []
+    if args.fabrics:
+        from fabric_recording_geometry import verify_sphere_centers, sphere_clearances
+        geometry = meta["fabric_geometry"]
+        validation.update(max_sphere_center_error_m=0., max_clearance_error_m=0.,
+                          min_proxy_clearance_m=float("inf"),
+                          dynamic_spheres=len(geometry["dynamic"]), fixed_spheres=len(geometry["fixed"]))
+        for group in ("dynamic", "fixed"):
+            for spec in geometry[group]:
+                radius = spec["radius"]
+                base_color = [.02, .72, .70] if group == "dynamic" else [.15, .30, .95]
+                fill_node = add_mesh(trimesh.creation.icosphere(subdivisions=2, radius=radius), [*base_color, .18])
+                rings = []
+                for axis in ([1., 0., 0.], [0., 1., 0.], [0., 0., 1.]):
+                    ring = trimesh.creation.annulus(r_min=radius-.0006, r_max=radius+.0006,
+                                                    height=.0012, sections=48)
+                    ring.apply_transform(trimesh.geometry.align_vectors([0., 0., 1.], axis))
+                    rings.append(ring)
+                outline = add_mesh(trimesh.util.concatenate(rings), [*base_color, 1.])
+                sphere_nodes.append((group, fill_node, outline, base_color))
     ground = trimesh.creation.box([3., 3., .01])
     ground.apply_translation([0., 0., -.006])
     add_mesh(ground, [.83, .86, .89, 1.])
@@ -90,10 +118,10 @@ def main():
     camera_pose[:3, :3] = np.column_stack((x, np.cross(z, x), z))
     camera_pose[:3, 3] = eye
     scene.add(pyrender.PerspectiveCamera(yfov=.80, znear=.02, zfar=10.), pose=camera_pose)
-    scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.5), pose=camera_pose)
+    scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=1.4 if args.fabrics else 2.5), pose=camera_pose)
     fill = camera_pose.copy()
     fill[:3, 3] = [-1., -.5, 2.]
-    scene.add(pyrender.PointLight(color=np.ones(3), intensity=6.), pose=fill)
+    scene.add(pyrender.PointLight(color=np.ones(3), intensity=2. if args.fabrics else 6.), pose=fill)
     body_ids = {name: i for i, name in enumerate(meta["body_names"])}
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     title_font = ImageFont.truetype(font_path, 25)
@@ -127,12 +155,42 @@ def main():
             for name, node in assets.items():
                 value = trajectory[name][index]
                 scene.set_pose(node, pose(value[:3], value[3:]))
+            if args.fabrics:
+                moving, fixed = trajectory["fabric_dynamic"][index], trajectory["fabric_fixed"][index]
+                center_error = verify_sphere_centers(geometry, meta["body_names"],
+                    trajectory["body_pos"][index], trajectory["body_quat"][index], base, moving, fixed)
+                gaps, moving_min, fixed_min = sphere_clearances(
+                    geometry, moving, fixed, trajectory["fabric_table_height"][index])
+                recorded = trajectory["fabric_clearance"][index]
+                np.testing.assert_allclose(gaps, recorded, atol=2.e-6, rtol=1.e-5)
+                validation["max_sphere_center_error_m"] = max(validation["max_sphere_center_error_m"], center_error)
+                validation["max_clearance_error_m"] = max(validation["max_clearance_error_m"], float(np.abs(gaps-recorded).max()))
+                validation["min_proxy_clearance_m"] = min(validation["min_proxy_clearance_m"], float(gaps.min()))
+                counters = {"dynamic": 0, "fixed": 0}
+                for group, fill_node, outline, base_color in sphere_nodes:
+                    s = counters[group]
+                    center = moving[s] if group == "dynamic" else fixed[s]
+                    minimum = moving_min[s] if group == "dynamic" else fixed_min[s]
+                    # Fixed obstacles retain their blue identity. Moving proxies
+                    # highlight geometric proximity, not measured contact forces.
+                    color = base_color
+                    if group == "dynamic":
+                        color = ([.95, .10, .13] if minimum < 0 else
+                                 [1., .55, .02] if minimum < geometry["influence_distance"] else base_color)
+                    transform = pose(center, [1., 0., 0., 0.])
+                    for node, alpha in ((fill_node, .18), (outline, 1.)):
+                        scene.set_pose(node, transform)
+                        node.mesh.primitives[0].material.baseColorFactor = [*color, alpha]
+                    counters[group] += 1
             rgb, _ = renderer.render(scene)
             image = Image.fromarray(rgb)
             draw = ImageDraw.Draw(image)
             draw.rectangle([0, 0, 1280, 75], fill=(242, 245, 248))
-            draw.text((22, 10), "Play2Perfect SAPG | G1 + BrainCo Revo2", font=title_font, fill=(25, 38, 52))
-            draw.text((22, 43), f"Checkpoint epoch {meta['checkpoint_epoch']:,} | deterministic leader | seed {meta['seed']} | uncut rollout",
+            title = "Fabrics applied to G1 RL training" if args.fabrics else "Play2Perfect SAPG | G1 + BrainCo Revo2"
+            subtitle = ("14 moving spheres + 7 fixed body spheres | recorded fabric-enabled policy rollout"
+                        if args.fabrics else f"Checkpoint epoch {meta['checkpoint_epoch']:,} | deterministic leader | seed {meta['seed']} | uncut rollout")
+            draw.text((22, 10), title, font=title_font, fill=(25, 38, 52))
+            draw.text((22, 43), subtitle,
                       font=text_font, fill=(60, 75, 90))
             draw.rectangle([0, 655, 1280, 720], fill=(242, 245, 248))
             seconds = trajectory["step"][index] * meta["policy_dt"]
@@ -140,8 +198,14 @@ def main():
             line = (f"{seconds:05.2f} / {meta['seconds']:.0f} s   |   Goals: {int(trajectory['goal_hits'][index])}"
                     f"   |   Lifted: {'yes' if trajectory['lifted'][index] else 'no'}"
                     f"   |   Goal error: {error_text}   |   Resets: {int(trajectory['resets'][index])}")
+            if args.fabrics:
+                line = (f"{seconds:05.2f} / {meta['seconds']:.0f} s  |  Min proxy gap: {gaps.min()*100:.1f} cm"
+                        f"  |  Avoidance range: {geometry['influence_distance']*100:g} cm"
+                        f"  |  Resets: {int(trajectory['resets'][index])}  |  Body fixed")
             draw.text((22, 663), line, font=text_font, fill=(25, 38, 52))
-            draw.text((22, 694), "Measured simulation; whole body is static context. Original training disturbances enabled. Orange: tool. Green: target.",
+            footer = ("Blue: fixed body  |  Teal: moving arm/hand  |  Amber: within avoidance range  |  Red: proxy overlap (not a contact sensor)"
+                      if args.fabrics else "Measured simulation; whole body is static context. Original training disturbances enabled. Orange: tool. Green: target.")
+            draw.text((22, 694), footer,
                       font=small_font, fill=(60, 75, 90))
             encoder.stdin.write(np.asarray(image, dtype=np.uint8).tobytes())
             if index in (0, 60, 150, 300, 450):
