@@ -54,6 +54,23 @@ Slurm 319 starts from scratch with 24,576 environments, 1,200 procedural tools,
 one RTX 6000 Ada (physical GPU 2, UUID `GPU-4a10e4cf-0808-67e3-468e-3e883b4f7ca1`),
 W&B enabled, and an initial 8-billion-frame budget.
 
+The full-scale run passed 56 epochs (21.63 million frames) with checkpoints
+written and W&B reporting the new episode statistics. The last ten measured
+epochs averaged approximately 134,827 frames/second, including policy inference
+and learning. GPU use was approximately 38 GiB at 96% utilization in one sample.
+Rewards, losses, and controller metrics were finite. One NaN occurred in
+`auxiliary_stats/off_on_grad_similarity`, the same undefined diagnostic cosine
+seen in the preceding SAPG run; no other scalar contained NaN or infinity.
+
+After the first full episode horizon, the leader episode lift fraction was
+about 0.0227 and any-success fraction 0.001. These are startup measurements,
+not evidence of an improved learning rate. Early statistics before the full
+horizon were biased by which episodes finished first. Fabric sphere constraints
+still show some violations (latest constraint penetration fraction about
+0.0023); this controller is not a proof of collision-free behavior.
+
+W&B: https://wandb.ai/skvayzer/adept/runs/unique_id_0_g1_adept_sapg_simtoolreal_absolute_v2_seed_42
+
 The learning hypothesis remains to be tested: restoring the original action
 semantics should improve exploration of closing and lifting. The control tests
 cannot establish that it will learn successful reposing. Compare leader episode

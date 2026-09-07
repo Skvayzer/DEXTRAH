@@ -96,7 +96,7 @@ Useful W&B series include:
 - `episode_final/ever_lifted` and `episode_final/any_success` for the fraction
   of completed leader episodes with a lift or at least one reposing success;
 - `episode_final/successes` for goals reached per completed leader episode;
-- `episode_cumulative/lifting_rew` and `episode_cumulative/lifting_bonus` for
+- `episode_cumulative/lifting_rew` and `episode_cumulative/lift_bonus_rew` for
   comparison with the original Play2Perfect run;
 - `fabric/min_clearance_m`, `fabric/active_constraint_fraction`, and
   `fabric/penetration_fraction` for collision safety;
