@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from pathlib import Path
 
 import torch
@@ -10,7 +11,7 @@ import torch
 from isaaclab.envs import DirectRLEnv
 
 from isaacsimenvs.tasks.play.play_env import PlayEnv
-from isaacsimenvs.tasks.play.utils.action_utils import apply_wrench_dr
+from isaacsimenvs.tasks.play.utils.action_utils import apply_action_pipeline, apply_wrench_dr
 from isaacsimenvs.tasks.play.utils.object_size_distributions import (
     OBJECT_SIZE_DISTRIBUTIONS,
 )
@@ -110,8 +111,14 @@ class G1Revo2AdeptEnv(PlayEnv):
             raise ValueError("this task requires fabric.enabled=true")
         if fabric_cfg.steps_per_policy_step <= 0:
             raise ValueError("fabric.steps_per_policy_step must be positive")
-        if fabric_cfg.max_joint_delta <= 0.0:
-            raise ValueError("fabric.max_joint_delta must be positive")
+        if not math.isclose(
+            fabric_cfg.timestep * fabric_cfg.steps_per_policy_step,
+            self.step_dt, rel_tol=1.0e-6,
+        ):
+            raise ValueError("fabric integration duration must equal the policy step")
+        for weight in (fabric_cfg.pca_prior_initial_weight, fabric_cfg.pca_prior_final_weight):
+            if not 0.0 <= weight < 1.0:
+                raise ValueError("PCA prior weights must be in [0, 1) to retain full hand control")
         if fabric_cfg.pca_prior_anneal_frames < 0:
             raise ValueError("fabric.pca_prior_anneal_frames cannot be negative")
 
@@ -139,6 +146,8 @@ class G1Revo2AdeptEnv(PlayEnv):
         self._last_tracking_error = torch.zeros(self.num_envs, device=self.device)
         self._last_collision: CollisionBatch | None = None
         self._last_pca_weight = 0.0
+        self._last_pca_correction = torch.zeros(self.num_envs, device=self.device)
+        self._episode_ever_lifted = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
     def _load_pca_action_map(self) -> FrozenPCAHandActionMap | None:
         cfg = self.cfg.fabric
@@ -171,23 +180,6 @@ class G1Revo2AdeptEnv(PlayEnv):
             self.robot.data.joint_vel.index_select(1, joint_ids),
         )
 
-    def _delayed_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        actions = torch.clamp(actions.to(self.device), -1.0, 1.0)
-        dr = self.cfg.domain_randomization
-        if not dr.use_action_delay or dr.action_delay_max <= 0:
-            return actions
-        episode_start = (self.episode_length_buf == 0) & (self._successes == 0)
-        if episode_start.any():
-            self._action_queue[episode_start] = actions[episode_start].unsqueeze(1)
-        self._action_queue = torch.roll(self._action_queue, shifts=1, dims=1)
-        self._action_queue[:, 0, :] = actions
-        delay_index = torch.randint(
-            0, self._action_queue.shape[1], (self.num_envs,), device=self.device
-        )
-        return self._action_queue[
-            torch.arange(self.num_envs, device=self.device), delay_index
-        ]
-
     def _pca_prior_weight(self) -> float:
         cfg = self.cfg.fabric
         if self._pca_action_map is None:
@@ -206,12 +198,12 @@ class G1Revo2AdeptEnv(PlayEnv):
         weight = self._pca_prior_weight()
         self._last_pca_weight = weight
         if self._pca_action_map is None or weight == 0.0:
+            self._last_pca_correction.zero_()
             return target
         hand = target[:, 7:]
-        coordinates = self._pca_action_map(hand)
-        projected = self._pca_action_map.reconstruct_clipped(coordinates)
         target = target.clone()
-        target[:, 7:] = torch.lerp(hand, projected, weight)
+        target[:, 7:] = self._pca_action_map.soft_prior(hand, weight)
+        self._last_pca_correction = (target[:, 7:] - hand).abs().mean(dim=1)
         return target
 
     def _sync_tracking_outliers(
@@ -236,13 +228,14 @@ class G1Revo2AdeptEnv(PlayEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone()
-        delayed_actions = self._delayed_actions(actions)
+        # Reuse the proven P2P delay, arm accumulator, absolute hand targets,
+        # and smoothing. _prev_targets is its independent nominal state and is
+        # already visible in the policy's prev_action_targets observation.
+        apply_action_pipeline(self, actions.clamp(-1.0, 1.0))
         measured_position, measured_velocity = self._measured_canonical_state()
         self._sync_tracking_outliers(measured_position, measured_velocity)
         assert self.adept_fabric.state is not None
-        target = self.adept_fabric.state.position + (
-            self.cfg.fabric.max_joint_delta * delayed_actions
-        )
+        target = self._cur_targets.index_select(1, self._canonical_joint_ids_lab)
         target = self._apply_pca_prior(target)
 
         measured_collision = self.collision_adapter.build()
@@ -286,7 +279,8 @@ class G1Revo2AdeptEnv(PlayEnv):
                 mimic_position, mimic_lower, mimic_upper
             )
             self._cur_velocity_targets[:, self._mimic_target_joint_ids] = mimic_velocity
-        self._prev_targets = self._cur_targets.clone()
+        # Do not feed the fabric/PCA output back into the nominal accumulator:
+        # that would compound the prior and change P2P action semantics.
         apply_wrench_dr(self)
 
     def _apply_action(self) -> None:
@@ -376,6 +370,13 @@ class G1Revo2AdeptEnv(PlayEnv):
             self.extras["fabric/penetration_fraction"] = penetration.float().mean()
             self.extras["fabric/tracking_error_rad"] = self._last_tracking_error.mean()
             self.extras["fabric/pca_prior_weight"] = float(self._last_pca_weight)
+            self.extras["fabric/pca_correction_rad"] = self._last_pca_correction.mean()
+            measured, _ = self._measured_canonical_state()
+            nominal = self._prev_targets.index_select(1, self._canonical_joint_ids_lab)
+            hand_width = self._hand_upper - self._hand_lower
+            self.extras["control/nominal_hand_fraction"] = ((nominal[:, 7:] - self._hand_lower) / hand_width).mean()
+            self.extras["control/measured_hand_fraction"] = ((measured[:, 7:] - self._hand_lower) / hand_width).mean()
+            self.extras["control/nominal_tracking_error_rad"] = (nominal - measured).abs().mean()
             self.extras["true_objective"] = self._is_success.float().mean()
             self.extras["episode_cumulative"]["fabric_penetration"] = (
                 penetration.any(dim=1).float()
@@ -384,8 +385,11 @@ class G1Revo2AdeptEnv(PlayEnv):
                 self._last_tracking_error
             )
             self.extras["episode_final"]["fabric_min_clearance_m"] = (
-                self._episode_min_fabric_clearance
+                self._episode_min_fabric_clearance.clone()
             )
+            self._episode_ever_lifted |= self._lifted_object
+            self.extras["episode_final"]["ever_lifted"] = self._episode_ever_lifted.float()
+            self.extras["episode_final"]["any_success"] = (self._successes > 0).float()
 
         final = self.extras.get("final_observation")
         if (
@@ -413,6 +417,7 @@ class G1Revo2AdeptEnv(PlayEnv):
             self._fabric_obs_queue[env_ids] = 0.0
             self._episode_min_fabric_clearance[env_ids] = torch.inf
             self._cur_velocity_targets[env_ids] = 0.0
+            self._episode_ever_lifted[env_ids] = False
 
 
 __all__ = ["FABRIC_OBSERVATION_DIM", "G1Revo2AdeptEnv"]

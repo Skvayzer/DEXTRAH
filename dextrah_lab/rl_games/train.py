@@ -236,9 +236,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     observers = [IsaacAlgoObserver()]
     if args_cli.task == "Adept-G1-Revo2-SimToolReal-Repose":
-        # Publishes fabric safety scalars and per-episode reward components to
-        # TensorBoard; W&B receives them through sync_tensorboard.
-        observers.append(RLGPUAlgoObserver())
+        # Same observer as the proven P2P run: honors SAPG's leader boundary,
+        # preserves terminal success stats, and uses frames for every env tag.
+        from isaacsimenvs.utils.rlgames_utils import EnvStatsAlgoObserver
+
+        observers = [EnvStatsAlgoObserver()]
 
     if args_cli.adept_posttrain:
         from dextrah_lab.adept.post_training_observer import AdeptPostTrainingObserver

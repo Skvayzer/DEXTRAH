@@ -82,9 +82,8 @@ reset:
 
 fabric:
   enabled: true
-  timestep: 0.01666666667
+  timestep: 0.00833333333
   steps_per_policy_step: 2
-  max_joint_delta: 0.10
   velocity_target_factor: 1.0
   tracking_error_resync_threshold: 0.35
   table_surface_offset: 0.15
@@ -93,6 +92,6 @@ fabric:
   pca_enabled: true
   pca_artifact_path: "/data2/users/konstantin.smirnov/dex-ycb/revo2-g1-full-v1/revo2_human_motion_pca.npz"
   pca_artifact_sha256: "8cea2fe7602958bbefec826fd331a100c15145c7dd837c68406a07895a2237b3"
-  pca_prior_initial_weight: 0.35
+  pca_prior_initial_weight: 0.05
   pca_prior_final_weight: 0.05
   pca_prior_anneal_frames: 1000000000

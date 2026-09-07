@@ -143,6 +143,18 @@ class FrozenPCAHandActionMap(torch.nn.Module):
             f"frozen={not self.components.requires_grad}"
         )
 
+    def soft_prior(self, hand_joint_positions: torch.Tensor, weight: float) -> torch.Tensor:
+        """Gently bias full joint targets toward PCA without dropping a DOF.
+
+        Away from joint clipping, the residual outside the PCA subspace is
+        multiplied by (1 - weight), so all joint directions remain available.
+        Apply once to each nominal target, never recursively to this output.
+        """
+        if not 0.0 <= weight < 1.0:
+            raise ValueError("soft PCA weight must be in [0, 1)")
+        projected = self.reconstruct_clipped(self(hand_joint_positions))
+        return torch.lerp(hand_joint_positions, projected, weight)
+
 
 def load_fabric_pca_matrix(
     path: str | Path,

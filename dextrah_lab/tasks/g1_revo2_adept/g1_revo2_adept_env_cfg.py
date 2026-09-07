@@ -11,10 +11,9 @@ from dextrah_lab.g1_adept import ReducedAdeptFabricConfig
 @configclass
 class G1AdeptFabricCfg:
     enabled: bool = True
-    timestep: float = 1.0 / 60.0
+    timestep: float = 1.0 / 120.0
     arm_dof: int = 7
     steps_per_policy_step: int = 2
-    max_joint_delta: float = 0.10
     velocity_target_factor: float = 1.0
     tracking_error_resync_threshold: float = 0.35
     table_surface_offset: float = 0.15
@@ -29,7 +28,7 @@ class G1AdeptFabricCfg:
     pca_artifact_sha256: str = (
         "8cea2fe7602958bbefec826fd331a100c15145c7dd837c68406a07895a2237b3"
     )
-    pca_prior_initial_weight: float = 0.35
+    pca_prior_initial_weight: float = 0.05
     pca_prior_final_weight: float = 0.05
     pca_prior_anneal_frames: int = 1_000_000_000
 

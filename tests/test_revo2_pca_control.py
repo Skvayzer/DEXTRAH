@@ -79,3 +79,27 @@ def test_joint_order_mismatch_is_rejected() -> None:
         FrozenPCAHandActionMap(
             artifact, expected_joint_names=tuple(reversed(artifact_names))
         )
+
+
+def test_soft_prior_retains_six_independent_hand_directions() -> None:
+    action_map, _ = _action_map()
+    q = action_map.mean.clone().requires_grad_()
+    jacobian = torch.autograd.functional.jacobian(
+        lambda value: action_map.soft_prior(value, 0.05), q
+    )
+    singular_values = torch.linalg.svdvals(jacobian)
+    torch.testing.assert_close(singular_values[:5], torch.ones(5))
+    torch.testing.assert_close(singular_values[5], torch.tensor(0.95))
+
+    # An intentionally off-manifold target retains 95% of that component.
+    null_direction = torch.linalg.svd(action_map.components).Vh[-1]
+    target = action_map.mean + 0.1 * null_direction
+    result = action_map.soft_prior(target, 0.05)
+    torch.testing.assert_close(result - action_map.mean, 0.095 * null_direction)
+
+
+@pytest.mark.parametrize("weight", [-0.1, 1.0, float("nan")])
+def test_soft_prior_rejects_invalid_or_hard_projection_weights(weight) -> None:
+    action_map, _ = _action_map()
+    with pytest.raises(ValueError, match="weight"):
+        action_map.soft_prior(action_map.mean, weight)
