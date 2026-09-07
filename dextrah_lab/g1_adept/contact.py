@@ -45,6 +45,46 @@ def adept_grasp_gate(force_n: torch.Tensor, threshold_n: float = 1.) -> torch.Te
     return above[..., 0] & above[..., 1:].any(dim=-1)
 
 
+def aggregate_pad_contacts(raw_data, body_pos, body_quat, pad_origin, pad_rotation,
+                           pad_bounds):
+    """Filter INDIVIDUAL contacts by CAD window before summing forces.
+
+    Input is PhysX get_contact_data(dt=physics_dt); normal scalar already N.
+    Returns pad force, load-weighted centroid, summed normal load, and the
+    reconstructed unmasked pair force (for backend consistency checks).
+    """
+    force, points, normals, _separation, counts, starts = raw_data
+    counts, starts = counts.long(), starts.long()
+    n_env, n_channel = counts.shape
+    flat_counts = counts.flatten()
+    rows = torch.repeat_interleave(torch.arange(flat_counts.numel(), device=counts.device), flat_counts)
+    output = torch.zeros(n_env * n_channel, 3, device=points.device)
+    total_force, centroid, reconstructed = output.clone(), output.clone(), output.clone()
+    load = torch.zeros(n_env * n_channel, device=points.device)
+    if rows.numel():
+        block = flat_counts.cumsum(0) - flat_counts
+        index = starts.flatten()[rows] + torch.arange(rows.numel(), device=counts.device) - block[rows]
+        if index.min() < 0 or index.max() >= len(points) or rows.numel() >= len(points):
+            raise RuntimeError("contact-point buffer exhausted or invalid; increase capacity")
+        world = points[index]
+        vectors = normals[index] * force[index].reshape(-1, 1)
+        if not torch.isfinite(world).all() or not torch.isfinite(vectors).all():
+            raise RuntimeError("non-finite active PhysX contact")
+        env_ids = rows // n_channel
+        local = rotate_to_local(body_quat[env_ids], world - body_pos[env_ids])
+        in_pad_frame = (local - pad_origin) @ pad_rotation
+        accepted = ((in_pad_frame >= pad_bounds[0]) & (in_pad_frame <= pad_bounds[1])).all(dim=-1)
+        pad_vectors = vectors * accepted[:, None]
+        weights = force[index].reshape(-1).abs() * accepted
+        reconstructed.index_add_(0, rows, vectors)
+        total_force.index_add_(0, rows, pad_vectors)
+        load.index_add_(0, rows, weights)
+        centroid.index_add_(0, rows, world * weights[:, None])
+        centroid /= load.clamp_min(1.e-12)[:, None]
+    return (total_force.view(n_env, n_channel, 3), centroid.view(n_env, n_channel, 3),
+            load.view(n_env, n_channel), reconstructed.view(n_env, n_channel, 3))
+
+
 @dataclass(frozen=True)
 class ContactFilterConfig:
     # Provisional diagnostic thresholds, NOT Revo2 hardware calibration.

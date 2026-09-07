@@ -5,6 +5,7 @@ import torch
 
 from dextrah_lab.g1_adept.contact import (
     ContactFilterConfig, FingertipContactFilter, adept_grasp_gate, rotate_to_local,
+    aggregate_pad_contacts,
 )
 
 
@@ -80,3 +81,32 @@ def test_invalid_parameters():
         FingertipContactFilter(1).update(torch.zeros(1, 5, 3), 0.)
     with pytest.raises(ValueError):
         rotate_to_local(torch.zeros(1, 4), torch.ones(1, 3))
+
+
+def test_pad_mask_filters_individual_points_before_aggregation():
+    # Same pair has one front and one back contact: a centroid-only mask would
+    # incorrectly accept/reject both. Also exercise non-contiguous buffer starts.
+    force = torch.tensor([[99.], [2.], [3.], [99.], [4.], [99.]])
+    points = torch.tensor([[9., 9, 9], [.1, 0, 0], [-.1, 0, 0], [9., 9, 9], [1.1, 0, 0], [9., 9, 9]])
+    normals = torch.tensor([[1., 0, 0]]).expand(6, 3)
+    counts = torch.tensor([[2, 0], [0, 1]])
+    starts = torch.tensor([[1, 0], [0, 4]])
+    raw = (force, points, normals, torch.zeros(6), counts, starts)
+    actual = aggregate_pad_contacts(raw, torch.tensor([[0., 0, 0], [1., 0, 0]]),
+        torch.tensor([[1., 0, 0, 0]]).expand(2, 4), torch.zeros(3), torch.eye(3),
+        torch.tensor([[0., -.2, -.2], [.2, .2, .2]]))
+    vectors, centroid, load, reconstructed = actual
+    torch.testing.assert_close(load, torch.tensor([[2., 0], [0, 4.]]))
+    torch.testing.assert_close(vectors[:, :, 0], load)
+    assert centroid[0, 0, 0] == .1
+    assert reconstructed[0, 0, 0] == 5.
+
+
+def test_no_contacts_produce_finite_zeros():
+    raw = (torch.zeros(10, 1), torch.full((10, 3), float("nan")),
+           torch.zeros(10, 3), torch.zeros(10), torch.zeros(2, 3, dtype=torch.long),
+           torch.zeros(2, 3, dtype=torch.long))
+    outputs = aggregate_pad_contacts(raw, torch.zeros(2, 3),
+        torch.tensor([[1., 0, 0, 0]]).expand(2, 4), torch.zeros(3), torch.eye(3),
+        torch.tensor([[-1.] * 3, [1.] * 3]))
+    assert all(torch.isfinite(x).all() and not x.any() for x in outputs)
