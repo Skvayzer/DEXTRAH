@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-envs", type=int, default=6)
     parser.add_argument("--env-id", type=int, default=0)
+    parser.add_argument("--select-successful-env", action="store_true",
+                        help="Record all envs; select one continuous rollout by goals, then sustained lift")
     parser.add_argument("--success-tolerance", type=float, default=.01)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
@@ -49,6 +51,7 @@ def main():
     import torch
     import yaml
     import yourdfpy
+    from recording_selection import summarize_candidate, select_candidate
     from dataclasses import asdict
     from isaaclab.envs.utils.spaces import (
         replace_env_cfg_spaces_with_strings, replace_strings_with_env_cfg_spaces,
@@ -188,48 +191,42 @@ def main():
         obs = player.env_reset(wrapped)
         player.get_batch_size(obs, 1)
         print("CHECKPOINT_LOADED_STRICT " + json.dumps(metadata), flush=True)
-        e = args.env_id
-        # Export the exact generated primitive geometry before env.close removes
-        # temporary assets. No re-generation or substitute tool is used to render.
-        for name, resolver in (("object", object_urdf_for_env), ("table", table_urdf_for_env)):
-            text, path = resolver(env, e)
-            model = yourdfpy.URDF.load(path)
-            model.scene.export(args.output / f"{name}.glb")
-            (args.output / f"{name}.urdf").write_text(text)
-            metadata[f"{name}_source"] = str(path)
         metadata.update(joint_names=env.robot.joint_names, body_names=env.robot.body_names,
                         actor_observations=expected_obs, actions=13,
                         generated_object_count=len(env._object_urdf_paths),
-                        object_asset_index=int(env._object_asset_index_per_env[e]),
                         skipped_only_unassigned_temporary_object_prototypes=True)
-        frames, events, step_metrics = [], [], []
-        total_reward, goal_hits, resets = 0., 0, 0
-        peak_lift = 0.
+        frames = []
+        events = [[] for _ in range(args.num_envs)]
+        step_metrics = [[] for _ in range(args.num_envs)]
+        total_reward = np.zeros(args.num_envs)
+        goal_hits = np.zeros(args.num_envs, dtype=np.int64)
+        resets = np.zeros(args.num_envs, dtype=np.int64)
+        previous_episode_goals = np.zeros(args.num_envs)
         begin = time.monotonic()
 
         def array(tensor):
             return tensor.detach().cpu().numpy().copy()
 
         def snapshot(step):
-            origin = env.scene.env_origins[e]
+            origin = env.scene.env_origins
             def pose(asset):
-                return array(torch.cat((asset.data.root_pos_w[e] - origin, asset.data.root_quat_w[e])))
-            result = dict(step=step, joint_pos=array(env.robot.data.joint_pos[e]),
-                body_pos=array(env.robot.data.body_pos_w[e] - origin),
-                body_quat=array(env.robot.data.body_quat_w[e]), robot=pose(env.robot),
+                return array(torch.cat((asset.data.root_pos_w - origin, asset.data.root_quat_w), dim=-1))
+            result = dict(step=np.full(args.num_envs, step), joint_pos=array(env.robot.data.joint_pos),
+                body_pos=array(env.robot.data.body_pos_w - origin[:, None, :]),
+                body_quat=array(env.robot.data.body_quat_w), robot=pose(env.robot),
                 object=pose(env.object), table=pose(env.table), goal=pose(env.goal_viz),
-                reward=total_reward, goal_hits=goal_hits, resets=resets,
-                lifted=bool(env._lifted_object[e]),
-                goal_error=float(env._keypoints_max_dist[e]))
+                reward=total_reward.copy(), goal_hits=goal_hits.copy(), resets=resets.copy(),
+                lifted=array(env._lifted_object), goal_error=array(env._keypoints_max_dist),
+                lift_height=array(.05 + env.object.data.root_pos_w[:, 2] - origin[:, 2] - env._object_init_z))
             if args.fabrics:
                 # Sample after physics, using the training adapter itself.
                 # These are measured proxies, not lagging pre-step positions.
                 collision = env.collision_adapter.build()
                 result.update(
-                    fabric_dynamic=array(env.collision_adapter.dynamic_positions[e] - origin),
-                    fabric_fixed=array(env.collision_adapter.fixed_positions[e] - origin),
-                    fabric_clearance=array(collision.clearance[e]),
-                    fabric_table_height=float(env._table_z_per_env[e]) + cfg.fabric.table_surface_offset,
+                    fabric_dynamic=array(env.collision_adapter.dynamic_positions - origin[:, None, :]),
+                    fabric_fixed=array(env.collision_adapter.fixed_positions - origin[:, None, :]),
+                    fabric_clearance=array(collision.clearance),
+                    fabric_table_height=array(env._table_z_per_env) + cfg.fabric.table_surface_offset,
                 )
             return result
 
@@ -243,36 +240,63 @@ def main():
                 obs, reward, done, info = player.env_step(wrapped, action)
                 if not torch.isfinite(obs).all() or not torch.isfinite(env.robot.data.joint_pos).all():
                     raise RuntimeError("Non-finite rollout state")
-                total_reward += float(reward[e])
-                hit = bool(env._is_success[e])
-                goal_hits += int(hit)
-                lift = float(.05 + env.object.data.root_pos_w[e, 2]
-                    - env.scene.env_origins[e, 2] - env._object_init_z[e])
-                peak_lift = max(peak_lift, lift)
-                step_metrics.append(dict(step=step + 1, reward=float(reward[e]),
-                    goal_hit=hit, done=bool(done[e]), lifted=bool(env._lifted_object[e]),
-                    lift_height_m=lift, goal_error_m=float(env._keypoints_max_dist[e])))
+                rewards, dones = array(reward).reshape(-1), array(done).reshape(-1).astype(bool)
+                total_reward += rewards
+                # episode_final is captured before auto-reset, so terminal goal
+                # hits are not lost when the environment clears its buffers.
+                terminal = info.get("episode_final", {})
+                episode_goals = array(terminal["successes"])
+                hits = np.maximum(0, episode_goals - previous_episode_goals).astype(np.int64)
+                goal_hits += hits
+                previous_episode_goals = np.where(dones, 0, episode_goals)
+                lift = array(.05 + env.object.data.root_pos_w[:, 2]
+                    - env.scene.env_origins[:, 2] - env._object_init_z)
+                final_extras = info.get("final_model_state_extras", {})
+                if "lift_height" in final_extras:
+                    lift[dones] = array(final_extras["lift_height"])[dones]
+                lifted, errors = array(env._lifted_object), array(env._keypoints_max_dist)
+                for e in range(args.num_envs):
+                    step_metrics[e].append(dict(step=step + 1, reward=float(rewards[e]),
+                        goal_hit=bool(hits[e]), done=bool(dones[e]), lifted=bool(lifted[e]),
+                        lift_height_m=float(lift[e]), goal_error_m=float(errors[e])))
                 ended = done.reshape(-1).nonzero(as_tuple=False).flatten().to(player.device)
                 if player.is_rnn and ended.numel():
                     for state in player.states:
                         state[:, ended, :] = 0.
-                if bool(done[e]):
-                    resets += 1
-                    terminal = info.get("episode_final", {})
-                    events.append({"step": step + 1, "episode_final": {
+                resets += dones
+                for e in np.flatnonzero(dones):
+                    events[e].append({"step": step + 1, "episode_final": {
                         k: float(v[e]) for k, v in terminal.items()
                         if isinstance(v, torch.Tensor) and v.ndim == 1 and v.numel() == env.num_envs}})
                 if (step + 1) % 120 == 0:
                     print(f"ROLLOUT {step+1}/{count} sim_s={(step+1)*dt:.1f} "
-                          f"reward={total_reward:.2f} goals={goal_hits} resets={resets} "
+                          f"goals={goal_hits.tolist()} lifts_cm={np.round(lift*100, 1).tolist()} "
+                          f"resets={resets.tolist()} "
                           f"wall_s={time.monotonic()-begin:.1f}", flush=True)
-        np.savez_compressed(args.output / "trajectory.npz",
-            **{key: np.stack([f[key] for f in frames]) for key in frames[0]})
-        metadata.update(frames=len(frames), total_reward=total_reward, goal_hits=goal_hits,
-                        resets=resets, peak_lift_height_m=peak_lift,
+        summaries = [summarize_candidate(metrics, dt, cfg.reward.lifting_bonus_threshold)
+                     for metrics in step_metrics]
+        e = select_candidate(summaries) if args.select_successful_env else args.env_id
+        stacked = {key: np.stack([f[key] for f in frames]) for key in frames[0]}
+        np.savez_compressed(args.output / "trajectory.npz", **{key: value[:, e] for key, value in stacked.items()})
+        if args.select_successful_env:
+            np.savez_compressed(args.output / "candidates.npz", **stacked)
+            metadata["selection"] = "Selected one continuous environment by goal count, sustained lift, then reward; not a success-rate benchmark"
+        # Export the exact selected geometry before closing the environment.
+        for name, resolver in (("object", object_urdf_for_env), ("table", table_urdf_for_env)):
+            text, path = resolver(env, e)
+            model = yourdfpy.URDF.load(path)
+            model.scene.export(args.output / f"{name}.glb")
+            (args.output / f"{name}.urdf").write_text(text)
+            metadata[f"{name}_source"] = str(path)
+        metadata.update(frames=len(frames), **summaries[e],
+                        recorded_env_id=e, object_asset_index=int(env._object_asset_index_per_env[e]),
+                        selection_candidates=summaries,
+                        lift_metric_note="Reward lift metric = root height minus initial root height + 0.05 m; latched lifted flag is not sustained lift",
+                        lifting_bonus_threshold_m=cfg.reward.lifting_bonus_threshold,
                         wall_seconds=time.monotonic()-begin, completed=True)
         (args.output / "metadata.json").write_text(json.dumps(metadata, indent=2))
-        (args.output / "metrics.json").write_text(json.dumps({"steps": step_metrics, "episodes": events}))
+        (args.output / "metrics.json").write_text(json.dumps({"steps": step_metrics[e], "episodes": events[e]}))
+        (args.output / "candidate_metrics.json").write_text(json.dumps({"steps": step_metrics, "episodes": events}))
         print("RECORDING_CAPTURE_PASS " + json.dumps(metadata), flush=True)
     finally:
         env.close()
