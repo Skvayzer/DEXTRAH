@@ -123,7 +123,7 @@ def write_notes(root, info):
 
 The five human fingertips are represented in a wrist/palm-fixed frame and scaled by α=0.90, calibrated for this Revo2 model. Offline Adam solves bounded IK with a human-imitation term, a closure term, and a posture regularizer. The human weight γ decreases from 1 to 0 along each trace. Thus the resulting data are human-inspired and closure-shaped, not an exact copy of raw human trajectories.
 
-The fit uses centered robot joint configurations without per-joint standardization. If Q is the 62,892 × 6 configuration matrix, SVD of Q − mean(Q) yields the principal directions. Explained-variance fractions are squared singular values divided by their sum. The saved artifact contains a 5 × 6 matrix A and a six-angle mean. Its task map is x=Aq; affine reconstruction is q_hat=mean+(x−A mean)A in row-vector notation.
+The fit uses centered robot joint configurations without per-joint standardization. If Q is the 62,892 × 6 configuration matrix, SVD of Q − mean(Q) yields the principal directions. Explained-variance fractions are squared singular values divided by their sum. The saved artifact contains a 5 × 6 matrix A and a six-angle mean. In column-vector notation its task map is x=Aq and affine reconstruction is q_hat=mean+A.T(x−A mean). The code uses row batches: `x = q @ A.T` and `q_hat = mean + (x - mean @ A.T) @ A`.
 
 {table}
 
@@ -244,12 +244,14 @@ def validate_and_index(root):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument("bundle",type=Path)
-    root=parser.parse_args().bundle
+    parser.add_argument("--notes-only",action="store_true",help="Refresh notes, media checks and gallery without re-extracting assets")
+    args=parser.parse_args();root=args.bundle
     info=json.loads((root / "data" / "measurements.json").read_text())
     summary=json.loads((root / "data" / "summary.json").read_text())
-    make_tables(root,summary,info)
-    extra_figures(root,info)
-    sources(root)
+    if not args.notes_only:
+        make_tables(root,summary,info)
+        extra_figures(root,info)
+        sources(root)
     write_notes(root,info)
     validate_and_index(root)
 
