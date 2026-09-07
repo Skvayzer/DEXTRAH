@@ -6,6 +6,8 @@ response check, not a learned grasp-success evaluation.
 """
 import argparse
 import json
+import os
+import sys
 import traceback
 from types import SimpleNamespace
 
@@ -51,6 +53,7 @@ def check_observer():
 def main():
     check_observer()
     cfg = G1Revo2AdeptEnvCfg()
+    cfg.seed = 42
     cfg.scene.num_envs = args.num_envs
     cfg.assets.num_assets_per_type = 1
     cfg.domain_randomization.use_action_delay = False
@@ -111,7 +114,12 @@ def main():
             torch.testing.assert_close(env._prev_targets[1:], previous[1:])
             q, _ = env._measured_canonical_state()
             torch.testing.assert_close(env._prev_targets[0, env._canonical_joint_ids_lab], q[0])
-            torch.testing.assert_close(env.adept_fabric.state.position[0], q[0])
+            # P2P reset uses hardware limits; fabric has the configured 0.02
+            # rad inner margin. Its reset position is therefore margin-clamped.
+            torch.testing.assert_close(
+                env.adept_fabric.state.position[0],
+                q[0].clamp(env.adept_fabric.lower_limits, env.adept_fabric.upper_limits),
+            )
             obs = env._get_observations()
             assert obs["policy"].shape == (env.num_envs, 131)
             assert obs["critic"].shape == (env.num_envs, 153)
@@ -127,5 +135,7 @@ except Exception:
     # SimulationApp.close() can terminate the interpreter before Python prints
     # a pending exception. Preserve both the traceback and a nonzero exit code.
     traceback.print_exc()
-    raise
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(1)  # Kit's exit handler can otherwise replace the failure status.
 app.close()
