@@ -115,6 +115,10 @@ The installed Viser 0.1.34 cannot serialize NumPy boolean visibility flags and
 has a React hook failure with our theme-toggle configuration (reproduced in an
 empty CPU-only scene). The viewer uses native booleans, persistent glyphs and
 the default theme; no installed dependency or training environment was upgraded.
+The final browser run passed live rendering, camera focusing, pause/resume, and
+all five modes (pad probe, backside probe, tool fixture, table fixture, free
+physics), returning to Pad probe afterward. The rendered screenshot was
+inspected, and the laptop's localhost:8089 SSH tunnel was verified with HTTP GET.
 
 ## Running and viewing
 
