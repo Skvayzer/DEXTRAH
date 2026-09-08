@@ -27,6 +27,10 @@ parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
+parser.add_argument("--bps_warmstart_checkpoint", type=str, default=None,
+                    help="Expand original P2P SAPG weights; fresh optimizer and counters.")
+parser.add_argument("--bps_source_config", type=str, default=None)
+parser.add_argument("--bps_source_sha256", type=str, default=None)
 parser.add_argument("--sigma", type=str, default=None, help="The policy's initial standard deviation.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
@@ -53,6 +57,12 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.bps_warmstart_checkpoint:
+    if args_cli.checkpoint or args_cli.adept_posttrain or args_cli.pbt_worker_id is not None:
+        parser.error("BPS warm start cannot be combined with checkpoint resume or other warm starts")
+    if args_cli.task != "G1-Revo2-SimToolReal-Repose-BPS128" or not all(
+            (args_cli.bps_source_config, args_cli.bps_source_sha256)):
+        parser.error("BPS warm start requires the BPS128 task, source config and expected SHA256")
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -85,7 +95,8 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 # Register only the requested task family. The reduced G1 controller does not
 # require NVIDIA FABRICS, so a G1 launch should not import that optional stack.
-G1_PLAY_TASKS = {"Adept-G1-Revo2-SimToolReal-Repose", "G1-Revo2-SimToolReal-Repose-Direct"}
+G1_PLAY_TASKS = {"Adept-G1-Revo2-SimToolReal-Repose", "G1-Revo2-SimToolReal-Repose-Direct",
+                 "G1-Revo2-SimToolReal-Repose-BPS128"}
 if args_cli.task in G1_PLAY_TASKS:
     import dextrah_lab.tasks.g1_revo2_adept.gym_setup  # noqa: F401
 else:
@@ -188,6 +199,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # logging directory path: <train_dir>/<full_experiment_name>
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
     agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
+    if args_cli.task == "G1-Revo2-SimToolReal-Repose-BPS128":
+        env_cfg.bps_artifact_dir = os.path.join(log_root_path, log_dir, "bps")
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)
@@ -202,6 +215,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    if args_cli.task == "G1-Revo2-SimToolReal-Repose-BPS128":
+        # PlayEnv resolves observation dimensions at construction time.
+        dump_yaml(os.path.join(log_root_path, log_dir, "params", "env_resolved.yaml"), env.unwrapped.cfg)
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
@@ -255,6 +271,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actor_checkpoint=retrieve_file_path(args_cli.adept_actor_checkpoint)
             )
         )
+
+    if args_cli.bps_warmstart_checkpoint:
+        from dextrah_lab.object_shape.warmstart import BpsWarmstartObserver
+        observers.append(BpsWarmstartObserver(args_cli.bps_warmstart_checkpoint,
+                         args_cli.bps_source_config, args_cli.bps_source_sha256))
 
     if args_cli.pbt_worker_id is not None:
         if args_cli.pbt_dir is None:
