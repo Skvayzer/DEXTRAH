@@ -112,6 +112,24 @@ RTX 6000 Ada**, six groups of 4,096, 8 billion additional frames, W&B enabled,
 periodic checkpoint saving every 250 updates, and a seven-day Slurm limit.
 CPU geometry, cache, lookup and checkpoint-column tests are also included.
 
+Validated on 2026-09-08 in Slurm job **353**, completed with exit code 0:
+
+- 24 CPU tests passed in the workstation's training environment.
+- 1,200-object/1,200-environment runtime test: 650 steps, 1,343 resets,
+  76 terminal-observation steps; every USD reference identity check passed.
+- Expanded actor means, sigmas and recurrent states matched the old model
+  exactly in the recurrent validation; maximum critic value difference was
+  `1.6689300537109375e-06`.
+- 50 SAPG updates / 960,000 transitions completed. A separate allocated-CPU
+  checkpoint check found every actor/critic tensor finite. Newly added actor
+  and critic input-column norms grew from zero to 0.08182 and 0.34696.
+
+This establishes a working implementation and trainable shape inputs, not an
+improvement over the old policy. Smoke episode statistics cover a small,
+early-completing subset at the easy initial tolerance, so they are not a
+benchmark. Full-scale memory/throughput and longer-run learning remain to be
+measured in the full job.
+
 ## What to watch in W&B
 
 Use completed leader episodes, not maximum reward, as the primary view:
