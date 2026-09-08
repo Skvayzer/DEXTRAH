@@ -1,6 +1,6 @@
 # Revo2 tactile and arm-torque option (no training launched)
 
-Feature branch: `feature/g1-revo2-tactile-torque`.
+Feature branch: [`feature/g1-revo2-tactile-torque`](https://github.com/Skvayzer/DEXTRAH/tree/feature/g1-revo2-tactile-torque).
 
 This is a separate G1 Play2Perfect/SAPG + BPS-128 environment. It preserves the
 13 actions (7 arm, 6 hand), original rewards and terminations, and has no
@@ -58,6 +58,11 @@ The material covers the whole existing distal collider; the sensor mask covers
 only the tactile footprint. It does not yet model a separate soft pad over a
 rigid internal core. `touch.compliant=False` permits a rigid-contact comparison.
 
+The source task reapplies materials after scene initialization. The tactile
+task restores distal friction and the PhysX negative-restitution encoding of
+compliant stiffness afterwards, with a tensor round-trip assertion. Otherwise
+the requested compliance would silently be disabled by that source-task setter.
+
 ## Sensor response
 
 The sequence is physical contact -> 70 Hz acquisition -> configurable latency
@@ -76,14 +81,21 @@ Terminal critic observations are captured before the reset clears that history.
 ## Validation and live viewer
 
 `scripts/validate_revo2_touch_sim.py --headless --validate-only` runs observation,
-terminal/reset, and contact checks. It does not construct an optimizer or load a
-policy. Outputs go to `outputs/revo2_touch_live/`.
+terminal/reset, and contact checks. It constructs the actual SAPG actor/critic
+for forward-only shape checks, but never an optimizer or a trained policy.
+Outputs go to `outputs/revo2_touch_live/`.
 
 Without `--validate-only`, the same script serves Viser on 127.0.0.1:8091.
-Use `--no-tactile` / `--no-arm-torques` with validation mode to check other input
-layouts. The viewer requires tactile enabled.
+Use `--contract-only` with `--no-tactile` / `--no-arm-torques` to check other input
+layouts without a contact sweep. `--validate-then-serve` runs all checks before
+starting the viewer. The viewer requires tactile enabled; its physics pauses
+when no browser is connected. `--device cpu` uses CPU PhysX; `--device cuda:0`
+checks GPU PhysX. Both use the same contact-readout implementation.
 
-The hand is the actual simulated articulated G1 right-hand asset. A dynamic
+The hand is the actual simulated articulated G1 right-hand asset, held by
+bench-only narrow joint limits and position targets. This is a **clamped contact
+fixture**, not a freely moving arm. Original limits and default joint positions
+are restored before the normal task observation/reset/forward tests. A dynamic
 spherical indenter with rotation constrained by a test-fixture joint is moved
 by forces, not by replayed tactile samples. Its rotation is constrained to
 separate sliding from rolling. Tests: press/release on each finger; lateral
@@ -93,7 +105,25 @@ contact bench, not an autonomous grasp demonstration or training rollout.
 
 Blue vectors show compression; orange vectors show shear. The table compares
 instantaneous force with rate-limited sensor output and sample age. Probe drive
-forces are only fixture inputs: displayed tactile forces come from PhysX.
+forces are only fixture inputs: displayed tactile forces come from PhysX. Orange
+arrows have 5x visual magnification; their numeric values remain newtons. A force
+limit, travel limit and nonfinite-state checks stop the fixture on unsafe states.
+By default force glyphs are offset 30 mm outside the pad, with gray connectors
+to their actual contact points so the probe does not hide them. Uncheck
+**Offset force arrows** for contact-point origins. Arrow lengths are bounded
+for readability and are not a substitute for the numeric force readings.
+
+Choose a **Finger**, choose **Test**, then click **Run selected test**. A test
+approaches for 1 s, holds/slides until 4 s, then withdraws; the full cycle is
+5.5 s of simulation time. Pause with **Run physics** to inspect arrows and
+values. **Repeat test** is opt-in; **Release / cancel** disables repeating.
+The backside test should show physical contact without lighting the tactile pad.
+
+Browser checks are available in `scripts/check_live_touch_browser.py` (Playwright,
+Viser 1.1 frontend). They verify loaded contact readings, pause/resume and release,
+and save screenshots. The workstation's older Viser 0.1 package is not suitable
+for this script; the diagnostic deployment uses an isolated Viser 1.1 overlay,
+without modifying the running training environment's packages.
 
 ## Future training option — not executed
 

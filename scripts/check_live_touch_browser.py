@@ -27,10 +27,15 @@ def main():
             page.get_by_role('button',name='Run selected test',exact=True).click()
             expect(pause).to_be_checked()
             deadline=time.monotonic()+45
+            started=False
             while time.monotonic()<deadline:
                 match=re.search(r'test time ([\d.]+)',state.inner_text())
                 assert 'SAFETY STOP' not in state.inner_text()
-                if match and 2.2 <= float(match[1]) < 4.:
+                # Wait for the command to reset the case clock. The previous
+                # paused case may still display 2.2 s until the next UI update.
+                if match and float(match[1]) < .8:
+                    started=True
+                if started and match and 2.2 <= float(match[1]) < 4.:
                     pause.uncheck()
                     break
                 page.wait_for_timeout(60)

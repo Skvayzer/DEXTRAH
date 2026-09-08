@@ -409,11 +409,13 @@ class Bench:
         server.gui.add_button('Run selected test').on_click(lambda _:self.commands.put(('test',mode.value,selected.value)))
         server.gui.add_button('Release / cancel').on_click(lambda _:self.commands.put(('release',)))
         loop = server.gui.add_checkbox('Repeat test',initial_value=False)
+        offset_arrows = server.gui.add_checkbox('Offset force arrows',initial_value=True)
         state = server.gui.add_markdown('Ready')
         values = server.gui.add_markdown('')
         torque = server.gui.add_markdown('')
         server.gui.add_markdown('Blue = compression; orange = shear. Cyan pads turn gold on contact. '
             'Shear arrows use 5x visual magnification for visibility; numeric values remain N. '
+            'Offset arrows sit 30 mm outside the pad, connected to the true contact by a gray line. '
             'Arrows use instantaneous physics; table shows raw and rate-limited 10 Hz outputs. '
             'No privileged contact partner or position is passed to the policy.')
         def camera(client):
@@ -499,6 +501,15 @@ class Bench:
                             position=array(env.touch_contact_w[0,i]) if active else pose[:3,:3]@env.pad_geometry[i].surface_point+p
                             frame=pose[:3,:3]@array(env.pad_frames[i])
                             f=array(env.touch_raw[0,i])
+                            glyph_position=position-frame[:,0]*.03 if offset_arrows.value else position
+                            connector=f'/forces/{i}/offset'
+                            if connector in arrows:
+                                arrows.pop(connector).remove()
+                            if active and offset_arrows.value:
+                                points=trimesh.transform_points(np.array([position,glyph_position]),self.display)[None]
+                                arrows[connector]=server.scene.add_line_segments(connector,
+                                    points=points.astype(np.float32),colors=(145,145,155),
+                                    thickness=1.5,thickness_units='screen')
                             for name,vector,color in [('normal',frame[:,0]*f[0],(60,145,255)),('shear',frame[:,1:]@f[1:],(255,145,30))]:
                                 key=f'/forces/{i}/{name}'
                                 if key in arrows:
@@ -506,17 +517,19 @@ class Bench:
                                 length=np.linalg.norm(vector)
                                 if length>.02:
                                     unit=vector/length
-                                    arrow_length=min(.04,max(.004,length*(.06 if name=='shear' else .012)))
-                                    end=position+unit*arrow_length
+                                    arrow_length=min(.04 if name=='shear' else .02,
+                                                     max(.004,length*(.30 if name=='shear' else .06)))
+                                    end=glyph_position+unit*arrow_length
                                     side=np.cross(unit,[0.,0.,1.])
                                     if np.linalg.norm(side)<1e-5:
                                         side=np.cross(unit,[1.,0.,0.])
                                     side/=np.linalg.norm(side)
                                     head=min(.004,arrow_length*.35)
-                                    segments=np.array([[position,end],[end,end-unit*head+side*head*.5],
+                                    segments=np.array([[glyph_position,end],[end,end-unit*head+side*head*.5],
                                                        [end,end-unit*head-side*head*.5]])
                                     points=trimesh.transform_points(segments.reshape(-1,3),self.display).reshape(-1,2,3)
-                                    arrows[key]=server.scene.add_line_segments(key,points=points.astype(np.float32),colors=color,line_width=4.)
+                                    arrows[key]=server.scene.add_line_segments(key,points=points.astype(np.float32),colors=color,
+                                        thickness=4.,thickness_units='screen')
                     state.content=(f'**{self.case}** · {FINGERS[self.finger]} · '
                         f'test time {self.case_step*env.cfg.sim.dt:.2f} s · '
                         f'physics time {env._sim_step_counter*env.cfg.sim.dt:.2f} s')
