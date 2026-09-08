@@ -7,6 +7,7 @@ from pathlib import Path
 import gymnasium as gym
 
 from .g1_revo2_adept_env_cfg import G1Revo2AdeptEnvCfg
+from .g1_revo2_direct_env import G1Revo2DirectEnvCfg
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -24,5 +25,16 @@ gym.register(
         "rl_games_cfg_entry_point": str(
             _PACKAGE_DIR / "agents" / "g1_revo2_adept_sapg.yaml"
         ),
+    },
+)
+
+gym.register(
+    id="G1-Revo2-SimToolReal-Repose-Direct",
+    entry_point="dextrah_lab.tasks.g1_revo2_adept.g1_revo2_direct_env:G1Revo2DirectEnv",
+    order_enforce=False,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": G1Revo2DirectEnvCfg,
+        "rl_games_cfg_entry_point": str(_PACKAGE_DIR / "agents" / "g1_revo2_direct_sapg.yaml"),
     },
 )

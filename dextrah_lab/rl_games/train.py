@@ -85,7 +85,8 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 # Register only the requested task family. The reduced G1 controller does not
 # require NVIDIA FABRICS, so a G1 launch should not import that optional stack.
-if args_cli.task == "Adept-G1-Revo2-SimToolReal-Repose":
+G1_PLAY_TASKS = {"Adept-G1-Revo2-SimToolReal-Repose", "G1-Revo2-SimToolReal-Repose-Direct"}
+if args_cli.task in G1_PLAY_TASKS:
     import dextrah_lab.tasks.g1_revo2_adept.gym_setup  # noqa: F401
 else:
     import dextrah_lab.tasks.dextrah_kuka_allegro.gym_setup  # noqa: F401
@@ -235,7 +236,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create runner from rl-games
 
     observers = [IsaacAlgoObserver()]
-    if args_cli.task == "Adept-G1-Revo2-SimToolReal-Repose":
+    if args_cli.task in G1_PLAY_TASKS:
         # Same observer as the proven P2P run: honors SAPG's leader boundary,
         # preserves terminal success stats, and uses frames for every env tag.
         from isaacsimenvs.utils.rlgames_utils import EnvStatsAlgoObserver
