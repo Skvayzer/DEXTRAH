@@ -1,0 +1,11 @@
+{
+  "actor_dim": 231,
+  "critic_dim": 253,
+  "actions": 13,
+  "partial_resets": 1,
+  "terminal_steps": 2,
+  "arm_torque_source": "IsaacLab implicit-actuator clipped PD estimate",
+  "sensor_filter_paths": [],
+  "distal_materials": [],
+  "optimizer_steps": 0
+}

@@ -1,0 +1,42 @@
+{
+  "actor_dim": 249,
+  "critic_dim": 271,
+  "actions": 13,
+  "partial_resets": 1,
+  "terminal_steps": 2,
+  "arm_torque_source": "IsaacLab implicit-actuator clipped PD estimate",
+  "sensor_filter_paths": [
+    "/World/envs/env_.*/Table/box",
+    "/World/envs/env_.*/BodyCollision/body_collision",
+    "/World/envs/env_.*/Object/object_root",
+    "/World/envs/env_.*/TouchIndenter"
+  ],
+  "distal_materials": [
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ]
+  ],
+  "optimizer_steps": 0
+}

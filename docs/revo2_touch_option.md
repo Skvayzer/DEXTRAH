@@ -80,6 +80,8 @@ Terminal critic observations are captured before the reset clears that history.
 
 ## Validation and live viewer
 
+Completed results: [2026-09-08 CPU/GPU and browser validation](revo2_touch_validation_20260908.md).
+
 `scripts/validate_revo2_touch_sim.py --headless --validate-only` runs observation,
 terminal/reset, and contact checks. It constructs the actual SAPG actor/critic
 for forward-only shape checks, but never an optimizer or a trained policy.

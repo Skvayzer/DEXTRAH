@@ -253,9 +253,9 @@ class Bench:
             relative-=torch.dot(relative,self.normal)*self.normal
             probe_local=rotate_to_local(env.robot.data.body_quat_w[0,body],
                 env.probe.data.root_pos_w[0]-env.robot.data.body_pos_w[0,body]) @ env.pad_frames[self.finger]
-            # With zero velocity-solver iterations, PhysX can report transient
-            # correction velocities despite stationary poses. Measure actual
-            # relative tangential displacement too; retain both diagnostics.
+            # Reported velocities and finite-difference pose motion differ in
+            # this fixture (the task uses zero velocity-solver iterations).
+            # Retain both and independently bound actual relative displacement.
             pose_speed=(0. if self.previous_probe_local is None else
                         float((probe_local[1:]-self.previous_probe_local[1:]).norm()/dt))
             self.previous_probe_local=probe_local.clone()

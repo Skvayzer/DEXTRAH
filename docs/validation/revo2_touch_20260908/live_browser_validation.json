@@ -1,0 +1,11 @@
+{
+  "browser_errors": [],
+  "checks": [
+    "live page loaded",
+    "pause holds physics time",
+    "loaded press and shear show nonzero simulated fingertip force",
+    "static shear command resumes physics",
+    "release returns to idle"
+  ],
+  "force_source": "running PhysX bench, not recording replay"
+}

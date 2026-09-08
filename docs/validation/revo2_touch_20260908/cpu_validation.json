@@ -1,0 +1,58 @@
+{
+  "actor_dim": 256,
+  "critic_dim": 278,
+  "actions": 13,
+  "partial_resets": 1,
+  "terminal_steps": 2,
+  "arm_torque_source": "IsaacLab implicit-actuator clipped PD estimate",
+  "sensor_filter_paths": [
+    "/World/envs/env_.*/Table/box",
+    "/World/envs/env_.*/BodyCollision/body_collision",
+    "/World/envs/env_.*/Object/object_root",
+    "/World/envs/env_.*/TouchIndenter"
+  ],
+  "distal_materials": [
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ],
+    [
+      1,
+      0.800000011920929,
+      -10000
+    ]
+  ],
+  "optimizer_steps": 0,
+  "thumb_peak_n": 1.658827543258667,
+  "index_peak_n": 0.19964256882667542,
+  "middle_peak_n": 0.23878325521945953,
+  "ring_peak_n": 0.22011367976665497,
+  "pinky_peak_n": 0.1875094473361969,
+  "static_shear_n": 0.08716286983220808,
+  "static_probe_speed_m_s": 0.013518233789356862,
+  "static_friction_n": 0.11762444482695672,
+  "static_relative_speed_m_s": 0.0019413883181949778,
+  "static_tangential_excursion_m": 0.000017334262373572396,
+  "static_tangential_drift_m": 3.569918694958081e-7,
+  "static_force_balance_error_n": 0.013720962831278837,
+  "slide_forward_shear_n": 0.12370859716140048,
+  "slide_reverse_shear_n": -0.2536669969558716,
+  "backside_pad_peak_n": 0,
+  "backside_link_peak_n": 1.0004570447316454
+}
