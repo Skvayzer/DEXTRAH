@@ -96,7 +96,7 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 # Register only the requested task family. The reduced G1 controller does not
 # require NVIDIA FABRICS, so a G1 launch should not import that optional stack.
 G1_PLAY_TASKS = {"Adept-G1-Revo2-SimToolReal-Repose", "G1-Revo2-SimToolReal-Repose-Direct",
-                 "G1-Revo2-SimToolReal-Repose-BPS128"}
+                 "G1-Revo2-SimToolReal-Repose-BPS128", "G1-Revo2-SimToolReal-Repose-BPS128-Touch"}
 if args_cli.task in G1_PLAY_TASKS:
     import dextrah_lab.tasks.g1_revo2_adept.gym_setup  # noqa: F401
 else:
@@ -199,7 +199,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # logging directory path: <train_dir>/<full_experiment_name>
     agent_cfg["params"]["config"]["train_dir"] = log_root_path
     agent_cfg["params"]["config"]["full_experiment_name"] = log_dir
-    if args_cli.task == "G1-Revo2-SimToolReal-Repose-BPS128":
+    if args_cli.task in {"G1-Revo2-SimToolReal-Repose-BPS128", "G1-Revo2-SimToolReal-Repose-BPS128-Touch"}:
         env_cfg.bps_artifact_dir = os.path.join(log_root_path, log_dir, "bps")
 
     # dump the configuration into log-directory
@@ -215,7 +215,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
-    if args_cli.task == "G1-Revo2-SimToolReal-Repose-BPS128":
+    if args_cli.task in {"G1-Revo2-SimToolReal-Repose-BPS128", "G1-Revo2-SimToolReal-Repose-BPS128-Touch"}:
         # PlayEnv resolves observation dimensions at construction time.
         dump_yaml(os.path.join(log_root_path, log_dir, "params", "env_resolved.yaml"), env.unwrapped.cfg)
     # wrap for video recording

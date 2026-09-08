@@ -5,6 +5,18 @@ import trimesh
 from .contact import FINGERS
 
 
+def pose_matrix(position, quaternion):
+    result = trimesh.transformations.quaternion_matrix(quaternion)
+    result[:3, 3] = position
+    return result
+
+
+def display_pose(world_to_display, position, quaternion):
+    """One rigid transform for all meshes, pads, probes and force vectors."""
+    result = world_to_display @ pose_matrix(position, quaternion)
+    return result[:3, 3], trimesh.transformations.quaternion_from_matrix(result)
+
+
 def sensor_frames(urdf, pads):
     tree = ET.parse(urdf).getroot()
     frames = []

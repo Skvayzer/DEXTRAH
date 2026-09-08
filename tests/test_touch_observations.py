@@ -65,6 +65,27 @@ def test_bad_rates_fail_and_overrange_not_silently_clipped():
     assert m.force[..., 1].max() < -25
 
 
+def test_identity_model_does_not_consume_random_numbers():
+    before = torch.random.get_rng_state().clone()
+    model = TouchObservationModel(2, 1/120, 'cpu')
+    for _ in range(24):
+        model.advance(torch.zeros(2,5,3))
+    torch.testing.assert_close(torch.random.get_rng_state(), before)
+
+
+def test_noise_dropout_and_reset_never_leak_other_environment():
+    cfg = TouchObservationConfig(noise_std_n=.03, gain_range=(.9,1.1),
+                                 bias_std_n=.01, dropout_probability=1.)
+    model = TouchObservationModel(2,1/120,'cpu',cfg)
+    for _ in range(24):
+        model.advance(torch.ones(2,5,3))
+    assert not model.valid.any()
+    other_gain = model.gain[1].clone()
+    model.reset(torch.tensor([0]))
+    torch.testing.assert_close(model.gain[1],other_gain)
+    assert torch.isfinite(model.observation()).all()
+
+
 @pytest.mark.parametrize('base', [224, 246])
 def test_tactile_checkpoint_columns_preserve_sapg_embedding(base):
     from dextrah_lab.object_shape.warmstart import expand_state_dict
