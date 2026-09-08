@@ -86,6 +86,22 @@ def test_noise_dropout_and_reset_never_leak_other_environment():
     assert torch.isfinite(model.observation()).all()
 
 
+def test_center_ray_and_single_display_frame():
+    import numpy as np
+    import trimesh
+    from dextrah_lab.g1_adept.touch_frames import ray_surface_point, pose_matrix, display_pose
+    mesh = trimesh.creation.box(extents=(.02,.04,.06))
+    point,normal = ray_surface_point(mesh,np.array([.1,0.,0.]),np.array([-1.,0.,0.]))
+    np.testing.assert_allclose(point,[.01,0.,0.],atol=1e-7)
+    np.testing.assert_allclose(normal,[1.,0.,0.])
+    with pytest.raises(ValueError,match='missed'):
+        ray_surface_point(mesh,np.array([.1,.2,0.]),np.array([-1.,0.,0.]))
+    frame=pose_matrix([1.,2.,3.],[1.,0.,0.,0.])
+    p,q=display_pose(np.linalg.inv(frame),[1.,2.,3.],[1.,0.,0.,0.])
+    np.testing.assert_allclose(p,0.)
+    np.testing.assert_allclose(q,[1.,0.,0.,0.])
+
+
 @pytest.mark.parametrize('base', [224, 246])
 def test_tactile_checkpoint_columns_preserve_sapg_embedding(base):
     from dextrah_lab.object_shape.warmstart import expand_state_dict

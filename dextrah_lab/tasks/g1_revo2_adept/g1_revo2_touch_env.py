@@ -123,6 +123,7 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
         self.touch_raw = torch.zeros(self.num_envs, 5, 3, device=self.device)
         self.touch_contact_w = torch.zeros_like(self.touch_raw)
         self.touch_force_w = torch.zeros_like(self.touch_raw)
+        self.touch_friction_w = torch.zeros_like(self.touch_raw)
         self.touch_link_force_w = torch.zeros_like(self.touch_raw)
         self.g1_urdf = Path(__file__).resolve().parents[4] / 'play2perfect' / cfg.assets.robot_urdf
         if cfg.touch.enabled:
@@ -197,6 +198,7 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
                 local[:, 0].clamp_min_(0)
                 self.touch_raw[:, i] = local
                 self.touch_force_w[:, i] = force
+                self.touch_friction_w[:, i] = row.friction_pairs_w.sum(1)
                 self.touch_link_force_w[:, i] = (row.reconstructed_normal_pairs_w + row.reconstructed_friction_pairs_w).sum(1)
                 weights = row.normal_load_n
                 self.touch_contact_w[:, i] = (row.normal_centroids_w * weights[...,None]).sum(1) / weights.sum(1).clamp_min(1e-12)[:,None]

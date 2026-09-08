@@ -17,6 +17,33 @@ def display_pose(world_to_display, position, quaternion):
     return result[:3, 3], trimesh.transformations.quaternion_from_matrix(result)
 
 
+def ray_surface_point(mesh, origin, direction):
+    """Nearest ray/triangle hit and face normal; no rtree dependency."""
+    origin, direction = np.asarray(origin), np.asarray(direction)
+    direction = direction / np.linalg.norm(direction)
+    triangles = mesh.triangles
+    a, b = triangles[:,1]-triangles[:,0], triangles[:,2]-triangles[:,0]
+    h = np.cross(direction,b)
+    determinant = np.sum(a*h,axis=-1)
+    nonparallel = np.abs(determinant)>1e-12
+    inv = np.divide(1.,determinant,out=np.zeros_like(determinant),where=nonparallel)
+    s = origin-triangles[:,0]
+    u = np.sum(s*h,axis=-1)*inv
+    q = np.cross(s,a)
+    v = np.sum(direction*q,axis=-1)*inv
+    distance = np.sum(b*q,axis=-1)*inv
+    valid = nonparallel & (u>=-1e-7) & (v>=-1e-7) & (u+v<=1+1e-7) & (distance>=0)
+    distances = np.where(valid,distance,np.inf)
+    i = distances.argmin()
+    if not np.isfinite(distances[i]):
+        raise ValueError('Ray missed the finger collision mesh')
+    n = np.cross(a[i],b[i])
+    n /= np.linalg.norm(n)
+    if np.dot(n,direction)>0:
+        n=-n
+    return origin+distances[i]*direction,n
+
+
 def sensor_frames(urdf, pads):
     tree = ET.parse(urdf).getroot()
     frames = []
