@@ -127,8 +127,29 @@ Validated on 2026-09-08 in Slurm job **353**, completed with exit code 0:
 This establishes a working implementation and trainable shape inputs, not an
 improvement over the old policy. Smoke episode statistics cover a small,
 early-completing subset at the easy initial tolerance, so they are not a
-benchmark. Full-scale memory/throughput and longer-run learning remain to be
-measured in the full job.
+benchmark.
+
+Full Slurm job **355** launched from commit `9709349` with 24,576 environments
+on physical GPU 2 (UUID `GPU-4a10e4cf-0808-67e3-468e-3e883b4f7ca1`, PCI
+`75:00.0`). The job-local GPU index is zero. Startup completed, the full asset
+mapping and warm-start checks passed, and the job passed 13 million transitions
+while saving checkpoints. Initial throughput was approximately 127k–136k total
+transitions/s at approximately 31,600 MiB VRAM; these are startup observations,
+not a guaranteed sustained rate. An 8B-frame budget is roughly 17 hours at
+130k/s, excluding initialization and later throughput changes.
+
+[Live W&B run](https://wandb.ai/skvayzer/adept/runs/unique_id_0_g1_bps128_warmstart_seed_42_355).
+Online API verification confirmed running state, finite actor/critic losses,
+and nonzero learned shape-input weights. Longer-run benefit is not established.
+
+Known inherited logging issue: a few startup NaNs appeared ONLY in
+`auxiliary_stats/off_on_grad_similarity`. The original SAPG fork computes this
+diagnostic from gradient copies taken before AMP unscaling; with detailed
+off-policy gradient logging disabled, its off-policy vector is also just zero.
+It is not a meaningful manipulation metric in this configuration. The epoch-22
+checkpoint was independently checked on CPU: all actor and critic tensors were
+finite, and no non-finite loss/return metrics were found in the scanned events.
+The shared Play2Perfect dependency was not modified to suppress these warnings.
 
 ## What to watch in W&B
 
