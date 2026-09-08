@@ -1,0 +1,8 @@
+# Isolated CPU viewer; do not install these into the Isaac Lab environment.
+viser==1.1.0
+trimesh==4.12.2
+numpy==2.5.3
+scipy==1.18.1
+pillow==12.3.0
+pytest==9.1.1
+playwright==1.62.0
