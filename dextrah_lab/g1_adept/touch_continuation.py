@@ -1,5 +1,6 @@
 """Checked weights-only migration from the final BPS policy; no MDP redesign."""
 import copy
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import time
@@ -13,6 +14,19 @@ from .touch_policy import expand_touch_weights
 SOURCE_SHA = '53c4b009cdd341b4a0e007111c4009da57898dcb00d264c12c81b18817637fec'
 SOURCE_FRAMES = 8000372736
 BANK_SHA = '69a73d99a05749459fd4339f9341d3cce142ece0f7965283c04cb6410a2f3328'
+
+
+@contextmanager
+def equivalence_precision():
+    """Compare changed GEMM shapes without TF32 rounding; restore training flags."""
+    matmul, cudnn = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = matmul
+        torch.backends.cudnn.allow_tf32 = cudnn
 
 
 def install_complete_checkpoint(algo):
@@ -196,7 +210,10 @@ class TouchContinuationObserver:
         new_rnn = [v.clone() for v in old_rnn]
         actor_mode,critic_mode = algo.model.training,algo.central_value_net.model.training
         algo.model.eval(); algo.central_value_net.model.eval()
-        with torch.random.fork_rng(devices=[torch.device(algo.ppo_device).index or 0]), torch.no_grad():
+        devices = [torch.device(algo.ppo_device).index or 0] if str(algo.ppo_device).startswith('cuda') else []
+        print('EQUIVALENCE_RUNTIME_PRECISION '+json.dumps(dict(matmul_tf32=torch.backends.cuda.matmul.allow_tf32,
+            cudnn_tf32=torch.backends.cudnn.allow_tf32)),flush=True)
+        with torch.random.fork_rng(devices=devices), torch.no_grad(), equivalence_precision():
             for step in range(8):
                 tactile = torch.randn(len(ids),25,device=algo.ppo_device)
                 augmented = raw if self.control else torch.cat((raw[:,:224],tactile,raw[:,224:]),-1)
@@ -218,6 +235,7 @@ class TouchContinuationObserver:
         algo.model.train(actor_mode); algo.central_value_net.model.train(critic_mode)
         self.report = dict(source_checkpoint=str(self.checkpoint),source_sha256=SOURCE_SHA,
             source_frames=SOURCE_FRAMES,bank_sha256=BANK_SHA,maximum_errors=maxima,
+            equivalence_precision='FP32, TF32 disabled only during verification',
             actor_dim=env.cfg.observation_space,critic_dim=env.cfg.state_space,
             fresh_optimizer=True,material_override=False,strict_tolerance=.01,
             arm_torques=False,control=self.control,calibration=calibration)
