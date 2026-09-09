@@ -48,7 +48,6 @@ def main():
             SOURCE_FRAMES, SOURCE_SHA, BANK_SHA)
         from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_bps_env import G1Revo2BpsEnv, G1Revo2BpsEnvCfg
         from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
-        from dextrah_lab.rl_games.wandb_utils import WandbAlgoObserver
         torch.set_num_threads(4)
         register_models()
         saved = load_yaml(args.source_run/'params/env_resolved.yaml')
@@ -74,6 +73,21 @@ def main():
         assert not cfg.fabric.enabled and not cfg.fabric.pca_enabled
         verify_source_mdp(saved,cfg)
         args.output.mkdir(parents=True,exist_ok=bool(args.resume))
+        if args.wandb:
+            # Make startup visible without implying that optimizer updates have
+            # begun. TensorBoard sync still starts before the summary writer.
+            wandb.init(project='adept',entity='skvayzer',
+                group='g1-bps128-tactile-continuation',name=args.output.name,
+                id='unique_id_'+args.output.name,resume='allow',dir=str(args.output),
+                sync_tensorboard=True,tags=['sapg','g1','revo2','bps128',
+                    'control' if args.control else 'tactile-normal-shear','warmstart-8B',
+                    'strict-tolerance','no-fabrics','no-pca','no-arm-torques'])
+            if wandb.run is None or wandb.run.settings.mode != 'online':
+                raise RuntimeError('Requested online W&B logging is not active')
+            wandb.run.summary.update(dict(experiment_status='initializing_simulation',
+                optimizer_updates_started=False,num_envs=args.num_envs))
+            (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))
+            print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url,flush=True)
         env = (G1Revo2BpsEnv if args.control else G1Revo2TouchEnv)(cfg)
         ac = agent['params']['config']
         ac.update(name='g1_sapg_bps128_control' if args.control else 'g1_sapg_bps128_touch',
@@ -99,7 +113,12 @@ def main():
             args.calibration,args.calibration_steps,bool(args.resume),args.control)
         observers = [EnvStatsAlgoObserver(),observer]
         if args.wandb:
-            observers.append(WandbAlgoObserver(agent))
+            class ExistingWandbObserver:
+                def before_init(self,base_name,config,experiment_name):
+                    if wandb.run.id != 'unique_id_'+experiment_name:
+                        raise RuntimeError('W&B experiment identity changed during initialization')
+                    wandb.config.update(config,allow_val_change=True)
+            observers.append(ExistingWandbObserver())
         runner = Runner(MultiObserver(observers))
         runner.load(agent)
         algo = runner.algo_factory.create(runner.algo_name,base_name='run',params=runner.params)

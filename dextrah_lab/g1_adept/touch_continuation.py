@@ -160,6 +160,7 @@ class TouchContinuationObserver:
         self.calibration = Path(calibration) if calibration else None
         self.calibration_steps, self.resume, self.control = calibration_steps, resume, control
         self.started = time.monotonic()
+        self.logged_update = False
 
     def before_init(self,*args):
         pass
@@ -257,6 +258,12 @@ class TouchContinuationObserver:
 
     def after_print_stats(self,frame,epoch_num,total_time):
         a,e = self.algo,self.env
+        if not self.logged_update:
+            import wandb
+            if wandb.run:
+                wandb.run.summary.update(dict(optimizer_updates_started=True,
+                    first_logged_epoch=int(epoch_num),first_logged_frame=int(a.frame)))
+            self.logged_update = True
         data = dict(additional_transitions=frame,cumulative_transitions=SOURCE_FRAMES+frame,
             cuda_allocated_gib=torch.cuda.memory_allocated()/2**30,
             cuda_peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30,
