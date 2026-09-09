@@ -15,7 +15,7 @@ unset DISPLAY
 cd "$project"
 if [[ "${RENDER_SMOKE:-0}" == 1 ]]; then
     "$python" scripts/render_g1_bps_reposing.py "$recordings/clips/hammer" \
-        --video-name smoke.mp4 --limit-frames 90
+        --video-name "${SMOKE_VIDEO_NAME:-smoke.mp4}" --limit-frames 90
 else
     for family in hammer spatula brush eraser; do
         "$python" scripts/render_g1_bps_reposing.py "$recordings/clips/$family" \

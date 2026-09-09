@@ -74,3 +74,49 @@ Both jobs request just one RTX 6000 Ada, and refuse to overwrite their outputs.
 Each clip has trajectory arrays, metadata, reset/goal events, exact BPS geometry,
 preview frames and an encoding/pose-validation JSON. Keep those audit artifacts
 outside Git; copy only final MP4s to `Desktop/research_recordings`.
+
+## Measured results, 2026-09-09
+
+Capture job **363** completed the protocol above. Checkpoint SHA-256:
+`53c4b009cdd341b4a0e007111c4009da57898dcb00d264c12c81b18817637fec`.
+Training-bank feature SHA-256:
+`69a73d99a05749459fd4339f9341d3cce142ece0f7965283c04cb6410a2f3328`.
+
+| Metric | Result | Raw numerator / denominator |
+| --- | --- | --- |
+| Completed-episode success | **66.49%** | 2,823 / 4,246 episodes |
+| Resolved-goal success | **89.92%** | 37,827 / 42,068 resolved attempts |
+| Goal throughput | **15.76 / simulated minute** | 37,827 goals / 2,400 environment-minutes |
+| Goals per completed episode | **6.26** | 26,590 / 4,246 |
+| Completed-episode lift rate | **89.19%** | 3,787 / 4,246 |
+| Completed episodes reaching all 50 goals | **0.118%** | 5 / 4,246 |
+| Object coverage within 120 s | **100%** | 1,200 / 1,200 training objects |
+
+The coverage number is **not** a 100% episode success rate. Each object had
+multiple opportunities. Per-object goals over 120 seconds ranged from 11 to 57,
+with median 31. At the cutoff, 11,237 reached goals belonged to still-running
+episodes; they count toward throughput and resolved-goal success, but not the
+completed-episode mean. Thus this finite-horizon test also censors some long,
+successful episodes. Do not present the 89.92% goal-attempt figure as the chance
+that a fresh episode will succeed.
+
+| Family | Objects | Completed-episode success | Goals / minute |
+| --- | ---: | ---: | ---: |
+| Brush | 400 | 66.72% | 15.95 |
+| Eraser | 100 | 61.01% | 15.04 |
+| Hammer | 200 | 63.89% | 15.59 |
+| Marker | 100 | 66.67% | 15.85 |
+| Screwdriver | 200 | 68.33% | 16.00 |
+| Spatula | 200 | 69.74% | 15.64 |
+
+The preselected 60-second clips contain hammer **10 goals / 2 resets**, spatula
+**14 / 1**, brush **23 / 1**, and eraser **15 / 1**. Their first successes occur
+at 9.23, 5.40, 3.05, and 4.18 seconds, respectively. These are procedural training
+shapes and reposing goals, not demonstrations of functional hammering or other
+tool-use tasks.
+
+All per-object count sums were checked against the aggregate JSON, and video
+goal/reset counters were checked against the corresponding event logs. This is
+one seeded, deterministic-policy evaluation with retained training disturbances;
+it is not a matched baseline comparison or evidence that BPS alone caused the
+improvement in the training curves.

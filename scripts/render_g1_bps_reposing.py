@@ -124,8 +124,10 @@ def main():
     text=ImageFont.truetype(font,24)
     small=ImageFont.truetype(font,19)
     tiny=ImageFont.truetype(font,16)
-    main_renderer=pyrender.OffscreenRenderer(1280,824)
-    bps_renderer=pyrender.OffscreenRenderer(640,590)
+    # Cache one period of the static shape presentation, then reuse a SINGLE
+    # EGL context for the physical rollout. Separate pyrender contexts share
+    # an EGL display; deleting one terminates the display beneath the other.
+    renderer=pyrender.OffscreenRenderer(640,590)
     encoder=subprocess.Popen(['ffmpeg','-nostdin','-v','error','-n','-f','rawvideo',
         '-pixel_format','rgb24','-video_size','1920x1080','-framerate',str(meta['fps']),
         '-i','-','-an','-c:v','libx264','-crf','19','-preset','fast','-threads','2',
@@ -140,6 +142,15 @@ def main():
         bps_queries=128,descriptor_error=float(np.max(np.abs(np.linalg.norm(bps['basis']-bps['nearest'],axis=1)-bps['distances']))),
         policy_frames_replayed=True,frame_interpolation=False,whole_body='Static visual context, not controlled')
     try:
+        shape_frames=[]
+        for j in range(min(frames,24*meta['fps'])):
+            rotation=trimesh.transformations.rotation_matrix(
+                j/meta['fps']*2*np.pi/24,[0.,0.,1.])
+            for node in nodes:
+                inset.set_pose(node,rotation)
+            shape_frames.append(renderer.render(inset)[0])
+        renderer.viewport_width=1280
+        renderer.viewport_height=824
         for i in range(frames):
             urdf.update_cfg(dict(zip(meta['joint_names'],trace['joint_pos'][i])))
             root=pose(trace['robot'][i,:3],trace['robot'][i,3:])
@@ -159,11 +170,8 @@ def main():
             for name,node in assets.items():
                 scene.set_pose(node,pose(trace[name][i,:3],trace[name][i,3:]))
             seconds=float(trace['step'][i]*meta['policy_dt'])
-            rotation=trimesh.transformations.rotation_matrix(seconds*2*np.pi/24,[0.,0.,1.])
-            for node in nodes:
-                inset.set_pose(node,rotation)
-            rgb,_=main_renderer.render(scene)
-            shape_rgb,_=bps_renderer.render(inset)
+            rgb,_=renderer.render(scene)
+            shape_rgb=shape_frames[i%len(shape_frames)]
             image=Image.new('RGB',(1920,1080),(242,245,248))
             image.paste(Image.fromarray(rgb),(0,96));image.paste(Image.fromarray(shape_rgb),(1280,96))
             draw=ImageDraw.Draw(image)
@@ -202,7 +210,7 @@ def main():
     finally:
         encoder.stdin.close()
         code=encoder.wait(timeout=60)
-        main_renderer.delete();bps_renderer.delete()
+        renderer.delete()
     if code:
         raise RuntimeError(f'FFmpeg failed: {code}')
     probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams',
