@@ -4,6 +4,7 @@ No change to default task, actions, rewards, fabrics or PCA. Distal compliance
 is an explicit opt-in physics approximation, not calibrated BrainCo elastomer.
 """
 from pathlib import Path
+import time
 import gymnasium as gym
 import numpy as np
 import torch
@@ -56,7 +57,27 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
         return []
 
     def _setup_scene(self):
-        super()._setup_scene()
+        started = time.monotonic()
+        clone = self.scene.clone_environments
+        def clone_with_reporting(*args, **kwargs):
+            if self.cfg.touch.enabled and not self.cfg.touch.material_override:
+                stage = sim_utils.get_current_stage()
+                found = []
+                for prim in Usd.PrimRange(stage.GetPrimAtPath('/World/envs/env_0/Robot')):
+                    if prim.GetName() in TIP_BODIES and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                        PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr().Set(0.)
+                        found.append(prim.GetName())
+                if sorted(found) != sorted(TIP_BODIES):
+                    raise RuntimeError(f'Contact-report source bodies mismatch: {found}')
+                print(f'TOUCH_SOURCE_REPORTING_READY before_clone bodies={len(found)}',flush=True)
+            return clone(*args, **kwargs)
+        # Local scene-instance hook only; never alter the external P2P module.
+        self.scene.clone_environments = clone_with_reporting
+        try:
+            super()._setup_scene()
+        finally:
+            self.scene.clone_environments = clone
+        print(f'TOUCH_SCENE_BASE_READY seconds={time.monotonic()-started:.1f}',flush=True)
         self.touch_sensors = []
         if not self.cfg.touch.enabled:
             return
@@ -100,7 +121,9 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
             # bodies otherwise cause minutes of serial USD recomposition.
             for source in self._touch_paths:
                 body = stage.GetPrimAtPath(source)
-                PhysxSchema.PhysxContactReportAPI.Apply(body).CreateThresholdAttr().Set(0.)
+                api = PhysxSchema.PhysxContactReportAPI(body)
+                if not body.HasAPI(PhysxSchema.PhysxContactReportAPI) or api.GetThresholdAttr().Get() != 0.:
+                    PhysxSchema.PhysxContactReportAPI.Apply(body).CreateThresholdAttr().Set(0.)
             inherited, overrides = 0, 0
             for env_path in self.scene.env_prim_paths:
                 for source in self._touch_paths:
@@ -115,7 +138,8 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
                     if not body.HasAPI(PhysxSchema.PhysxContactReportAPI) or api.GetThresholdAttr().Get() != 0.:
                         raise RuntimeError(f'Contact-report inheritance failed at {body.GetPath()}')
             print(f'TOUCH_REPORTING_VERIFIED bodies={inherited+overrides} inherited={inherited} '
-                  f'fallback_overrides={overrides} material_bindings=0',flush=True)
+                  f'fallback_overrides={overrides} material_bindings=0 '
+                  f'setup_seconds={time.monotonic()-started:.1f}',flush=True)
 
     def _bind_compliant_material(self, stage):
         cfg = self.cfg.touch
