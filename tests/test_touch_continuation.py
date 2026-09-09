@@ -1,9 +1,11 @@
 import copy
+import json
 from types import SimpleNamespace
 import pytest
 import torch
 from dextrah_lab.g1_adept.touch_continuation import (
-    install_complete_checkpoint, resume_at_episode_boundary, verify_source_mdp, equivalence_precision)
+    install_complete_checkpoint, resume_at_episode_boundary, verify_source_mdp, equivalence_precision,
+    install_atomic_checkpoint_saves, inherit_resume_artifacts, SOURCE_SHA, BANK_SHA)
 
 
 def test_equivalence_precision_restores_runtime_flags_even_on_failure():
@@ -68,3 +70,44 @@ def test_source_contract_allows_tolerance_and_capacity_not_physics_changes():
     current['sim']['physx']['solver_type']=0
     with pytest.raises(ValueError,match='solver'):
         verify_source_mdp(saved,cfg)
+
+
+def test_atomic_checkpoint_keeps_previous_on_failed_write(tmp_path):
+    target = tmp_path/'latest.pth'
+    target.write_bytes(b'previous complete checkpoint')
+    def fail(filename, state):
+        from pathlib import Path
+        Path(filename+'.pth').write_bytes(b'incomplete')
+        raise OSError('disk write failed')
+    algo = SimpleNamespace(save=fail)
+    install_atomic_checkpoint_saves(algo)
+    with pytest.raises(OSError):
+        algo.save(str(tmp_path/'latest'))
+    assert target.read_bytes() == b'previous complete checkpoint'
+    def success(filename, state):
+        from pathlib import Path
+        Path(filename+'.pth').write_bytes(b'new complete checkpoint')
+    algo = SimpleNamespace(save=success)
+    install_atomic_checkpoint_saves(algo)
+    algo.save(str(tmp_path/'latest'))
+    assert target.read_bytes() == b'new complete checkpoint'
+    assert not (tmp_path/'latest.pending.pth').exists()
+
+
+def test_resume_provenance_preserves_original_calibration_without_refitting(tmp_path):
+    parent, output = tmp_path/'parent', tmp_path/'new_run'
+    (parent/'nn').mkdir(parents=True)
+    checkpoint = parent/'nn/complete_500.pth'
+    checkpoint.write_bytes(b'test checkpoint')
+    report = dict(source_sha256=SOURCE_SHA,bank_sha256=BANK_SHA,control=False)
+    (parent/'warmstart_validation.json').write_text(json.dumps(report))
+    original = json.dumps(dict(sensor_hz=70,publish_hz=10,count=123))
+    (parent/'calibration.json').write_text(original)
+    provenance = inherit_resume_artifacts(output,checkpoint)
+    assert (output/'calibration.json').read_text() == original
+    assert 'not recalibrated' in provenance['normalization']
+    assert len(provenance['checkpoint_sha256']) == 64
+    with pytest.raises(FileExistsError):
+        inherit_resume_artifacts(output,checkpoint)
+    with pytest.raises(ValueError,match='provenance'):
+        inherit_resume_artifacts(tmp_path/'wrong_type',checkpoint,control=True)

@@ -54,6 +54,9 @@ def main():
             '--source-run',str(args.source_run),'--source-checkpoint',str(args.source_checkpoint),
             '--output',str(args.output),'--num-envs',str(args.num_envs),'--max-frames',str(target),
             '--calibration',str(args.calibration),'--wandb']
+        if not args.control:
+            # Preserve the historical pilot contract despite the new 70 Hz default.
+            command += ['--touch-sensor-hz','70','--touch-publish-hz','10']
         if checkpoint:
             command += ['--resume',checkpoint]
         if args.control:

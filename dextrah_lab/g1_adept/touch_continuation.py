@@ -2,7 +2,9 @@
 import copy
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
+import shutil
 import time
 
 import torch
@@ -38,6 +40,42 @@ def install_complete_checkpoint(algo):
         state['continuation_critic_epoch'] = algo.central_value_net.epoch_num
         return state
     algo.get_full_state_weights = complete
+
+
+def install_atomic_checkpoint_saves(algo):
+    """Keep the previous full checkpoint intact until its replacement is saved."""
+    original = algo.save
+    def save(filename, override_state=None):
+        target = Path(str(filename) + '.pth')
+        temporary_base = str(filename) + '.pending'
+        original(temporary_base, override_state)
+        os.replace(temporary_base + '.pth', target)
+    algo.save = save
+
+
+def inherit_resume_artifacts(output, checkpoint, control=False):
+    """Fork run provenance, not networks or normalization; those come from state."""
+    output, checkpoint = Path(output), Path(checkpoint)
+    parent = checkpoint.parent.parent
+    report = json.loads((parent/'warmstart_validation.json').read_text())
+    if (report['source_sha256'] != SOURCE_SHA or report['bank_sha256'] != BANK_SHA
+            or report['control'] != control):
+        raise ValueError('Resume provenance does not match this continuation')
+    filenames = ['warmstart_validation.json'] + ([] if control else ['calibration.json'])
+    # Check all prerequisites before creating any artifacts.
+    for name in filenames:
+        if not (parent/name).is_file():
+            raise FileNotFoundError(parent/name)
+    digest = sha256_file(checkpoint)
+    output.mkdir(parents=True, exist_ok=True)
+    if output.resolve() != parent.resolve():
+        for name in filenames:
+            if (output/name).exists():
+                raise FileExistsError(output/name)
+        for name in filenames:
+            shutil.copy2(parent/name, output/name)
+    return dict(parent_run=str(parent), checkpoint=str(checkpoint),
+                checkpoint_sha256=digest, normalization='inherited from checkpoint; not recalibrated')
 
 
 def resume_at_episode_boundary(algo, checkpoint):
@@ -153,7 +191,7 @@ def calibrate_touch(env, actor, steps, path):
 
 class TouchContinuationObserver:
     def __init__(self, env, source_run, checkpoint, output, calibration=None,
-                 calibration_steps=1200, resume=False, control=False):
+                 calibration_steps=1200, resume=False, control=False, continuous=False):
         self.env, self.source_run, self.checkpoint = env, Path(source_run), Path(checkpoint)
         self.output = Path(output)
         self.output.mkdir(parents=True,exist_ok=True)
@@ -161,6 +199,9 @@ class TouchContinuationObserver:
         self.calibration_steps, self.resume, self.control = calibration_steps, resume, control
         self.started = time.monotonic()
         self.logged_update = False
+        self.continuous = continuous
+        self.run_start_frame = 0
+        self.stop_requested = None
 
     def before_init(self,*args):
         pass
@@ -265,6 +306,7 @@ class TouchContinuationObserver:
                     first_logged_epoch=int(epoch_num),first_logged_frame=int(a.frame)))
             self.logged_update = True
         data = dict(additional_transitions=frame,cumulative_transitions=SOURCE_FRAMES+frame,
+            run_transitions=max(0, int(a.frame)-self.run_start_frame),
             cuda_allocated_gib=torch.cuda.memory_allocated()/2**30,
             cuda_peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30,
             tolerance=e._current_success_tolerance)
@@ -278,6 +320,11 @@ class TouchContinuationObserver:
                 force_abs_max_n=float(e.touch_raw.abs().max()),
                 valid_fraction=float(e.touch_model.valid.float().mean()),
                 mean_sample_age_s=float(e.touch_model.age_s.mean()),
+                max_sample_age_s=float(e.touch_model.age_s.max()),
+                configured_sensor_hz=e.cfg.touch.sensor_hz,
+                configured_publish_hz=e.cfg.touch.publish_hz,
+                effective_acquisition_hz=e.touch_model.acquisition_count/max(e.touch_model.steps*e.cfg.sim.dt,1e-9),
+                effective_publication_hz=e.touch_model.publication_count/max(e.touch_model.steps*e.cfg.sim.dt,1e-9),
                 new_normalizer_count=float(a.model.running_mean_std.count[224]),
                 old_normalizer_count=float(a.model.running_mean_std.count[0]))
         for key,value in data.items():
@@ -289,5 +336,18 @@ class TouchContinuationObserver:
         (self.output/'progress.json').write_text(json.dumps(dict(data,epoch=epoch_num,wall_seconds=time.monotonic()-self.started),indent=2))
         # Upstream save_frequency follows a sparse square-number schedule.
         # Use an explicit regular interval for this experiment instead.
-        if epoch_num % 64 == 0:
+        if self.continuous:
+            # One rolling file plus sparse immutable snapshots; never recreate
+            # the simulator or invoke evaluation to save checkpoints.
+            if epoch_num % 64 == 0 or not (self.output/'nn/latest.pth').exists() or self.stop_requested:
+                a.save(str(self.output/'nn/latest'))
+                latest = dict(checkpoint=str(self.output/'nn/latest.pth'), frame=int(a.frame),
+                              epoch=int(epoch_num), stop_requested=self.stop_requested)
+                (self.output/'latest_checkpoint.json').write_text(json.dumps(latest,indent=2))
+            if epoch_num % 1024 == 0:
+                a.save(str(self.output/'nn'/f'snapshot_{a.frame}'))
+            if self.stop_requested:
+                # Let the existing loop exit normally at this update boundary.
+                a.max_frames = int(a.frame)
+        elif epoch_num % 64 == 0:
             a.save(str(self.output/'nn'/f'periodic_{a.frame}'))
