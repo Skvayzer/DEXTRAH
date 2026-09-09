@@ -25,7 +25,7 @@ class Revo2TouchCfg:
     enabled: bool = True
     arm_torques: bool = False
     sensor_hz: float = 70.
-    publish_hz: float = 10.
+    publish_hz: float = 70.
     latency_s: float = 0.
     filter_tau_s: float = 0.
     noise_std_n: float = 0.

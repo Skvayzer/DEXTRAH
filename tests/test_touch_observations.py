@@ -4,7 +4,7 @@ from dextrah_lab.g1_adept.touch_observations import TouchObservationConfig, Touc
 
 
 def test_rate_hold_release_and_partial_reset():
-    m = TouchObservationModel(2, 1/120, 'cpu')
+    m = TouchObservationModel(2, 1/120, 'cpu', TouchObservationConfig(publish_hz=10))
     f = torch.ones(2, 5, 3)
     for _ in range(11):
         m.advance(f)
@@ -24,6 +24,29 @@ def test_rate_hold_release_and_partial_reset():
         m.advance(torch.zeros_like(f))
     assert not m.force.count_nonzero()
     assert m.observation().shape == (2, 25)
+
+
+def test_70hz_acquisition_delivery_with_120hz_physics_and_60hz_policy():
+    model = TouchObservationModel(2, 1/120, 'cpu')
+    packets, policy_samples, max_age = [], [], 0.
+    previous = 0
+    for tick in range(1, 1201):
+        model.advance(torch.full((2, 5, 3), tick / 100.))
+        if model.publication_count != previous:
+            packets.append(tick)
+        previous = model.publication_count
+        if tick % 2 == 0:
+            assert model.valid.all()
+            policy_samples.append(float(model.force[0, 0, 0]))
+            max_age = max(max_age, float(model.age_s.max()))
+    assert model.acquisition_count == model.publication_count == 700
+    assert len(set(policy_samples)) == 600  # fresh value at every policy tick
+    assert set(b-a for a,b in zip(packets, packets[1:])) == {1, 2}
+    assert max_age <= 1/120 + 1e-6
+    before = (model.steps, model.acquisition_count, model.publication_count)
+    model.reset(torch.tensor([0]))
+    assert not model.valid[0].any() and model.valid[1].all()
+    assert (model.steps, model.acquisition_count, model.publication_count) == before
 
 
 def test_delay_invalid_direction_quantization():

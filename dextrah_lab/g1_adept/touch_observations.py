@@ -9,7 +9,7 @@ class TouchObservationConfig:
     enabled: bool = True
     arm_torques: bool = False
     sensor_hz: float = 70.0
-    publish_hz: float = 10.0  # observed ROS stream, NOT sensor's internal rate
+    publish_hz: float = 70.0  # latest acquisition; legacy recordings used 10 Hz ROS
     latency_s: float = 0.0  # unmeasured: configurable, not falsely calibrated
     filter_tau_s: float = 0.0
     noise_std_n: float = 0.0
@@ -52,6 +52,8 @@ class TouchObservationModel:
         self.cfg = cfg or TouchObservationConfig()
         self.cfg.validate(dt)
         self.dt, self.steps = dt, 0
+        self.acquisition_count = 0
+        self.publication_count = 0
         self.filtered = torch.zeros(n_envs, 5, 3, device=device)
         self.force = torch.zeros_like(self.filtered)
         self.valid = torch.zeros(n_envs, 5, dtype=torch.bool, device=device)
@@ -98,6 +100,7 @@ class TouchObservationModel:
         a = 1. if self.cfg.filter_tau_s == 0 else -math.expm1(-self.dt / self.cfg.filter_tau_s)
         self.filtered += a * (raw - self.filtered)
         if math.floor(t * self.cfg.sensor_hz + 1e-8) > math.floor((t-self.dt) * self.cfg.sensor_hz + 1e-8):
+            self.acquisition_count += 1
             noisy = self.filtered + (torch.randn_like(raw) * self.cfg.noise_std_n
                                       if self.cfg.noise_std_n else 0.)
             normal = (noisy[..., 0].clamp_min(0) * 100).round() / 100
@@ -112,6 +115,7 @@ class TouchObservationModel:
         self._valid_history[slot] = self._acquired_valid
         self._stamp_history[slot] = self._acquired_stamp
         if math.floor(t * self.cfg.publish_hz + 1e-8) > math.floor((t-self.dt) * self.cfg.publish_hz + 1e-8):
+            self.publication_count += 1
             delayed = (self.steps - math.ceil(self.cfg.latency_s / self.dt)) % self._slots
             self.force.copy_(self._history[delayed])
             self.valid.copy_(self._valid_history[delayed])

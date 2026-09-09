@@ -28,7 +28,8 @@ class TouchRunningMeanStd(RunningMeanStd):
         raw = input[:, self.base_dim:].reshape(-1, 5, 5)
         extra = output[:, self.base_dim:].reshape(-1, 5, 5)
         # Preserve validity as a bit; invalid forces stay zero after centering.
-        # Age enters the network in units of the observed 100 ms packet period.
+        # Fixed 100 ms UNITS, not the publication period. Preserve checkpoint
+        # semantics when sensor rates change; do not rescale learned inputs.
         extra[..., :3] = torch.where(raw[..., 3:4] > .5, extra[..., :3], 0.)
         extra[..., 3] = raw[..., 3]
         extra[..., 4] = (raw[..., 4] / .1).clamp(0., 10.)
