@@ -10,6 +10,9 @@ from .g1_revo2_adept_env_cfg import G1Revo2AdeptEnvCfg
 from .g1_revo2_direct_env import G1Revo2DirectEnvCfg
 from .g1_revo2_bps_env import G1Revo2BpsEnvCfg
 from .g1_revo2_touch_env import G1Revo2TouchEnvCfg
+from dextrah_lab.g1_adept.touch_policy import register_models
+
+register_models()
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent

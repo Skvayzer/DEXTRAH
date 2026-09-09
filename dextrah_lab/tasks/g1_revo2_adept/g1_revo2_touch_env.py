@@ -33,6 +33,7 @@ class Revo2TouchCfg:
     dropout_probability: float = 0.
     force_scale_n: float = 25.
     torque_scale_nm: float = 40.
+    material_override: bool = True  # False: read contacts without changing source physics.
     compliant: bool = True
     stiffness_n_m: float = 10000.  # provisional, NOT fitted to the recording
     damping_ns_m: float = 10.
@@ -88,7 +89,16 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
                 filter_prim_paths_expr=self.touch_filter_paths))
             self.scene.sensors[f'revo2_touch_{body}'] = sensor
             self.touch_sensors.append(sensor)
-        self._bind_compliant_material(stage)
+        if self.cfg.touch.material_override:
+            self._bind_compliant_material(stage)
+        else:
+            # Reporting is observational. Do not bind a material or change
+            # friction/compliance/contact offsets in the continuation experiment.
+            self.touch_material_binding_count = 0
+            for env_path in self.scene.env_prim_paths:
+                for source in self._touch_paths:
+                    body = stage.GetPrimAtPath(source.replace('/World/envs/env_0', env_path, 1))
+                    PhysxSchema.PhysxContactReportAPI.Apply(body).CreateThresholdAttr().Set(0.)
 
     def _bind_compliant_material(self, stage):
         cfg = self.cfg.touch
@@ -138,7 +148,10 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
                     raise RuntimeError(f'Unsafe all-contact filter shape: {sensor.data.force_matrix_w.shape}')
             # Play2Perfect overwrites material friction after scene initialization.
             # Reapply ONLY distal shapes after it, never the marker-body list.
-            self._restore_distal_friction()
+            if cfg.touch.material_override:
+                self._restore_distal_friction()
+            else:
+                self.touch_resolved_materials = self.robot.root_physx_view.get_material_properties().clone()
         self._touch_extra_dim = cfg.touch.observation_config().dimension
         cfg.observation_space += self._touch_extra_dim
         cfg.state_space += self._touch_extra_dim
@@ -149,7 +162,7 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
         self._touch_ready = True
         print(f'TOUCH_OPTION_READY actor={cfg.observation_space} critic={cfg.state_space} '
               f'actions=13 touch={cfg.touch.enabled} arm_motor_estimates={cfg.touch.arm_torques} '
-              f'publish_hz={cfg.touch.publish_hz} no_training_started', flush=True)
+              f'publish_hz={cfg.touch.publish_hz} material_override={cfg.touch.material_override}', flush=True)
 
     def _restore_distal_friction(self):
         view = self.robot.root_physx_view
