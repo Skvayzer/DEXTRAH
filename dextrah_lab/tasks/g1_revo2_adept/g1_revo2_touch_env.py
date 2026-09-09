@@ -95,10 +95,27 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
             # Reporting is observational. Do not bind a material or change
             # friction/compliance/contact offsets in the continuation experiment.
             self.touch_material_binding_count = 0
+            # P2P factorized clones inherit env_0 (copy_from_source=False).
+            # Author the shared source first: redundant writes on 120k distal
+            # bodies otherwise cause minutes of serial USD recomposition.
+            for source in self._touch_paths:
+                body = stage.GetPrimAtPath(source)
+                PhysxSchema.PhysxContactReportAPI.Apply(body).CreateThresholdAttr().Set(0.)
+            inherited, overrides = 0, 0
             for env_path in self.scene.env_prim_paths:
                 for source in self._touch_paths:
                     body = stage.GetPrimAtPath(source.replace('/World/envs/env_0', env_path, 1))
-                    PhysxSchema.PhysxContactReportAPI.Apply(body).CreateThresholdAttr().Set(0.)
+                    api = PhysxSchema.PhysxContactReportAPI(body)
+                    if not body.HasAPI(PhysxSchema.PhysxContactReportAPI) or api.GetThresholdAttr().Get() != 0.:
+                        api = PhysxSchema.PhysxContactReportAPI.Apply(body)
+                        api.CreateThresholdAttr().Set(0.)
+                        overrides += 1
+                    else:
+                        inherited += 1
+                    if not body.HasAPI(PhysxSchema.PhysxContactReportAPI) or api.GetThresholdAttr().Get() != 0.:
+                        raise RuntimeError(f'Contact-report inheritance failed at {body.GetPath()}')
+            print(f'TOUCH_REPORTING_VERIFIED bodies={inherited+overrides} inherited={inherited} '
+                  f'fallback_overrides={overrides} material_bindings=0',flush=True)
 
     def _bind_compliant_material(self, stage):
         cfg = self.cfg.touch

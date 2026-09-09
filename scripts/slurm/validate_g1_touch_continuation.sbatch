@@ -15,8 +15,10 @@ export PYTHONPATH="$project:$p2p:$p2p/rl_games${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OMNI_KIT_ACCEPT_EULA=YES
 unset DISPLAY
 cd "$project"
+options=()
+if [[ -n "${REUSE_EVALUATION:-}" ]]; then options+=(--reuse-evaluation "$REUSE_EVALUATION"); fi
 "$python" scripts/validate_g1_touch_continuation.py --source-run "$source_run" \
     --checkpoint "$source_run/nn/last_g1_sapg_bps128_warmstart_frame_8000372736_rew__7400.633_.pth" \
     --play2perfect-root "$p2p" --smoke-run "${SMOKE_RUN:?Set the passed small smoke run}" \
     --calibration "${CALIBRATION:?Set calibration JSON}" --num-envs "${NUM_ENVS:-24576}" \
-    --output "$project/outputs/validation_${SLURM_JOB_ID}"
+    --output "$project/outputs/validation_${SLURM_JOB_ID}" "${options[@]}"

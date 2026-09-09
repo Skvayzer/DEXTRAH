@@ -17,6 +17,7 @@ def main():
     p.add_argument('--play2perfect-root',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--num-envs',type=int,default=24576)
+    p.add_argument('--reuse-evaluation',type=Path)
     args=p.parse_args()
     if not os.environ.get('SLURM_JOB_ID') or args.output.exists():
         raise RuntimeError('Use a Slurm allocation and a new validation directory')
@@ -33,11 +34,18 @@ def main():
         resumed=json.loads((args.smoke_run/'segment_complete.json').read_text())
         assert resumed['segment_start_frame']==previous['frame'] and resumed['frame']>previous['frame']
     assert resumed['resume']['actor_optimizer_restored'] and resumed['resume']['critic_optimizer_restored']
-    evaluation=args.output/'evaluation'
-    subprocess.run([sys.executable,'scripts/record_g1_bps_reposing.py','--headless','--device','cuda:0',
-        '--run',str(args.smoke_run),'--checkpoint',resumed['checkpoint'],'--output',str(evaluation),
-        '--play2perfect-root',str(args.play2perfect_root),'--metrics-only',
-        '--num-envs','1200','--seconds','120','--seed','42'],check=True)
+    evaluation=args.reuse_evaluation or args.output/'evaluation'
+    if args.reuse_evaluation:
+        import hashlib
+        metadata=json.loads((evaluation/'metadata.json').read_text())
+        assert metadata['checkpoint_sha256']==hashlib.file_digest(Path(resumed['checkpoint']).open('rb'),'sha256').hexdigest()
+        assert metadata['num_envs']==1200 and metadata['evaluation_seconds']==120 and metadata['seed']==42
+        assert metadata['tolerance_parameter']==.01 and metadata['tactile'] and metadata['optimizer_updates']==0
+    else:
+        subprocess.run([sys.executable,'scripts/record_g1_bps_reposing.py','--headless','--device','cuda:0',
+            '--run',str(args.smoke_run),'--checkpoint',resumed['checkpoint'],'--output',str(evaluation),
+            '--play2perfect-root',str(args.play2perfect_root),'--metrics-only',
+            '--num-envs','1200','--seconds','120','--seed','42'],check=True)
     report=json.loads((evaluation/'evaluation.json').read_text())
     if report['episode_any_goal_success_rate'] < .56486 or report['goals_per_simulated_minute'] < 12.609:
         raise RuntimeError('Smoke policy did not preserve useful strict reposing performance')
@@ -50,7 +58,8 @@ def main():
     if not progress['actor_touch_weight_norm']>0 or not progress['critic_touch_weight_norm']>0:
         raise RuntimeError('New tactile columns did not learn during the smoke test')
     result=dict(passed=True,small_resume=resumed,strict_evaluation=report,
-        full_scale=benchmark,full_scale_last_update=progress,calibration=str(args.calibration))
+        full_scale=benchmark,full_scale_last_update=progress,calibration=str(args.calibration),
+        evaluation_directory=str(evaluation))
     (args.output/'validation.json').write_text(json.dumps(result,indent=2))
     print('TOUCH_FULL_VALIDATION_PASSED '+json.dumps(result),flush=True)
 
