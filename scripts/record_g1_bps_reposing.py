@@ -29,6 +29,7 @@ def main():
     p.add_argument('--video-seconds',type=float,default=60.)
     p.add_argument('--fps',type=int,default=30)
     p.add_argument('--seed',type=int,default=42)
+    p.add_argument('--metrics-only',action='store_true',help='Frozen-policy evaluation without recording assets or trajectories')
     p.add_argument('--families',nargs='+',default=['hammer','spatula','brush','eraser'])
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -62,7 +63,12 @@ def main():
                for name in ('env_resolved','agent')}
         # env_resolved.yaml stores the task's integer space dimensions, not
         # serialized Gym spaces. Preserve their types while restoring config.
-        cfg=G1Revo2BpsEnvCfg()
+        tactile=saved['agent']['params']['model']['name']=='continuous_a2c_logstd_touch'
+        if tactile:
+            from dextrah_lab.g1_adept.touch_policy import register_models
+            from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
+            register_models()
+        cfg=G1Revo2TouchEnvCfg() if tactile else G1Revo2BpsEnvCfg()
         cfg.seed=saved['env_resolved']['seed']
         cfg.from_dict(replace_strings_with_slices(copy.deepcopy(saved['env_resolved'])))
         cfg.seed=args.seed
@@ -86,9 +92,10 @@ def main():
         args.output.mkdir(parents=True)
         checkpoint=torch.load(args.checkpoint,map_location='cpu',weights_only=False)
         checkpoint=checkpoint[0] if 0 in checkpoint else checkpoint
-        if checkpoint['model']['running_mean_std.running_mean'].shape != (224,):
-            raise ValueError('Not the BPS-only 224-input checkpoint')
-        env=G1Revo2BpsEnv(cfg)
+        actor_dim,critic_dim=(249,271) if tactile else (224,246)
+        if checkpoint['model']['running_mean_std.running_mean'].shape != (actor_dim,):
+            raise ValueError('Checkpoint/config observation layout mismatch')
+        env=(G1Revo2TouchEnv if tactile else G1Revo2BpsEnv)(cfg)
         try:
             source_manifest=json.loads((args.run/'bps/manifest.json').read_text())
             assert env._bps_manifest['features_sha256']==source_manifest['features_sha256'], 'Wrong training shape bank'
@@ -96,7 +103,7 @@ def main():
             indices=env._object_asset_index_per_env.cpu().numpy()
             if args.num_envs==1200:
                 assert len(np.unique(indices))==1200
-            selected=select_family_envs(env._object_urdf_paths,indices,args.families)
+            selected={} if args.metrics_only else select_family_envs(env._object_urdf_paths,indices,args.families)
             ids=torch.tensor(list(selected.values()),device=env.device)
             agent=copy.deepcopy(saved['agent'])
             ac=agent['params']['config']
@@ -115,7 +122,7 @@ def main():
             player.reset()
             obs=player.env_reset(wrapped)
             player.get_batch_size(obs,1)
-            assert obs.shape==(args.num_envs,225)
+            assert obs.shape==(args.num_envs,actor_dim+1)
             for state in player.states:
                 assert state.shape[1]==args.num_envs
 
@@ -128,7 +135,7 @@ def main():
                 source_run=str(args.run),num_envs=env.num_envs,objects=len(env._bps_bank),
                 bank_sha256=env._bps_manifest['features_sha256'],seed=args.seed,policy_dt=dt,
                 evaluation_seconds=steps*dt,video_seconds=clip_steps*dt,fps=args.fps,
-                actor_dim=224,critic_dim=246,actions=13,coefficient_id=0.,
+                actor_dim=actor_dim,critic_dim=critic_dim,actions=13,coefficient_id=0.,
                 policy='Strictly loaded SAPG zero-entropy leader; deterministic mean actions',
                 tolerance_parameter=.01,max_keypoint_error_m=.01*cfg.reward.keypoint_scale,
                 success_steps=cfg.termination.success_steps,
@@ -140,7 +147,7 @@ def main():
                 robot_urdf=str(args.play2perfect_root/cfg.assets.robot_urdf),
                 visual_static_joint_pos=scene_utils.G1_BODY_DEFAULT_JOINT_POS,
                 joint_names=env.robot.joint_names,body_names=env.robot.body_names,
-                optimizer_updates=0,fabrics=False,pca=False,tactile=False)
+                optimizer_updates=0,fabrics=False,pca=False,tactile=tactile,metrics_only=args.metrics_only)
             for family,e in selected.items():
                 directory=args.output/'clips'/family
                 directory.mkdir(parents=True)
@@ -184,7 +191,7 @@ def main():
 
             with torch.inference_mode():
                 for step in range(steps):
-                    if step<clip_steps and step%stride==0:
+                    if not args.metrics_only and step<clip_steps and step%stride==0:
                         frames.append(snapshot(step))
                     action=player.get_action(obs,is_deterministic=True)
                     if not torch.isfinite(action).all():
@@ -220,7 +227,7 @@ def main():
             (args.output/'evaluation.json').write_text(json.dumps(report,indent=2))
             np.savez_compressed(args.output/'per_object_counts.npz',asset_indices=indices,
                 **{name:getattr(stats,name) for name in ('hits','failed_attempts','episodes','any_goal','lifted','completed_goals')})
-            stacked={key:np.stack([f[key] for f in frames]) for key in frames[0]}
+            stacked={key:np.stack([f[key] for f in frames]) for key in frames[0]} if frames else {}
             for index,(family,e) in enumerate(selected.items()):
                 directory=args.output/'clips'/family
                 np.savez_compressed(directory/'trajectory.npz',**{key:value[:,index] for key,value in stacked.items()})
