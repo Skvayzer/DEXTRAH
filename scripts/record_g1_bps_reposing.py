@@ -44,7 +44,6 @@ def main():
         import yaml
         import yourdfpy
         from isaaclab.utils import replace_strings_with_slices
-        from isaaclab.envs.utils.spaces import replace_env_cfg_spaces_with_strings, replace_strings_with_env_cfg_spaces
         from isaacsimenvs.tasks.play.pose_viewer import object_urdf_for_env, table_urdf_for_env
         from isaacsimenvs.tasks.play.utils import scene_utils
         from isaacsimenvs.tasks.play.utils.obs_utils import _keypoints_world
@@ -61,10 +60,11 @@ def main():
             lambda loader,node:tuple(loader.construct_sequence(node)))
         saved={name:yaml.load((args.run/'params'/f'{name}.yaml').read_text(),Loader=TupleLoader)
                for name in ('env_resolved','agent')}
-        cfg=replace_env_cfg_spaces_with_strings(G1Revo2BpsEnvCfg())
+        # env_resolved.yaml stores the task's integer space dimensions, not
+        # serialized Gym spaces. Preserve their types while restoring config.
+        cfg=G1Revo2BpsEnvCfg()
         cfg.seed=saved['env_resolved']['seed']
         cfg.from_dict(replace_strings_with_slices(copy.deepcopy(saved['env_resolved'])))
-        cfg=replace_strings_with_env_cfg_spaces(cfg)
         cfg.seed=args.seed
         cfg.scene.num_envs=args.num_envs
         cfg.sim.device=args.device
