@@ -111,3 +111,32 @@ def test_resume_provenance_preserves_original_calibration_without_refitting(tmp_
         inherit_resume_artifacts(output,checkpoint)
     with pytest.raises(ValueError,match='provenance'):
         inherit_resume_artifacts(tmp_path/'wrong_type',checkpoint,control=True)
+
+
+def test_continuous_checkpoints_do_not_stop_training_without_signal(tmp_path, monkeypatch):
+    from pathlib import Path
+    from dextrah_lab.g1_adept.touch_continuation import TouchContinuationObserver
+    for name in ('memory_allocated','max_memory_reserved'):
+        monkeypatch.setattr(torch.cuda,name,lambda: 0)
+    monkeypatch.setattr(torch.cuda,'mem_get_info',lambda: (100,200))
+    env = SimpleNamespace(_current_success_tolerance=.01)
+    observer = TouchContinuationObserver(env,tmp_path,tmp_path/'parent.pth',tmp_path,
+                                         resume=True,control=True,continuous=True)
+    observer.logged_update = True
+    def save(filename):
+        p=Path(filename+'.pth'); p.parent.mkdir(parents=True,exist_ok=True)
+        p.write_bytes(b'complete')
+    observer.algo = SimpleNamespace(frame=500_170_752,max_frames=-1,save=save,
+                                    writer=SimpleNamespace(add_scalar=lambda *args: None))
+    observer.after_print_stats(500_170_752,1273,0.)
+    assert (tmp_path/'nn/latest.pth').exists()
+    assert observer.algo.max_frames == -1
+    observer.algo.frame += 393216
+    observer.after_print_stats(observer.algo.frame,2048,0.)
+    assert (tmp_path/'nn'/f'snapshot_{observer.algo.frame}.pth').exists()
+    assert not list((tmp_path/'nn').glob('periodic_*'))
+    assert observer.algo.max_frames == -1
+    observer.stop_requested = 'SIGUSR1'
+    observer.after_print_stats(observer.algo.frame,2049,0.)
+    assert observer.algo.max_frames == observer.algo.frame
+    assert json.loads((tmp_path/'latest_checkpoint.json').read_text())['stop_requested'] == 'SIGUSR1'
