@@ -3,7 +3,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 from dextrah_lab.g1_adept.touch_continuation import (
-    install_complete_checkpoint, resume_at_episode_boundary, verify_source_mdp)
+    install_complete_checkpoint, resume_at_episode_boundary, verify_source_mdp, equivalence_precision)
+
+
+def test_equivalence_precision_restores_runtime_flags_even_on_failure():
+    previous=(torch.backends.cuda.matmul.allow_tf32,torch.backends.cudnn.allow_tf32)
+    with pytest.raises(RuntimeError,match='intentional'):
+        with equivalence_precision():
+            assert not torch.backends.cuda.matmul.allow_tf32 and not torch.backends.cudnn.allow_tf32
+            raise RuntimeError('intentional')
+    assert previous == (torch.backends.cuda.matmul.allow_tf32,torch.backends.cudnn.allow_tf32)
 
 
 def test_resume_preserves_both_optimizers_but_discards_stale_physics(tmp_path):
