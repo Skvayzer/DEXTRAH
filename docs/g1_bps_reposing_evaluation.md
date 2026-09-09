@@ -120,3 +120,21 @@ goal/reset counters were checked against the corresponding event logs. This is
 one seeded, deterministic-policy evaluation with retained training disturbances;
 it is not a matched baseline comparison or evidence that BPS alone caused the
 improvement in the training curves.
+
+Render job **366** completed successfully. All four final MP4s were checked on
+the workstation and again with macOS AVFoundation: **60.0 seconds, 1,800 frames,
+1920 x 1080, 30 FPS**. Their local SHA-256 hashes match the workstation copies.
+Across all 7,200 rendered frames, the largest URDF/PhysX position discrepancy
+was **0.0173 mm**, angular discrepancy below **2.7e-6 rad**, and BPS display
+distance error was zero. Preview frames were visually inspected for every shape.
+
+Final filenames in `Desktop/research_recordings`:
+
+- `sapg-bps128-g1-hammer-60s.mp4`
+- `sapg-bps128-g1-spatula-60s.mp4`
+- `sapg-bps128-g1-brush-60s.mp4`
+- `sapg-bps128-g1-eraser-60s.mp4`
+
+Only these four MP4s were added there. Trajectories, JSON reports and PNG previews
+are retained separately under `outputs/bps_reposing_20260909`. No training was
+started, and evaluation/rendering allocations were released after completion.
