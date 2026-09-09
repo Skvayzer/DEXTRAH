@@ -65,8 +65,10 @@ the requested compliance would silently be disabled by that source-task setter.
 
 ## Sensor response
 
-The sequence is physical contact -> 70 Hz acquisition -> configurable latency
--> 10 Hz publication/sample-and-hold, matching the recorded ROS delivery rate.
+The current default is physical contact -> nominal 70 Hz acquisition ->
+configurable latency -> 70 Hz publication/sample-and-hold. The original
+2026-09-08 recording and the bounded pilot used 10 Hz publication; saved configs
+preserve that setting. See `g1_touch70_continuous.md` for the new training run.
 Sampling is quantized to physics ticks; it does not pretend to generate more
 physical updates than the simulator produces. Force magnitude is quantized to
 0.01 N and direction to 1 degree. Cartesian shear avoids the 359/0 discontinuity.

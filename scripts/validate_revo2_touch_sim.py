@@ -416,7 +416,7 @@ class Bench:
         server.gui.add_markdown('Blue = compression; orange = shear. Cyan pads turn gold on contact. '
             'Shear arrows use 5x visual magnification for visibility; numeric values remain N. '
             'Offset arrows sit 30 mm outside the pad, connected to the true contact by a gray line. '
-            'Arrows use instantaneous physics; table shows raw and rate-limited 10 Hz outputs. '
+            f'Arrows use instantaneous physics; table shows raw and {env.cfg.touch.publish_hz:g} Hz outputs. '
             'No privileged contact partner or position is passed to the policy.')
         def camera(client):
             client.camera.position=(.20,.16,.18)
