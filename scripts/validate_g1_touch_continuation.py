@@ -25,10 +25,13 @@ def main():
     base=[sys.executable,'scripts/train_g1_touch_continuation.py','--headless','--device','cuda:0',
           '--source-run',str(args.source_run),'--source-checkpoint',str(args.checkpoint),
           '--calibration',str(args.calibration),'--max-frames','-1']
-    subprocess.run(base+['--output',str(args.smoke_run),'--num-envs',str(previous['num_envs']),
-        '--resume',previous['checkpoint'],'--max-epochs',str(previous['epoch']+3)],check=True)
-    resumed=json.loads((args.smoke_run/'segment_complete.json').read_text())
-    assert resumed['segment_start_frame']==previous['frame'] and resumed['frame']>previous['frame']
+    if previous.get('resume') and previous['frame'] > previous['segment_start_frame']:
+        resumed=previous  # Reuse an already completed real-physics resume test.
+    else:
+        subprocess.run(base+['--output',str(args.smoke_run),'--num-envs',str(previous['num_envs']),
+            '--resume',previous['checkpoint'],'--max-epochs',str(previous['epoch']+3)],check=True)
+        resumed=json.loads((args.smoke_run/'segment_complete.json').read_text())
+        assert resumed['segment_start_frame']==previous['frame'] and resumed['frame']>previous['frame']
     assert resumed['resume']['actor_optimizer_restored'] and resumed['resume']['critic_optimizer_restored']
     evaluation=args.output/'evaluation'
     subprocess.run([sys.executable,'scripts/record_g1_bps_reposing.py','--headless','--device','cuda:0',

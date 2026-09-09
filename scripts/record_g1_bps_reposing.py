@@ -70,6 +70,9 @@ def main():
             register_models()
         cfg=G1Revo2TouchEnvCfg() if tactile else G1Revo2BpsEnvCfg()
         cfg.seed=saved['env_resolved']['seed']
+        # IsaacLab's updater validates against the current value's type rather
+        # than the Optional annotation. Continuation explicitly pins this field.
+        cfg.termination.eval_success_tolerance=saved['env_resolved']['termination']['eval_success_tolerance']
         cfg.from_dict(replace_strings_with_slices(copy.deepcopy(saved['env_resolved'])))
         cfg.seed=args.seed
         cfg.scene.num_envs=args.num_envs
