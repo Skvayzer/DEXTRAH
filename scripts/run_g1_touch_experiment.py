@@ -18,14 +18,35 @@ def main():
     p.add_argument('--source-checkpoint',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--calibration',type=Path,required=True)
+    p.add_argument('--validation',type=Path,required=True)
     p.add_argument('--play2perfect-root',type=Path,required=True)
     p.add_argument('--num-envs',type=int,default=24576)
     p.add_argument('--control',action='store_true')
     args=p.parse_args()
     if not os.environ.get('SLURM_JOB_ID') or args.output.exists():
         raise RuntimeError('Require a GPU allocation and a new experiment directory')
+    validation=json.loads(args.validation.read_text())
+    if not validation['passed'] or validation['full_scale']['num_envs'] != args.num_envs:
+        raise RuntimeError('Require successful physical validation at the requested training scale')
+    if Path(validation['calibration']).resolve() != args.calibration.resolve():
+        raise RuntimeError('Training must use the validated calibration artifact')
     import wandb
     run_id='unique_id_'+args.output.name
+    default_excepthook=sys.excepthook
+    def record_failure(kind,error,tb):
+        if args.output.exists():
+            (args.output/'pilot_failure.json').write_text(json.dumps(dict(error=str(error)),indent=2))
+        if (args.output/'wandb.json').exists():
+            try:
+                with wandb.init(project='adept',entity='skvayzer',id=run_id,resume='must',dir=str(args.output)) as run:
+                    # Keep a more informative regression-stop status if already set.
+                    if run.summary.get('experiment_status') != 'stopped_regression':
+                        run.summary['experiment_status']='failed'
+                    run.summary['failure_reason']=str(error)
+            except Exception:
+                pass  # Reporting failure must not replace the original failure.
+        default_excepthook(kind,error,tb)
+    sys.excepthook=record_failure
     checkpoint=None
     results=[]
     for target in (100000000,200000000,300000000,400000000,500000000):

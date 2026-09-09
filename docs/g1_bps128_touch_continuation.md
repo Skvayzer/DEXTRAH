@@ -116,6 +116,7 @@ Launch from the remote worktree only after those checks pass:
 
 ```bash
 CALIBRATION=/absolute/path/to/validated/calibration.json \
+VALIDATION_JSON=/absolute/path/to/passed/validation.json \
   sbatch scripts/slurm/train_g1_touch_continuation.sbatch
 ```
 
