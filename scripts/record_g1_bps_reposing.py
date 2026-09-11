@@ -30,6 +30,9 @@ def main():
     p.add_argument('--fps',type=int,default=30)
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--metrics-only',action='store_true',help='Frozen-policy evaluation without recording assets or trajectories')
+    p.add_argument('--object-seed',type=int,default=42)
+    p.add_argument('--wrench-multiplier',type=float,default=1.)
+    p.add_argument('--capture-reference',action='store_true',help='Also retain 60 Hz achieved motion and held joint targets for offline reference construction')
     p.add_argument('--families',nargs='+',default=['hammer','spatula','brush','eraser'])
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -37,6 +40,10 @@ def main():
         raise FileExistsError(args.output)
     if not (0 < args.video_seconds <= args.seconds) or args.num_envs%6:
         raise ValueError('Invalid duration or six-group environment count')
+    if not math.isfinite(args.wrench_multiplier) or args.wrench_multiplier <= 0:
+        raise ValueError('Invalid wrench multiplier')
+    if args.capture_reference and args.metrics_only:
+        raise ValueError('Reference capture requires selected recording environments')
     args.headless=True
     app=AppLauncher(args).app
     try:
@@ -79,6 +86,8 @@ def main():
         cfg.sim.device=args.device
         cfg.termination.eval_success_tolerance=.01
         cfg.bps_artifact_dir=str(args.output/'bps')
+        cfg.domain_randomization.force_scale *= args.wrench_multiplier
+        cfg.domain_randomization.torque_scale *= args.wrench_multiplier
         # Keep solver/action/reward/DR settings intact; lower only buffer capacity.
         for name,value in dict(gpu_found_lost_pairs_capacity=2**20,
             gpu_found_lost_aggregate_pairs_capacity=2**21,
@@ -98,10 +107,15 @@ def main():
         actor_dim,critic_dim=(249,271) if tactile else (224,246)
         if checkpoint['model']['running_mean_std.running_mean'].shape != (actor_dim,):
             raise ValueError('Checkpoint/config observation layout mismatch')
-        env=(G1Revo2TouchEnv if tactile else G1Revo2BpsEnv)(cfg)
+        from dextrah_lab.object_shape.teacher_suite import object_seed_override
+        source_manifest=json.loads((args.run/'bps/manifest.json').read_text())
+        with object_seed_override(scene_utils,args.object_seed,source_manifest) as shape_audit:
+            env=(G1Revo2TouchEnv if tactile else G1Revo2BpsEnv)(cfg)
         try:
-            source_manifest=json.loads((args.run/'bps/manifest.json').read_text())
-            assert env._bps_manifest['features_sha256']==source_manifest['features_sha256'], 'Wrong training shape bank'
+            if args.object_seed==42:
+                assert env._bps_manifest['features_sha256']==source_manifest['features_sha256'], 'Wrong training shape bank'
+            else:
+                assert shape_audit['training_geometry_overlap']==0
             assert len(env._bps_bank)==1200 and env.cfg.action_space==13
             indices=env._object_asset_index_per_env.cpu().numpy()
             if args.num_envs==1200:
@@ -151,6 +165,12 @@ def main():
                 visual_static_joint_pos=scene_utils.G1_BODY_DEFAULT_JOINT_POS,
                 joint_names=env.robot.joint_names,body_names=env.robot.body_names,
                 optimizer_updates=0,fabrics=False,pca=False,tactile=tactile,metrics_only=args.metrics_only)
+            metadata.update(object_seed=args.object_seed,shape_audit=shape_audit,
+                wrench_multiplier=args.wrench_multiplier,capture_reference=args.capture_reference,
+                split=('Training objects' if args.object_seed==42 else 'Held-out geometry from the same six procedural families'),
+                domain_randomization='Saved delays/noise/reset variation; object wrench magnitudes multiplied by '+str(args.wrench_multiplier),
+                reference_target_semantics='Previous applied position target at pre-step state; achieved positions/velocities recorded separately',
+                reference_dt=dt if args.capture_reference else None)
             for family,e in selected.items():
                 directory=args.output/'clips'/family
                 directory.mkdir(parents=True)
@@ -169,6 +189,7 @@ def main():
             print('BPS_REPOSING_CHECKPOINT_VALIDATED '+json.dumps(metadata),flush=True)
             stats=ReposeStats(env.num_envs,dt)
             frames=[]
+            reference_frames=[]
             clip_reports=None
             selected_events={name:[] for name in selected}
             begin=time.monotonic()
@@ -184,6 +205,8 @@ def main():
                 b=_keypoints_world(env.goal_viz.data.root_pos_w[ids],env.goal_viz.data.root_quat_w[ids],offset)
                 return dict(step=np.full(len(ids),step),
                     joint_pos=array(env.robot.data.joint_pos[ids]),
+                    joint_vel=array(env.robot.data.joint_vel[ids]),
+                    commanded_joint_targets=array(env._cur_targets[ids]),
                     body_pos=array(env.robot.data.body_pos_w[ids]-origin[:,None,:]),
                     body_quat=array(env.robot.data.body_quat_w[ids]),robot=pose(env.robot),
                     object=pose(env.object),table=pose(env.table),goal=pose(env.goal_viz),
@@ -194,8 +217,13 @@ def main():
 
             with torch.inference_mode():
                 for step in range(steps):
-                    if not args.metrics_only and step<clip_steps and step%stride==0:
-                        frames.append(snapshot(step))
+                    if not args.metrics_only and step<clip_steps:
+                        if args.capture_reference or step%stride==0:
+                            state=snapshot(step)
+                            if args.capture_reference:
+                                reference_frames.append(state)
+                            if step%stride==0:
+                                frames.append(state)
                     action=player.get_action(obs,is_deterministic=True)
                     if not torch.isfinite(action).all():
                         raise RuntimeError('Nonfinite policy action')
@@ -231,9 +259,12 @@ def main():
             np.savez_compressed(args.output/'per_object_counts.npz',asset_indices=indices,
                 **{name:getattr(stats,name) for name in ('hits','failed_attempts','episodes','any_goal','lifted','completed_goals')})
             stacked={key:np.stack([f[key] for f in frames]) for key in frames[0]} if frames else {}
+            references={key:np.stack([f[key] for f in reference_frames]) for key in reference_frames[0]} if reference_frames else {}
             for index,(family,e) in enumerate(selected.items()):
                 directory=args.output/'clips'/family
                 np.savez_compressed(directory/'trajectory.npz',**{key:value[:,index] for key,value in stacked.items()})
+                if references:
+                    np.savez_compressed(directory/'reference_trace.npz',**{key:value[:,index] for key,value in references.items()})
                 m=json.loads((directory/'metadata.json').read_text())
                 m.update(frames=len(frames),seconds=clip_steps*dt,clip_metrics=clip_reports[family],
                          full_horizon_metrics=stats.report([e]),completed=True)
