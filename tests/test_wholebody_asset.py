@@ -1,5 +1,7 @@
 import xml.etree.ElementTree as ET
 import pytest
+import numpy as np
+from scipy.spatial.transform import Rotation
 from dextrah_lab.wholebody.asset import audit_urdf, prepare_urdf
 from dextrah_lab.wholebody.contract import BODY_JOINTS, hand_joints
 
@@ -71,3 +73,25 @@ def test_bad_inertia_fails(tmp_path):
     tree.write(source)
     with pytest.raises(ValueError,match='mass/inertia'):
         audit_urdf(source)
+
+
+@pytest.mark.parametrize('angle', [1., -1.7, 3.141592653589793])
+def test_locked_nonzero_joint_preserves_child_frame(tmp_path, angle):
+    source = fixture(tmp_path)
+    tree = ET.parse(source)
+    joint = tree.find(".//joint[@name='sensor']")
+    joint.find('limit').set('lower', str(angle))
+    joint.find('limit').set('upper', str(angle))
+    joint.find('axis').set('xyz', '1 2 3')
+    ET.SubElement(joint, 'origin', xyz='.01 .02 .03', rpy='.4 -.6 .2')
+    tree.write(source)
+    result = prepare_urdf(source, tmp_path/'prepared.urdf')
+    prepared = ET.parse(tmp_path/'prepared.urdf').find(".//joint[@name='sensor']")
+    expected = Rotation.from_euler('xyz', [.4,-.6,.2]) * Rotation.from_rotvec(
+        np.array([1,2,3]) / np.sqrt(14) * angle)
+    actual = Rotation.from_euler('xyz', np.fromstring(prepared.find('origin').get('rpy'), sep=' '))
+    np.testing.assert_allclose(actual.as_matrix(), expected.as_matrix(), atol=1e-12)
+    np.testing.assert_allclose(np.fromstring(prepared.find('origin').get('xyz'), sep=' '), [.01,.02,.03])
+    assert prepared.get('type') == 'fixed'
+    assert prepared.find('axis') is None
+    assert result['locked_joint_angles_rad']['sensor'] == angle

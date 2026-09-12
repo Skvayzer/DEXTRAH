@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from .contract import BODY_JOINTS, hand_joints
 
@@ -64,16 +65,17 @@ def audit_urdf(path):
         mass += m
         masses[name] = m
     mimic = {}
-    locked = []
+    locked = {}
     for name, joint in joints.items():
         relation = joint.find('mimic')
         if relation is not None:
             mimic[name] = dict(relation.attrib)
         limit = joint.find('limit')
         if joint.get('type') == 'revolute' and limit is not None and float(limit.get('lower')) == float(limit.get('upper')):
-            if float(limit.get('lower')) != 0:
-                raise ValueError(f'Nonzero locked joint needs explicit transform conversion: {name}')
-            locked.append(name)
+            angle = float(limit.get('lower'))
+            if not np.isfinite(angle):
+                raise ValueError(f'Nonfinite locked joint angle: {name}')
+            locked[name] = angle
     for side in ('left','right'):
         for finger in ('thumb','index','middle','ring','pinky'):
             name = f'{side}_{finger}_distal_joint'
@@ -86,7 +88,8 @@ def audit_urdf(path):
     return dict(source=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         links=len(links),joint_count=len(joints),body_commands=29,hand_commands=12,
         total_mass_kg=mass,link_masses_kg=masses,mimic_relations=mimic,
-        zero_range_joints=locked,collision_shapes=len(root.findall('./link/collision')),
+        zero_range_joints=list(locked),locked_joint_angles_rad=locked,
+        collision_shapes=len(root.findall('./link/collision')),
         warnings=warnings,physics_validated=False)
 
 
@@ -104,6 +107,21 @@ def prepare_urdf(source, output):
     root = ET.parse(source).getroot()
     for joint in root.findall('joint'):
         if joint.get('name') in report['zero_range_joints']:
+            # URDF FK is T_origin @ R_axis(q), NOT R_axis(q) @ T_origin.
+            # Folding a nonzero locked angle into the fixed origin preserves
+            # the child frame, including its visual/collision/inertial frames.
+            angle = report['locked_joint_angles_rad'][joint.get('name')]
+            if angle != 0:
+                origin = joint.find('origin')
+                if origin is None:
+                    origin = ET.SubElement(joint, 'origin', xyz='0 0 0', rpy='0 0 0')
+                axis_element = joint.find('axis')
+                axis = np.fromstring(axis_element.get('xyz') if axis_element is not None else '1 0 0', sep=' ')
+                if axis.shape != (3,) or not np.isfinite(axis).all() or np.linalg.norm(axis) == 0:
+                    raise ValueError(f'Invalid locked joint axis: {joint.get("name")}')
+                original = Rotation.from_euler('xyz', np.fromstring(origin.get('rpy', '0 0 0'), sep=' '))
+                rotated = original * Rotation.from_rotvec(axis / np.linalg.norm(axis) * angle)
+                origin.set('rpy', ' '.join(format(v, '.17g') for v in rotated.as_euler('xyz')))
             joint.set('type','fixed')
             for tag in ('limit','axis','dynamics'):
                 element = joint.find(tag)
