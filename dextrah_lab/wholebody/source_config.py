@@ -11,6 +11,8 @@ def source_task_config(output, num_envs, device='cuda:0', source_run=TOUCH_RUN):
     saved = load_yaml(Path(source_run)/'params/env_resolved.yaml')
     cfg = G1SonicTouchEnvCfg()
     cfg.seed = saved['seed']
+    # Isaac's updater checks the current value's type, not Optional[float].
+    cfg.termination.eval_success_tolerance = saved['termination']['eval_success_tolerance']
     cfg.from_dict(replace_strings_with_slices(deepcopy(saved)))
     cfg.assets.robot_profile = 'g1_brainco'
     cfg.assets.robot_fix_base = False
