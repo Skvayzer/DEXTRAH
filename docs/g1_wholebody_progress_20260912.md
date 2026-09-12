@@ -129,3 +129,100 @@ not a training/W&B run; no winner yet. Each attempt has a 30-minute timeout.
 Use the agreed GPU budget for training throughput; small debug probes are
 temporary. More GPU usage does not replace valid action/observation/physics
 contracts. Do not silently reduce physical robot scope to reach a target count.
+
+## Continuation: reuse the trained SAPG teacher before full-body RL
+
+The user explicitly requires teacher-guided initialization, not grasping RL
+from random adapter weights. Early SAPG-to-adapter behavior transfer is distinct
+from the optional later perceptual/deployment distillation of a working composite
+controller. We load `sonic_manipulation_base`, **not** a pretrained GRAIL pickup
+adapter; our continuous Revo2 adapter is new and has no trained checkpoint yet.
+
+Implemented and committed:
+
+- `kinematics.py`, `teacher_bridge.py`, `align_g1_teacher_motion.py`: reconstruct
+  the source wrist from the real URDF, verify it against simulator traces, apply
+  one rigid torso/scene alignment to preserve hand-object transforms, retime to
+  50 Hz and reject moving-source-torso/incorrect-frame data. Ten future frames
+  are spaced **0.1 seconds**, not 0.02 seconds. Pose/velocity endpoints are held
+  consistently. This same-robot conversion is **not** IK or dynamics validation.
+- Two baseline-teacher hammer segments exported locally and remotely (CPU job
+  **452**): 22.42 s / 2 hits and 32.08 s / 8 hits, no body-joint limit violations,
+  maximum source wrist position discrepancy 0.01245 mm. Remote artifacts:
+  `outputs/teacher_hammer_aligned_20260912`.
+- `transfer.py`: recurrent student adapter, separate latent/finger heads,
+  masked imitation losses, and Adam fitting of latent labels against decoded
+  seven-joint physical arm targets. Other 22 body commands retain a baseline
+  penalty and acceptance tolerance. Failed latent fits cannot supervise the
+  body; valid six-channel finger labels remain usable. No 13-vector versus
+  70-vector loss, no direct old-optimizer resume, no PhysX gradients.
+- `FrozenSonic.decode_for_imitation`: frozen parameters with the released FSQ
+  straight-through gradient. CPU **446**: ten tests passed, exact forward match
+  with normal inference, nonzero residual gradients and no SONIC weight gradients.
+- CPU **461** exercised actual SONIC target fitting (synthetic, not SAPG skill
+  transfer): arm max error fell from 0.2380 to 0.0110 rad, but other body commands
+  changed up to 0.0727 rad; **both labels were rejected** by the 0.05-rad retention
+  gate. This confirms fitting and rejection behavior, not trained manipulation.
+- Opt-in exact teacher-policy capture now records pre-action observations,
+  original normalization, recurrent states, raw/clipped teacher actions,
+  post-step applied joint targets and reset validity. Motion-only old captures
+  contain **previous** applied targets and are not mislabeled as next actions.
+  `teacher_data.py` checks causal alignment and action order. Capture **453**
+  caught CPU termination flags indexed by CUDA IDs; fixed and retried as **459**.
+- Added a teacher-reference tracking-only probe with real full-body state and
+  wrist-error capture. It has no objects and neutral fingers; not yet executed
+  at this entry, and never labeled a grasping validation.
+
+### Hand-physics root cause isolated
+
+The original compliant coupling failed (~1.2–1.7 rad). Rigid coupling reduced
+error to 0.147 rad with self-collision on; disabling self-collision for diagnosis
+reduced it to **0.001631 rad**, with standing and hand motion passing.
+Solver iterations, timestep, artificial motor inertia and restoring passive
+velocity caps did not provide an acceptable full-physics solution; some variants
+became unstable. None of those failed diagnostic variants was made the default.
+Job **450** was cancelled when its final compliant/zero-velocity-iteration case
+stalled in simulation reset; earlier case artifacts remain. Diagnostic children
+now have a three-minute timeout. Sweep completion alone is not a physics pass.
+
+All-body contact measurements (**451**) identified palm/wrist versus proximal
+thumb impulses of **548 N left / 534 N right**. Distal sensors were zero because
+the contact was at the thumb base, not the fingertip. Merely measuring fingertips
+would have missed the source of the linkage instability.
+
+CPU CAD audits **456/457**, with original asset hashes and measured joint poses:
+
+- Original triangle meshes: no palm/proximal-thumb intersection at any of six
+  checked poses.
+- Convex palm + original thumb: false intersection at **all six** poses.
+- Original palm + convex thumb: no intersection at all six.
+- Contact locations are near the proximal thumb bearing (~-5 to 0 mm in its
+  longitudinal local coordinate), not at the distal tactile pad.
+
+Thus the palm's single convex hull fills the thumb clearance. Narrowly filtering
+just those two pairs (**454**) reproduces the 0.001631-rad pass while all other
+self-contact remains enabled. This is a **diagnostic**, not a permanent filter.
+`decompose_palm_colliders` instead changes only the two palm collision
+approximations to preserve the concavity; no pair exclusions, no removed branches,
+no mass/joint/visual/tip changes. First attempt **458** exposed instancing at the
+whole wrist collision container; corrected and retried as **460**. Its physical
+result is pending at this entry. CAD audits are in
+`outputs/thumb_cad_audit_20260912.json` and `outputs/thumb_cad_audit_mixed_20260912.json`.
+
+Dependencies: added `python-fcl==0.7.0.11` **only** to the isolated SONIC overlay
+for CPU collision auditing (job 455). Original training environment unchanged.
+
+### Resources and teacher comparison
+
+The user's workstation quickstart explicitly allows **one GPU job per user**.
+All GPU work is serialized by Slurm. Evaluation **440** was cancelled after its
+three completed baseline training seeds to free the GPU for physics diagnosis.
+The completed results and immutable runner snapshot remain intact, with resume
+supported by their existing checksums/protocol; the 27-case selection is not
+finished and no tactile-versus-BPS winner has been declared.
+
+Remaining: verify repaired palm geometry and loaded hand mechanics, finish
+teacher data/selection, validate reference tracking, collect paired real
+full-body states/teacher labels, run supervised adapter initialization, integrate
+the actual BPS/tactile full-body task and SAPG optimizer, benchmark and only then
+fine-tune. **No full-body SAPG training or completed skill distillation yet.**
