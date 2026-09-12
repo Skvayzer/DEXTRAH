@@ -7,7 +7,8 @@ from .importer import native_mimic_cfg_flag
 
 
 def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
-                       self_collision=True, position_iterations=8, bound_distal_speed=False):
+                       self_collision=True, position_iterations=8, bound_distal_speed=False,
+                       hand_armature=0.):
     import isaaclab.sim as sim
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -60,7 +61,7 @@ def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
             # first probe. Unlike that teacher, distal joints are PASSIVE and
             # follow native mimic constraints. Validate this transfer gap.
             'hands': ImplicitActuatorCfg(joint_names_expr=hands, stiffness=hand_stiffness, damping=hand_damping,
-                velocity_limit_sim=motor_limits or None),
+                velocity_limit_sim=motor_limits or None, armature=hand_armature),
             'coupled_distal': ImplicitActuatorCfg(joint_names_expr=distal, stiffness=0., damping=0.,
                 velocity_limit_sim=passive_limits or None),
         })

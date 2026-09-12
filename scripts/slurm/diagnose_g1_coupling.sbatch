@@ -28,6 +28,10 @@ for variant in ${DIAGNOSTIC_VARIANTS:-rigid rigid32 compliant32 no_self low_gain
         bounded400) extra+=(--mimic-frequency 0 --bound-distal-speed --physics-hz 400) ;;
         bounded800) extra+=(--mimic-frequency 0 --bound-distal-speed --physics-hz 800) ;;
         rigid800) extra+=(--mimic-frequency 0 --physics-hz 800) ;;
+        rigid_no_self) extra+=(--mimic-frequency 0 --disable-self-collisions) ;;
+        rigid_inertia5) extra+=(--mimic-frequency 0 --hand-armature 0.00001) ;;
+        rigid_inertia4) extra+=(--mimic-frequency 0 --hand-armature 0.0001) ;;
+        compliant_inertia4) extra+=(--hand-armature 0.0001) ;;
         *) printf 'Unknown diagnostic variant: %s\n' "$variant" >&2; exit 2 ;;
     esac
     if python scripts/validate_g1_fullbody.py --headless --device cuda:0 \

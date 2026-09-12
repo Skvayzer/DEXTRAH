@@ -34,6 +34,7 @@ def main():
     p.add_argument('--position-iterations',type=int,default=8)
     p.add_argument('--physics-hz',type=int,choices=[200,400,800,1000],default=200)
     p.add_argument('--bound-distal-speed',action='store_true',help='Restore importer-ignored passive URDF limits and compatible motor speeds')
+    p.add_argument('--hand-armature',type=float,default=0.,help='DIAGNOSTIC reflected motor inertia kg m^2, not measured hardware data')
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -87,7 +88,7 @@ def main():
         scene_cfg.robot=fullbody_robot_cfg(urdf,args.output/'usd',
             hand_stiffness=args.hand_stiffness,hand_damping=args.hand_damping,
             self_collision=not args.disable_self_collisions,position_iterations=args.position_iterations,
-            bound_distal_speed=args.bound_distal_speed)
+            bound_distal_speed=args.bound_distal_speed,hand_armature=args.hand_armature)
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
             update_period=0.,history_length=1,debug_vis=False)
         print('FULLBODY_PROBE building scene',flush=True)
@@ -240,6 +241,8 @@ def main():
         report['self_collision']=not args.disable_self_collisions
         report['position_iterations']=args.position_iterations
         report['bound_distal_speed']=args.bound_distal_speed
+        report['hand_motor_armature_kg_m2']=args.hand_armature
+        report['hand_motor_armature_calibrated']=False
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:
