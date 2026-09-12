@@ -44,7 +44,8 @@ def write_json(path,value):
 @torch.no_grad()
 def add_body_teacher(data,sonic,device,standing=False):
     converted={k:torch.as_tensor(v,device=device) for k,v in data.items()
-               if k in ('proprio','task','arm_targets','finger_actions','valid','sonic_action')}
+               if k in ('proprio','task','arm_targets','finger_actions','valid','sonic_action',
+                        'teacher_rnn_state_0','teacher_rnn_state_1')}
     count=len(data['proprio'])
     q=torch.as_tensor(nominal_body_pose(),device=device)[None,None].repeat(1,10,1)
     zero=torch.zeros_like(q)
@@ -156,6 +157,7 @@ def sample_windows(episodes,batch,length,rng):
         raise ValueError('A sequence exceeds an available episode')
     chosen=rng.choice(len(episodes),size=batch,p=sizes/sizes.sum())
     keys=('proprio','task','tokens','arm_targets','finger_actions','sonic_action','valid')
+    keys+=tuple(k for k in ('teacher_rnn_state_0','teacher_rnn_state_1') if k in episodes[0])
     out={k:[] for k in keys}
     for i in chosen:
         start=int(rng.integers(sizes[i]))
@@ -164,12 +166,23 @@ def sample_windows(episodes,batch,length,rng):
     return {k:torch.stack(v) for k,v in out.items()}
 
 
+def copied_task_state(model,data,batched):
+    """Source recurrent states are meaningful ONLY for the copied SAPG LSTM."""
+    if not hasattr(model,'task_encoder'):
+        return None
+    values=[]
+    for k in ('teacher_rnn_state_0','teacher_rnn_state_1'):
+        x=data[k][:,0] if batched else data[k][0:1]
+        values.append(x.transpose(0,1).contiguous())
+    return tuple(values)
+
+
 @torch.no_grad()
 def evaluate(model,episodes,rehearsal,burn_in):
     model.eval()
     squared=np.zeros(3);count=0;arm_max=0.
     for e in episodes:
-        hidden=None
+        hidden=copied_task_state(model,e,False)
         for start in range(0,len(e['proprio']),256):
             stop=min(start+256,len(e['proprio']))
             action,hidden=model(e['proprio'][None,start:stop],e['task'][None,start:stop],e['tokens'][None,start:stop],hidden)
@@ -215,6 +228,7 @@ def main():
     p.add_argument('--task-lr',type=float,default=3e-4)
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--wandb',choices=['online','disabled'],default='online')
+    p.add_argument('--reuse-sapg-features',action='store_true',help='Also copy source LSTM/MLP/finger head; no random finger relearning')
     args=p.parse_args()
     if not os.environ.get('SLURM_JOB_ID') or args.output.exists():
         raise ValueError('Use Slurm and a new output directory')
@@ -235,16 +249,48 @@ def main():
         sonic=FrozenSonic(args.workspace/'GRAIL',args.workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base',args.device)
         train,val,standing,standing_val,norm,data_report=prepare(args,sonic)
         write_json(args.output/'dataset_manifest.json',data_report)
-        model=SonicManipulationStudent.from_sonic(sonic,norm['mean'],norm['variance']).to(args.device)
+        feature_report=None
+        architecture=ARCHITECTURE
+        if args.reuse_sapg_features:
+            from dextrah_lab.wholebody.sapg_features import load_sapg_actor,SonicSapgStudent,ARCHITECTURE_SAPG
+            source_meta=json.loads((args.capture/'clips/hammer/metadata.json').read_text())
+            sapg=load_sapg_actor(source_meta['checkpoint'],Path(source_meta['source_run'])/'params/agent.yaml',TEACHER_SHA256,args.device)
+            model=SonicSapgStudent(sonic,sapg,norm['mean'],norm['variance'],freeze_task=True).to(args.device)
+            architecture=ARCHITECTURE_SAPG
+            # Verify exact source-memory semantics against actual captured
+            # deterministic actions, on original 60 Hz frames before resampling.
+            capture=archive(args.capture/'clips/hammer/reference_trace.npz')
+            ids=np.arange(0,len(capture['step']),17)
+            raw=torch.as_tensor(capture['teacher_observation'][ids],device=args.device)
+            state=tuple(torch.as_tensor(capture[k][ids],device=args.device).transpose(0,1).contiguous()
+                for k in ('teacher_rnn_state_0','teacher_rnn_state_1'))
+            with torch.no_grad():
+                features,next_state=model.task_encoder(model.normalizer(raw[:,:224,None].transpose(1,2)),state)
+                copied=model.fingers(features[:,0])
+                expected=torch.as_tensor(capture['teacher_action'][ids,7:13],device=args.device)
+                torch.testing.assert_close(copied,expected,rtol=1e-5,atol=5e-5)
+                actual=sapg(dict(is_train=True,prev_actions=torch.zeros(len(ids),13,device=args.device),
+                    obs=raw,rnn_states=state,seq_length=1))
+                torch.testing.assert_close(copied,actual['mus'][:,7:13],rtol=1e-5,atol=5e-5)
+                for a,b in zip(next_state,actual['rnn_states']):
+                    torch.testing.assert_close(a,b,rtol=1e-5,atol=5e-5)
+            feature_report=dict(samples=len(ids),raw_finger_mean_max_error=float((copied-expected).abs().max()),
+                copied_source_recurrence=True,source_arm_output_not_used_for_control=True,
+                source_task_weights_frozen_during_bootstrap=True)
+            write_json(args.output/'sapg_feature_equivalence.json',feature_report)
+            del sapg
+        else:
+            model=SonicManipulationStudent.from_sonic(sonic,norm['mean'],norm['variance']).to(args.device)
         decoder_params=list(model.decoder.parameters())
-        new_params=[p for name,p in model.named_parameters() if not name.startswith('decoder.')]
+        new_params=[p for name,p in model.named_parameters() if not name.startswith('decoder.') and p.requires_grad]
         optimizer=torch.optim.Adam([dict(params=decoder_params,lr=args.decoder_lr),dict(params=new_params,lr=args.task_lr)])
-        config=dict(architecture=ARCHITECTURE,stage='supervised_kinematic_bootstrap_not_fullbody_RL',
+        config=dict(architecture=architecture,stage='supervised_kinematic_bootstrap_not_fullbody_RL',
             source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'),action_dim=35,
             decoder_lr=args.decoder_lr,task_lr=args.task_lr,updates=args.updates,batch_size=args.batch_size,
             sequence=args.sequence,burn_in=args.burn_in,source_teacher_sha256=TEACHER_SHA256,
             sonic_sha256=WEIGHTS_SHA256,task_dim=model.task_dim,hidden_dim=model.hidden_dim,
-            standing_weight=10.,other_body_weight=1.,no_future_motion_input=True)
+            standing_weight=10.,other_body_weight=1.,no_future_motion_input=True,
+            reuse_sapg_features=args.reuse_sapg_features,feature_equivalence=feature_report)
         write_json(args.output/'config.json',config)
         if args.wandb=='online':
             import wandb
@@ -262,7 +308,7 @@ def main():
         def save(name,step,metrics):
             path=args.output/name
             temporary=path.with_suffix('.tmp')
-            torch.save(dict(architecture=ARCHITECTURE,model=model.state_dict(),optimizer=optimizer.state_dict(),
+            torch.save(dict(architecture=architecture,model=model.state_dict(),optimizer=optimizer.state_dict(),
                 update=step,metrics=metrics,config=config,task_mean=norm['mean'],task_variance=norm['variance'],
                 dataset_manifest_sha256=checksum(args.output/'dataset_manifest.json'),
                 fullbody_rl_updates=0,closed_loop_manipulation_validated=False,
@@ -280,7 +326,8 @@ def main():
                 # gradient/decoder storage for burn-in. Never use teacher RNN
                 # state as the student's state.
                 with torch.no_grad():
-                    _,hidden=model(batch['proprio'][:,:args.burn_in],batch['task'][:,:args.burn_in],batch['tokens'][:,:args.burn_in])
+                    _,hidden=model(batch['proprio'][:,:args.burn_in],batch['task'][:,:args.burn_in],batch['tokens'][:,:args.burn_in],
+                        copied_task_state(model,batch,True))
                 sl=slice(args.burn_in,None)
                 action,_=model(batch['proprio'][:,sl],batch['task'][:,sl],batch['tokens'][:,sl],hidden)
                 loss,metrics=direct_imitation_loss(model,action,batch['arm_targets'][:,sl],batch['finger_actions'][:,sl],

@@ -154,7 +154,7 @@ def direct_imitation_loss(model, action, arm_targets, finger_actions, sonic_acti
     if valid.any():
         targets = model.body_targets(action[valid])
         arm_error = targets[:,model.arm_indices] - arm_targets[valid].detach()
-        finger_error = action[valid][...,29:] - finger_actions[valid].detach()
+        finger_error = action[valid][...,29:].clamp(-1,1) - finger_actions[valid].detach()
         body_error = (action[valid][...,:29]-sonic_action[valid].detach()) * model.body_scales
         arm_loss = arm_error.square().mean()
         finger_loss = finger_error.square().mean()

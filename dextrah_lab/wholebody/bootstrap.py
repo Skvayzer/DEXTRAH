@@ -54,11 +54,17 @@ def causal_episode(trace, metadata, start, stop):
     last=(previous-nominal)/scales
     gravity=np.tile([0.,0.,-1.],(len(ids),1))
     proprio=term_history(np.zeros((len(ids),3)),q-nominal,qd,last,gravity)
-    return dict(proprio=proprio,task=trace['teacher_observation'][ids,:metadata['actor_dim']].astype(np.float32),
+    result=dict(proprio=proprio,task=trace['teacher_observation'][ids,:metadata['actor_dim']].astype(np.float32),
         arm_targets=trace['applied_joint_targets_after_step'][ids][:,arm].astype(np.float32),
         finger_actions=trace['teacher_clipped_action'][ids,7:13].astype(np.float32),
         valid=trace['transition_valid'][ids].copy(),source_sample=ids,time_s=query,
         kinematic_body_q=q,previous_body_action=last.astype(np.float32))
+    # These are usable only by an EXACT copy of the source LSTM, never by
+    # the new GRU architecture. They initialize windows, not each future step.
+    for k in ('teacher_rnn_state_0','teacher_rnn_state_1'):
+        if k in trace:
+            result[k]=trace[k][ids].astype(np.float32)
+    return result
 
 
 def split_episode(length, train_fraction=.7, gap_steps=50, min_steps=64):
