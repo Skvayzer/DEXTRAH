@@ -23,8 +23,8 @@ def test_60hz_ramp_and_causal_executed_action():
     history = TimedSonicHistory(1)
     for step in range(24):
         value = history.push(*terms(1, step/60))
-    physical_times = torch.arange(10)*.02 + 23/60-.18
-    torch.testing.assert_close(value[:, :30].reshape(10, 3)[:, 0], physical_times)
+    physical_times = torch.arange(10, dtype=torch.float64)*.02 + 23/60-.18
+    torch.testing.assert_close(value[:, :30].reshape(10, 3)[:, 0], physical_times.float())
     offset = (3+29+29)*10
     executed = value[:, offset:offset+290].reshape(10, 29)[:, 0]
     expected = ((physical_times.double()*60 + 1e-6).floor()/60).float()
