@@ -26,6 +26,7 @@ def main():
     p.add_argument('--seconds',type=float,default=10.)
     p.add_argument('--controller',choices=['sonic','pd'],default='sonic')
     p.add_argument('--student-checkpoint',type=Path,help='Route-2 student standing-regression probe; task inputs disabled, fingers neutral')
+    p.add_argument('--task-clip',type=Path,help='Live one-object/table integration using this source clip and the student; no replay after reset')
     p.add_argument('--exercise-hands',action='store_true',help='Slowly close/open both hands to check native coupling')
     p.add_argument('--full-hand-range',action='store_true',help='Exercise 90 percent of each motor range at 0.15 Hz, not only 0.5 rad')
     p.add_argument('--record-envs',type=int,default=4,help='Cap trace copying; physics checks still cover all environments')
@@ -64,6 +65,8 @@ def main():
         raise ValueError('--full-hand-range requires --exercise-hands')
     if args.student_checkpoint and (args.reference or args.controller!='sonic'):
         raise ValueError('Student standing regression uses only a nominal reference and SONIC source')
+    if args.task_clip and (not args.student_checkpoint or args.exercise_hands):
+        raise ValueError('Live manipulation requires a student and cannot use diagnostic finger cycles')
     if min(args.tracking_rms_tolerance,args.tracking_max_tolerance)<=0:
         raise ValueError('Tracking tolerances must be positive')
     if args.diagnose_contacts and args.num_envs > 16:
@@ -125,6 +128,13 @@ def main():
             velocity_iterations=args.velocity_iterations)
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
             update_period=0.,history_length=1,debug_vis=False)
+        live_task=None
+        if args.task_clip:
+            from dextrah_lab.wholebody.clip_task import LiveClipTask
+            live_task=LiveClipTask(args.task_clip,
+                args.workspace/'play2perfect/unitree_ros/robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf',
+                args.output,args.device)
+            live_task.add_assets(scene_cfg)
         if args.diagnose_contacts:
             scene_cfg.all_body_contacts=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*',
                 update_period=0.,history_length=1,debug_vis=False)
@@ -222,6 +232,9 @@ def main():
         robot.write_joint_state_to_sim(q0,torch.zeros_like(q0))
         robot.set_joint_position_target(q0)
         scene.reset()
+        if live_task is not None:
+            live_task.reset(scene,audit)
+            scene.reset()
         teacher_reference=None
         if args.reference:
             manifest=json.loads((args.reference.parent/'manifest.json').read_text())
@@ -245,6 +258,8 @@ def main():
         refqd=torch.zeros_like(refq)
         scales=torch.tensor([m.action_scale for m in body_motors().values()],device=args.device)
         records={k:[] for k in ('root_state','joint_pos','joint_vel','targets','foot_force','normalized_action')}
+        if live_task is not None:
+            records.update({k:[] for k in ('object_pose','object_force','task_goal_error')})
         if teacher_reference is not None:
             records.update({k:[] for k in ('sonic_proprio','reference_q','reference_qd','reference_ori6',
                 'wrist_pose','reference_wrist_pose','reference_time_s')})
@@ -257,6 +272,7 @@ def main():
         device_peak_used_bytes=0
         hand_range=torch.zeros(args.num_envs,len(hand_ids),device=args.device)
         failure=None
+        clamped_body_targets=0
         wall=time.monotonic()
         steps=round(args.seconds/CONTROL_DT)
         print('FULLBODY_PROBE rollout started',flush=True)
@@ -282,8 +298,9 @@ def main():
             if student is not None:
                 with torch.no_grad():
                     tokens=model.reference_tokens(refq,refqd,ori)
-                    task=student.normalizer.mean[None,None].expand(args.num_envs,1,-1)
-                    predicted,student_hidden=student(obs[:,None],task,tokens[:,None],student_hidden,task_active=False)
+                    task=(live_task.observation()[:,None] if live_task is not None
+                          else student.normalizer.mean[None,None].expand(args.num_envs,1,-1))
+                    predicted,student_hidden=student(obs[:,None],task,tokens[:,None],student_hidden,task_active=live_task is not None)
                     last=predicted[:,0,:29]
                 if not torch.isfinite(last).all() or (last.abs()>20).any():
                     raise ValueError('Student command is nonfinite or exceeds the SONIC action limit')
@@ -292,6 +309,14 @@ def main():
             target=q0.clone()
             target[:,body_ids]=q0[:,body_ids]+last*scales
             target[:,hand_ids]=q0[:,hand_ids]
+            if live_task is not None:
+                body_target=target[:,body_ids]
+                limits=robot.data.joint_pos_limits[:,body_ids]
+                bounded=body_target.clamp(limits[...,0],limits[...,1])
+                clamped_body_targets+=int((bounded!=body_target).sum())
+                target[:,body_ids]=bounded
+                last=(bounded-q0[:,body_ids])/scales
+                live_task.set_finger_targets(target,predicted[:,0,29:])
             if args.exercise_hands:
                 frequency=.15 if args.full_hand_range else .3
                 target[:,hand_ids]+=hand_amplitude*.5*(1-np.cos(2*np.pi*frequency*step*CONTROL_DT))
@@ -310,6 +335,8 @@ def main():
             values=dict(root_state=robot.data.root_state_w,joint_pos=robot.data.joint_pos,
                 joint_vel=robot.data.joint_vel,targets=target,
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
+            if live_task is not None:
+                values.update(live_task.record())
             if teacher_reference is not None:
                 from dextrah_lab.wholebody.reference import _retime_pose
                 query=min(max(0.,(step+1)*CONTROL_DT-1.),teacher_reference['time_s'][-1])
@@ -369,7 +396,9 @@ def main():
             torch_peak_allocated_bytes=torch.cuda.max_memory_allocated())
         report['device_peak_used_bytes_sampled']=device_peak_used_bytes
         report['student']=student_metadata
-        report['student_task_inputs_disabled']=student is not None
+        report['student_task_inputs_disabled']=student is not None and live_task is None
+        report['live_task']=live_task.report() if live_task is not None else None
+        report['body_target_clamped_channels']=clamped_body_targets
         report['grasping_validated']=False
         report['native_coupling_configuration']=coupling_config
         report['replicate_physics']=not args.no_physics_replication
