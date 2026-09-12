@@ -22,9 +22,13 @@ extra_args=()
 if [[ "${REUSE_SAPG_FEATURES:-0}" == 1 ]]; then
     extra_args+=(--reuse-sapg-features)
 fi
+if [[ -n "${TEACHER_SHA256:-}" ]]; then
+    extra_args+=(--teacher-sha256 "$TEACHER_SHA256")
+fi
 python scripts/train_g1_sonic_distillation.py \
-    --capture "$project/outputs/transfer_teacher_459" \
+    --capture "${TEACHER_CAPTURE:-$project/outputs/transfer_teacher_459}" \
     --standing "$project/outputs/fullbody_probe_470" \
     --contract "$project/outputs/student_contract_475/validation.json" \
     --output "$project/outputs/sonic_distillation_${SLURM_JOB_ID}" \
-    --updates "${DISTILL_UPDATES:-1200}" --batch-size "${DISTILL_BATCH:-8}" "${extra_args[@]}"
+    --updates "${DISTILL_UPDATES:-1200}" --batch-size "${DISTILL_BATCH:-8}" \
+    --policy-hz "${POLICY_HZ:-50}" "${extra_args[@]}"

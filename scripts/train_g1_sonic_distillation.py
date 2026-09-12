@@ -23,6 +23,7 @@ from dextrah_lab.wholebody.sonic import FrozenSonic, WEIGHTS_SHA256, verify_file
 from dextrah_lab.wholebody.student import ARCHITECTURE, ACTION_JOINTS, SonicManipulationStudent, direct_imitation_loss
 from dextrah_lab.wholebody.teacher_bridge import align_teacher_segment
 from dextrah_lab.wholebody.teacher_data import validate_policy_capture
+from dextrah_lab.wholebody.task_contract import TOUCH_SHA256
 
 TEACHER_SHA256='53c4b009cdd341b4a0e007111c4009da57898dcb00d264c12c81b18817637fec'
 
@@ -81,16 +82,20 @@ def prepare(args,sonic):
     training=[];validation=[];reports=[];normalizer=None;checkpoint=None
     rest=nominal_body_pose()
     rest[BODY_JOINTS.index('left_shoulder_roll_joint')]=args.left_clearance_roll
+    if args.policy_hz==60:
+        from dextrah_lab.wholebody.source_scene import standing_reset_pose
+        rest=np.asarray([standing_reset_pose()[name] for name in BODY_JOINTS],dtype=np.float32)
     for clip in sorted((args.capture/'clips').iterdir()):
         if not clip.is_dir():
             continue
         print(f'DISTILLATION_PREPARE {clip.name}',flush=True)
         meta=json.loads((clip/'metadata.json').read_text())
-        if meta['checkpoint_sha256']!=TEACHER_SHA256 or meta['actor_dim']!=224:
-            raise ValueError('This bootstrap pins the audited 8B BPS teacher; do not silently replace it')
+        expected_dim=249 if args.teacher_sha256==TOUCH_SHA256 else 224
+        if meta['checkpoint_sha256']!=args.teacher_sha256 or meta['actor_dim']!=expected_dim:
+            raise ValueError('Capture does not match the explicitly selected pinned teacher')
         if checkpoint is None:
             checkpoint=Path(meta['checkpoint'])
-            verify_file(checkpoint,TEACHER_SHA256)
+            verify_file(checkpoint,args.teacher_sha256)
         elif Path(meta['checkpoint'])!=checkpoint:
             raise ValueError('Mixed teacher checkpoints')
         data=archive(clip/'reference_trace.npz')
@@ -105,7 +110,7 @@ def prepare(args,sonic):
         for start,stop in zip(boundaries[:-1],boundaries[1:]):
             if stop-start<2:
                 continue
-            episode=causal_episode(data,meta,int(start),int(stop),rest_pose=rest)
+            episode=causal_episode(data,meta,int(start),int(stop),rest_pose=rest,policy_dt=1/args.policy_hz)
             split=split_episode(len(episode['proprio']),min_steps=args.sequence+args.burn_in)
             if split is None:
                 continue
@@ -137,7 +142,7 @@ def prepare(args,sonic):
         raise ValueError('Standing rehearsal is too short for separate validation')
     rehearsal_train={k:v[split[0]] for k,v in rehearsal.items() if torch.is_tensor(v)}
     rehearsal_val={k:v[split[1]] for k,v in rehearsal.items() if torch.is_tensor(v)}
-    report=dict(teacher_checkpoint=str(checkpoint),teacher_checkpoint_sha256=TEACHER_SHA256,
+    report=dict(teacher_checkpoint=str(checkpoint),teacher_checkpoint_sha256=args.teacher_sha256,
         sonic_checkpoint_sha256=WEIGHTS_SHA256,clips=reports,
         training_samples=sum(len(x['proprio']) for x in training),
         validation_samples=sum(len(x['proprio']) for x in validation),
@@ -148,8 +153,9 @@ def prepare(args,sonic):
         manipulation_body_data='KINEMATIC lifted SAPG right arm, nominal legs and zero base motion; NOT real full-body rollouts',
         standing_body_data='Measured pre-action states reconstructed from passing real nominal SONIC standing probe',
         split='Within-episode contiguous time holdout, 50-step separation; NOT held-out objects',
-        future_motion_input=False,physics_hz=200,student_control_hz=50,source_teacher_control_hz=60,
-        task_dim=224,tactile_training=False,action_joint_order=list(ACTION_JOINTS),source_body_order=list(BODY_JOINTS),
+        future_motion_input=False,student_control_hz=args.policy_hz,source_teacher_control_hz=60,
+        body_history_spacing_s=.02,standing_rehearsal_control_hz=50,
+        task_dim=expected_dim,tactile_training=(expected_dim==249),action_joint_order=list(ACTION_JOINTS),source_body_order=list(BODY_JOINTS),
         manipulation_rest_pose=rest.tolist(),left_clearance_roll=args.left_clearance_roll)
     return training,validation,rehearsal_train,rehearsal_val,normalizer,report
 
@@ -235,6 +241,8 @@ def main():
     p.add_argument('--wandb',choices=['online','disabled'],default='online')
     p.add_argument('--reuse-sapg-features',action='store_true',help='Also copy source LSTM/MLP/finger head; no random finger relearning')
     p.add_argument('--left-clearance-roll',type=float,default=.6,help='Planned left-arm rest reference to clear the table; no welded or overridden body joints')
+    p.add_argument('--teacher-sha256',choices=[TEACHER_SHA256,TOUCH_SHA256],default=TEACHER_SHA256)
+    p.add_argument('--policy-hz',type=int,choices=[50,60],default=50)
     args=p.parse_args()
     if not os.environ.get('SLURM_JOB_ID') or args.output.exists():
         raise ValueError('Use Slurm and a new output directory')
@@ -262,7 +270,7 @@ def main():
         if args.reuse_sapg_features:
             from dextrah_lab.wholebody.sapg_features import load_sapg_actor,SonicSapgStudent,ARCHITECTURE_SAPG
             source_meta=json.loads((args.capture/'clips/hammer/metadata.json').read_text())
-            sapg=load_sapg_actor(source_meta['checkpoint'],Path(source_meta['source_run'])/'params/agent.yaml',TEACHER_SHA256,args.device)
+            sapg=load_sapg_actor(source_meta['checkpoint'],Path(source_meta['source_run'])/'params/agent.yaml',args.teacher_sha256,args.device)
             model=SonicSapgStudent(sonic,sapg,norm['mean'],norm['variance'],freeze_task=True).to(args.device)
             architecture=ARCHITECTURE_SAPG
             # Verify exact source-memory semantics against actual captured
@@ -273,7 +281,7 @@ def main():
             state=tuple(torch.as_tensor(capture[k][ids],device=args.device).transpose(0,1).contiguous()
                 for k in ('teacher_rnn_state_0','teacher_rnn_state_1'))
             with torch.no_grad():
-                features,next_state=model.task_encoder(model.normalizer(raw[:,:224,None].transpose(1,2)),state)
+                features,next_state=model.task_encoder(model.normalizer(raw[:,:model.task_dim,None].transpose(1,2)),state)
                 copied=model.fingers(features[:,0])
                 expected=torch.as_tensor(capture['teacher_action'][ids,7:13],device=args.device)
                 # Capture records the player's output, which already clips
@@ -298,11 +306,12 @@ def main():
         config=dict(architecture=architecture,stage='supervised_kinematic_bootstrap_not_fullbody_RL',
             source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'),action_dim=35,
             decoder_lr=args.decoder_lr,task_lr=args.task_lr,updates=args.updates,batch_size=args.batch_size,
-            sequence=args.sequence,burn_in=args.burn_in,source_teacher_sha256=TEACHER_SHA256,
+            sequence=args.sequence,burn_in=args.burn_in,source_teacher_sha256=args.teacher_sha256,
             sonic_sha256=WEIGHTS_SHA256,task_dim=model.task_dim,hidden_dim=model.hidden_dim,
             standing_weight=10.,other_body_weight=1.,no_future_motion_input=True,
             reuse_sapg_features=args.reuse_sapg_features,feature_equivalence=feature_report,
-            explicit_task_activity_gate=True,left_clearance_roll=args.left_clearance_roll)
+            explicit_task_activity_gate=True,left_clearance_roll=args.left_clearance_roll,
+            policy_hz=args.policy_hz,body_history_spacing_s=.02)
         write_json(args.output/'config.json',config)
         if args.wandb=='online':
             import wandb
@@ -378,7 +387,7 @@ def main():
                         best=metrics['selection_loss'];best_update=update
                         save('best_student.pt',update,metrics)
                     save('last_student.pt',update,metrics)
-        verify_file(Path(data_report['teacher_checkpoint']),TEACHER_SHA256)
+        verify_file(Path(data_report['teacher_checkpoint']),args.teacher_sha256)
         verify_file(args.workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base/last.pt',WEIGHTS_SHA256)
         report=dict(completed=True,supervised_updates=args.updates,fullbody_rl_updates=0,
             initial_validation=before,final_validation=metrics,best_update=best_update,

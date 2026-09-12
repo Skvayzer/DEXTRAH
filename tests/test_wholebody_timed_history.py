@@ -1,5 +1,6 @@
 import pytest
 import torch
+import numpy as np
 from dextrah_lab.wholebody.timed_history import TimedSonicHistory
 from dextrah_lab.wholebody.sonic import SonicHistory
 
@@ -41,6 +42,17 @@ def test_partial_reset_does_not_advance_other_environment():
     history.initialize_fresh(*terms(2, 100))
     torch.testing.assert_close(history.value()[1], other, rtol=0, atol=0)
     assert torch.all(history.value()[0] == 100)
+
+
+def test_offline_bootstrap_matches_online_history():
+    from dextrah_lab.wholebody.bootstrap import term_history
+    rng = np.random.default_rng(5)
+    data = [rng.normal(size=(30, d)).astype(np.float32) for d in TimedSonicHistory.DIMENSIONS]
+    expected = term_history(*data, sample_dt=1/60)
+    history = TimedSonicHistory(1)
+    for i in range(30):
+        actual = history.push(*(torch.from_numpy(x[i:i+1]) for x in data))
+        torch.testing.assert_close(actual[0], torch.from_numpy(expected[i]), atol=5e-7, rtol=1e-5)
 
 
 @pytest.mark.parametrize('dt', [0, -.01, .03])

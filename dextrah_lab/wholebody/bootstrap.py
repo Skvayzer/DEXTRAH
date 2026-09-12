@@ -13,17 +13,25 @@ from .contract import BODY_JOINTS, CONTROL_DT, joint_indices, nominal_body_pose
 from .teacher_bridge import RIGHT_ARM
 
 
-def term_history(*terms):
+def term_history(*terms, sample_dt=CONTROL_DT):
     """Per-term ten-sample oldest-to-newest history, endpoint held at start."""
     if len(terms)!=5 or any(x.ndim!=2 or len(x)!=len(terms[0]) for x in terms):
         raise ValueError('Expected five matching time-major proprioception terms')
     if [x.shape[1] for x in terms]!=[3,29,29,29,3]:
         raise ValueError('Wrong SONIC history term dimensions')
-    ids=np.maximum(np.arange(len(terms[0]))[:,None]-np.arange(9,-1,-1),0)
-    return np.concatenate([x[ids].reshape(len(ids),-1) for x in terms],-1).astype(np.float32)
+    if not 0 < sample_dt <= .02:
+        raise ValueError('Require positive samples no slower than 50 Hz')
+    index=np.maximum(np.arange(len(terms[0]))[:,None]-np.arange(9,-1,-1)*.02/sample_dt,0)
+    index=np.where(np.abs(index-np.round(index))<1e-9,np.round(index),index)
+    lo,hi=np.floor(index).astype(int),np.ceil(index).astype(int)
+    weight=(index-lo)[...,None]
+    # Physical terms interpolate to 20 ms spacing. Executed commands are held
+    # causally, exactly as TimedSonicHistory in the live 60 Hz source task.
+    return np.concatenate([(x[lo] if i==3 else x[lo]+weight*(x[hi]-x[lo])).reshape(len(lo),-1)
+                           for i,x in enumerate(terms)],-1).astype(np.float32)
 
 
-def causal_episode(trace, metadata, start, stop, rest_pose=None):
+def causal_episode(trace, metadata, start, stop, rest_pose=None, policy_dt=CONTROL_DT):
     """Hold the latest complete 60 Hz sample onto a 50 Hz bootstrap clock.
 
     Do not smooth object observations, interpolate through goal changes or
@@ -39,7 +47,9 @@ def causal_episode(trace, metadata, start, stop, rest_pose=None):
     source_times=(trace['step'][start:stop]-trace['step'][start])*dt
     if not (np.diff(source_times)>0).all():
         raise ValueError('Source time must increase')
-    query=np.arange(int(np.floor((source_times[-1]+1e-10)/CONTROL_DT))+1)*CONTROL_DT
+    if policy_dt not in (1/50,1/60):
+        raise ValueError('Only audited 50/60 Hz bootstrap clocks are supported')
+    query=np.arange(int(np.floor((source_times[-1]+1e-10)/policy_dt))+1)*policy_dt
     ids=np.searchsorted(source_times,query+1e-12,side='right')-1+start
     arm=joint_indices(metadata['joint_names'],RIGHT_ARM)
     body_arm=joint_indices(BODY_JOINTS,RIGHT_ARM)
@@ -56,7 +66,7 @@ def causal_episode(trace, metadata, start, stop, rest_pose=None):
     previous[:,body_arm]=trace['commanded_joint_targets'][ids][:,arm]
     last=(previous-nominal)/scales
     gravity=np.tile([0.,0.,-1.],(len(ids),1))
-    proprio=term_history(np.zeros((len(ids),3)),q-nominal,qd,last,gravity)
+    proprio=term_history(np.zeros((len(ids),3)),q-nominal,qd,last,gravity,sample_dt=policy_dt)
     result=dict(proprio=proprio,task=trace['teacher_observation'][ids,:metadata['actor_dim']].astype(np.float32),
         arm_targets=trace['applied_joint_targets_after_step'][ids][:,arm].astype(np.float32),
         finger_actions=trace['teacher_clipped_action'][ids,7:13].astype(np.float32),
