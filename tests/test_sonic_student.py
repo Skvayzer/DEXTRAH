@@ -118,3 +118,15 @@ def test_shape_and_source_decoder_contract_fail_closed():
         model(p,o,z,hidden=torch.zeros(1,2,5))
     with pytest.raises(ValueError,match='930'):
         SonicManipulationStudent(nn.Sequential(nn.Linear(13,29)),torch.zeros(20),torch.ones(20))
+
+
+def test_inactive_task_is_not_a_mean_observation_heuristic():
+    _,model=student()
+    with torch.no_grad():
+        model.task_to_body.weight.normal_(0,.1)
+    p,o,z=inputs()
+    first,_=model(p,o,z,task_active=False)
+    second,_=model(p,o+2,z,task_active=False)
+    torch.testing.assert_close(first[...,:29],second[...,:29],rtol=0,atol=0)
+    active,_=model(p,o,z)
+    assert not torch.allclose(active[...,:29],first[...,:29])

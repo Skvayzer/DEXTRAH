@@ -20,6 +20,11 @@ def test_causal_hold_and_applied_target_not_previous_or_future():
     assert np.array_equal(result['task'][:,0],ids)
     assert np.allclose(result['arm_targets'][:,0],ids+.2)
     assert result['proprio'].shape==(len(ids),930)
+    rest=nominal_body_pose();left=BODY_JOINTS.index('left_shoulder_roll_joint');rest[left]=.6
+    clearance=causal_episode(trace,meta,0,n,rest_pose=rest)
+    np.testing.assert_allclose(clearance['kinematic_body_q'][:,left],.6)
+    np.testing.assert_array_equal(clearance['arm_targets'],result['arm_targets'])
+    assert (clearance['previous_body_action'][:,left]>0).all()
     trace['resets'][60:]=1
     with pytest.raises(ValueError,match='reset'):
         causal_episode(trace,meta,0,n)
