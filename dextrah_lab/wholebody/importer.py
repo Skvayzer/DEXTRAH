@@ -128,8 +128,10 @@ def decompose_palm_colliders(stage, num_envs):
                 ancestor=prim.GetParent()
                 while ancestor.IsValid() and not ancestor.IsInstance():
                     ancestor=ancestor.GetParent()
-                if not ancestor.IsValid() or '/collisions/' not in str(ancestor.GetPath()):
-                    raise ValueError('Unexpected palm collision instancing structure')
+                collision_root=f'/World/envs/env_{env_id}/Robot/{side}_wrist_yaw_link/collisions'
+                if not ancestor.IsValid() or not (str(ancestor.GetPath())==collision_root or
+                                                   str(ancestor.GetPath()).startswith(collision_root+'/')):
+                    raise ValueError(f'Unexpected palm collision instance ancestor: {ancestor.GetPath()}')
                 ancestor.SetInstanceable(False)
                 prim=stage.GetPrimAtPath(path)
             if prim.IsInstanceProxy():
