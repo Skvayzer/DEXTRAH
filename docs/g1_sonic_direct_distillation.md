@@ -7,10 +7,13 @@ are not prerequisites for the new route.
 ## Current training configuration (supersedes historical development details below)
 
 On September 12, after viewing the recorded attempt, the user authorized
-continuous full-body SAPG training. Slurm **513** was submitted with **12,288
-environments**, six groups of 2,048, one RTX 6000 Ada and a 48-hour allocation.
-Startup/optimizer verification is recorded in the run's `progress.json`;
-submission by itself is not evidence of successful training.
+continuous full-body SAPG training. Slurm **517** continues **513**, with
+**12,288 environments**, six groups of 2,048, one RTX 6000 Ada and a 48-hour
+allocation. Job 513 demonstrated real optimizer updates at approximately
+44,000 transitions/s and 34 GiB total device memory. It stopped at 3,342,336
+transitions on a missing-ground tactile contact check, not an optimizer failure.
+Job 517 resumes its saved best checkpoint at **1,966,080 transitions / epoch
+10**, with both actor and critic optimizers restored and fresh physics episodes.
 
 - The teacher is now the **completed BPS-128 + 70 Hz touch run 383**, checkpoint
   `complete_17364025344.pth`, SHA-256
@@ -52,13 +55,29 @@ submission by itself is not evidence of successful training.
   checkpoint by leader training return, plus atomic latest checkpoints every
   64 updates. No periodic evaluation orchestration, no frame/epoch cap;
   Slurm's 48-hour wall limit remains, with an advance checkpoint signal.
-- Source snapshot **d53e533**; CPU job **512: 44 tests passed**, including
+- Initial source snapshot **d53e533**, restart snapshot **ec2baf4**; CPU job
+  **512: 44 tests passed**, including
   source finger delay/EMA/follower parity, recurrent/normalizer checks and
   per-environment numerical termination/non-finite rejection. These tests do
   not establish learned success or long-run simulator stability.
 
-Output: `outputs/0_sonic_sapg_touch_513` on the workstation.
-[Online W&B run](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_513).
+The additional fix includes the global ground collider in the fingertip
+contact filter. The source scan enumerated env-local rigid objects/table but
+omitted the static floor, which a falling full robot can reach. No force-
+consistency assertion was disabled and no collision physics was changed.
+GPU test **515** measured 166 supported samples, final support 9.809994 N and
+maximum reconstructed-versus-net normal-force error **1.91e-6 N**. The existing
+25-value touch observation shape and 70 Hz sampling remain unchanged.
+
+The initial run's occasional NaNs were confined to two auxiliary gradient-
+comparison log scalars; actor/critic losses remained finite. Failure status
+must be checked in `training_result.json`/W&B: 513's Kit shutdown still exited
+with code zero despite failure. The restart code exits with failure status
+before entering that problematic shutdown path.
+
+Output: `outputs/0_sonic_sapg_touch_517` on the workstation.
+[Online W&B continuation](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_517).
+Parent artifacts remain in `outputs/0_sonic_sapg_touch_513`.
 
 The sections below describe the original route-2 design and earlier experiments;
 their 50/200 Hz clocks, BPS-only teacher and native-coupling assumptions are

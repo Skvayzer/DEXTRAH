@@ -2,17 +2,21 @@
 
 ## Latest update: continuous training launch
 
-User reviewed the failure recording and authorized training. **Job 513** was
-submitted with 12,288 full-body environments, one Ada 6000, online W&B and a
-48-hour allocation. Source commit `d53e533`; **44 targeted tests passed** in
-job 512. It reuses touch teacher 383 via bootstrap 503, with the original
+User reviewed the failure recording and authorized training. **Job 517**
+continues 513 with 12,288 full-body environments, one Ada 6000, online W&B and
+a 48-hour allocation. Initial 513 reached 3.34M transitions at ~44k/s and
+34 GiB device memory, then stopped because its tactile filter omitted the
+global floor. This is fixed in `ec2baf4`; ground-contact test 515 passed with
+1.91e-6 N reconstruction error. Restart uses the saved best at 1.97M frames /
+epoch 10, restoring both optimizers; later unsaved updates are not recovered.
+**44 targeted tests passed** in job 512. It reuses touch teacher 383 via bootstrap 503, with the original
 120 Hz physics / 60 Hz task and 70 Hz touch. Finite extreme joint speeds now
 reset only that environment and are logged separately; non-finite states
 still abort. Ordinary falls are learnable episode outcomes.
 
 See the authoritative current configuration and caveats at the top of
 [direct distillation](g1_sonic_direct_distillation.md). Actual startup/update
-evidence is in `outputs/0_sonic_sapg_touch_513/progress.json`, not implied by
+evidence is in `outputs/0_sonic_sapg_touch_517/progress.json`, not implied by
 submission. No successful whole-body manipulation has been established.
 
 ## Historical progress notes (superseded where they conflict with the update above)
