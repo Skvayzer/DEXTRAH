@@ -25,6 +25,7 @@ def main():
     p.add_argument('--num-envs',type=int,default=4)
     p.add_argument('--seconds',type=float,default=10.)
     p.add_argument('--controller',choices=['sonic','pd'],default='sonic')
+    p.add_argument('--student-checkpoint',type=Path,help='Route-2 student standing-regression probe; task inputs disabled, fingers neutral')
     p.add_argument('--exercise-hands',action='store_true',help='Slowly close/open both hands to check native coupling')
     p.add_argument('--full-hand-range',action='store_true',help='Exercise 90 percent of each motor range at 0.15 Hz, not only 0.5 rad')
     p.add_argument('--record-envs',type=int,default=4,help='Cap trace copying; physics checks still cover all environments')
@@ -61,6 +62,8 @@ def main():
         raise ValueError('Invalid probe size/duration')
     if args.full_hand_range and not args.exercise_hands:
         raise ValueError('--full-hand-range requires --exercise-hands')
+    if args.student_checkpoint and (args.reference or args.controller!='sonic'):
+        raise ValueError('Student standing regression uses only a nominal reference and SONIC source')
     if min(args.tracking_rms_tolerance,args.tracking_max_tolerance)<=0:
         raise ValueError('Tracking tolerances must be positive')
     if args.diagnose_contacts and args.num_envs > 16:
@@ -96,6 +99,11 @@ def main():
         model=(FrozenSonic(args.workspace/'GRAIL',
             args.workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base',args.device)
             if args.controller=='sonic' else None)
+        student=student_metadata=None
+        student_hidden=None
+        if args.student_checkpoint:
+            from dextrah_lab.wholebody.student_checkpoint import load_student_checkpoint
+            student,student_metadata=load_student_checkpoint(args.student_checkpoint,model,args.device)
         physics_dt=1/args.physics_hz
         cfg=sim_utils.SimulationCfg(dt=physics_dt,device=args.device,render_interval=round(CONTROL_DT/physics_dt),
             physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.,dynamic_friction=1.,restitution=0.))
@@ -271,7 +279,16 @@ def main():
                     rqd[:]=0.
                 refq=torch.as_tensor(rq,device=args.device,dtype=q0.dtype)[None].repeat(args.num_envs,1,1)
                 refqd=torch.as_tensor(rqd,device=args.device,dtype=q0.dtype)[None].repeat(args.num_envs,1,1)
-            last=model(obs,refq,refqd,ori) if model is not None else torch.zeros_like(last)
+            if student is not None:
+                with torch.no_grad():
+                    tokens=model.reference_tokens(refq,refqd,ori)
+                    task=student.normalizer.mean[None,None].expand(args.num_envs,1,-1)
+                    predicted,student_hidden=student(obs[:,None],task,tokens[:,None],student_hidden)
+                    last=predicted[:,0,:29]
+                if not torch.isfinite(last).all() or (last.abs()>20).any():
+                    raise ValueError('Student command is nonfinite or exceeds the SONIC action limit')
+            else:
+                last=model(obs,refq,refqd,ori) if model is not None else torch.zeros_like(last)
             target=q0.clone()
             target[:,body_ids]=q0[:,body_ids]+last*scales
             target[:,hand_ids]=q0[:,hand_ids]
@@ -351,6 +368,9 @@ def main():
             full_m0_validated=False,training_started=False,optimizer_memory_measured=False,
             torch_peak_allocated_bytes=torch.cuda.max_memory_allocated())
         report['device_peak_used_bytes_sampled']=device_peak_used_bytes
+        report['student']=student_metadata
+        report['student_task_inputs_disabled']=student is not None
+        report['grasping_validated']=False
         report['native_coupling_configuration']=coupling_config
         report['replicate_physics']=not args.no_physics_replication
         report['self_collision']=not args.disable_self_collisions

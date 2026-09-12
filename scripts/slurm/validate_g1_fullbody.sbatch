@@ -39,6 +39,9 @@ esac
 if [[ -n "${TEACHER_REFERENCE:-}" ]]; then
     extra_args+=(--reference "$TEACHER_REFERENCE")
 fi
+if [[ -n "${STUDENT_CHECKPOINT:-}" ]]; then
+    extra_args+=(--student-checkpoint "$STUDENT_CHECKPOINT")
+fi
 python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
     --output "$project/outputs/fullbody_probe_${SLURM_JOB_ID}" \
     --num-envs "${NUM_ENVS:-4}" --seconds "${PROBE_SECONDS:-10}" "${extra_args[@]}"
