@@ -32,6 +32,7 @@ def main():
     p.add_argument('--hand-stiffness',type=float,default=1200.)
     p.add_argument('--hand-damping',type=float,default=25.)
     p.add_argument('--position-iterations',type=int,default=8)
+    p.add_argument('--velocity-iterations',type=int,default=4)
     p.add_argument('--physics-hz',type=int,choices=[200,400,800,1000],default=200)
     p.add_argument('--bound-distal-speed',action='store_true',help='Restore importer-ignored passive URDF limits and compatible motor speeds')
     p.add_argument('--hand-armature',type=float,default=0.,help='DIAGNOSTIC reflected motor inertia kg m^2, not measured hardware data')
@@ -97,7 +98,8 @@ def main():
             self_collision=not args.disable_self_collisions,position_iterations=args.position_iterations,
             bound_distal_speed=args.bound_distal_speed,hand_armature=args.hand_armature,
             contact_offset=args.contact_offset,
-            collider_type='convex_decomposition' if args.convex_decomposition else 'convex_hull')
+            collider_type='convex_decomposition' if args.convex_decomposition else 'convex_hull',
+            velocity_iterations=args.velocity_iterations)
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
             update_period=0.,history_length=1,debug_vis=False)
         print('FULLBODY_PROBE building scene',flush=True)
@@ -319,6 +321,7 @@ def main():
         report['replicate_physics']=not args.no_physics_replication
         report['self_collision']=not args.disable_self_collisions
         report['position_iterations']=args.position_iterations
+        report['velocity_iterations']=args.velocity_iterations
         report['bound_distal_speed']=args.bound_distal_speed
         report['hand_motor_armature_kg_m2']=args.hand_armature
         report['hand_motor_armature_calibrated']=False

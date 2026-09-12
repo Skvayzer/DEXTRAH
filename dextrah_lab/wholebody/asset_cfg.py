@@ -8,7 +8,7 @@ from .importer import native_mimic_cfg_flag
 
 def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
                        self_collision=True, position_iterations=8, bound_distal_speed=False,
-                       hand_armature=0., contact_offset=None, collider_type='convex_hull'):
+                       hand_armature=0., contact_offset=None, collider_type='convex_hull', velocity_iterations=4):
     import isaaclab.sim as sim
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -44,7 +44,7 @@ def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
                 max_depenetration_velocity=1.),
             articulation_props=sim.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=self_collision, solver_position_iteration_count=position_iterations,
-                solver_velocity_iteration_count=4),
+                solver_velocity_iteration_count=velocity_iterations),
             joint_drive=sim.UrdfConverterCfg.JointDriveCfg(
                 # Do NOT overwrite imported mimic followers with position drives.
                 target_type={f'^{name}$':'position' for name in (*BODY_JOINTS,*hands)},

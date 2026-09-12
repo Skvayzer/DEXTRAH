@@ -35,6 +35,10 @@ for variant in ${DIAGNOSTIC_VARIANTS:-rigid rigid32 compliant32 no_self low_gain
         contact_pairs) extra+=(--mimic-frequency 0 --diagnose-contacts) ;;
         contact1mm) extra+=(--mimic-frequency 0 --diagnose-contacts --contact-offset 0.001) ;;
         decomposed) extra+=(--mimic-frequency 0 --diagnose-contacts --convex-decomposition) ;;
+        rigid_velocity0) extra+=(--mimic-frequency 0 --velocity-iterations 0) ;;
+        rigid_velocity1) extra+=(--mimic-frequency 0 --velocity-iterations 1) ;;
+        rigid32_velocity1) extra+=(--mimic-frequency 0 --position-iterations 32 --velocity-iterations 1) ;;
+        compliant_velocity0) extra+=(--velocity-iterations 0) ;;
         *) printf 'Unknown diagnostic variant: %s\n' "$variant" >&2; exit 2 ;;
     esac
     if python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
