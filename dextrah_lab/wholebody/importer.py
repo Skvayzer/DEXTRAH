@@ -108,7 +108,53 @@ def filter_thumb_housing_pairs(stage, num_envs):
     return pairs
 
 
-def decompose_palm_colliders(stage, num_envs):
+def editable_collision_prim(stage, path):
+    """Deinstance only the importer's collision container, never the robot."""
+    prim=stage.GetPrimAtPath(path)
+    if not prim.IsValid():
+        raise ValueError(f'Missing collider: {path}')
+    if prim.IsInstanceProxy():
+        ancestor=prim.GetParent()
+        while ancestor.IsValid() and not ancestor.IsInstance():
+            ancestor=ancestor.GetParent()
+        collision_root=path.split('/collisions/')[0]+'/collisions'
+        if '/Robot/' not in path or '/collisions/' not in path or not ancestor.IsValid() or not (
+                str(ancestor.GetPath())==collision_root or str(ancestor.GetPath()).startswith(collision_root+'/')):
+            raise ValueError(f'Unexpected collision instance ancestor: {ancestor.GetPath()}')
+        ancestor.SetInstanceable(False)
+        prim=stage.GetPrimAtPath(path)
+    if prim.IsInstanceProxy():
+        raise ValueError(f'Collider remains an instance proxy: {path}')
+    return prim
+
+
+def configure_collision_offsets(stage, num_envs, contact_offset):
+    """Author AND verify contact distance on instance-backed robot colliders.
+
+    IsaacLab's generic spawn override skipped instance proxies in this runtime.
+    This explicit diagnostic avoids claiming a distance that was never applied.
+    """
+    from pxr import Usd, UsdPhysics, PhysxSchema
+    if not math.isfinite(contact_offset) or contact_offset<=0:
+        raise ValueError('Contact offset must be finite and positive')
+    paths=[]
+    for env_id in range(num_envs):
+        root=stage.GetPrimAtPath(f'/World/envs/env_{env_id}/Robot')
+        paths.extend(str(p.GetPath()) for p in Usd.PrimRange(root,Usd.TraverseInstanceProxies())
+                     if p.HasAPI(UsdPhysics.CollisionAPI))
+    if not paths:
+        raise ValueError('No robot colliders found')
+    for path in paths:
+        prim=editable_collision_prim(stage,path)
+        api=PhysxSchema.PhysxCollisionAPI.Apply(prim)
+        api.CreateContactOffsetAttr().Set(contact_offset)
+        api.CreateRestOffsetAttr().Set(0.)
+        if not math.isclose(api.GetContactOffsetAttr().Get(),contact_offset,rel_tol=1e-6):
+            raise ValueError(f'Collision distance override did not apply: {path}')
+    return dict(collider_count=len(paths),contact_offset_m=contact_offset,rest_offset_m=0.,verified=True)
+
+
+def decompose_palm_colliders(stage, num_envs, shrink_wrap=False):
     """Preserve the palm's concave thumb clearance instead of filling its hull.
 
     CAD audit 456/457 found no triangle-mesh intersections at the six measured
@@ -124,18 +170,7 @@ def decompose_palm_colliders(stage, num_envs):
             prim=stage.GetPrimAtPath(path)
             if not prim.IsValid() or not prim.HasAPI(UsdPhysics.CollisionAPI):
                 raise ValueError(f'Palm collider not found at audited path: {path}')
-            if prim.IsInstanceProxy():
-                ancestor=prim.GetParent()
-                while ancestor.IsValid() and not ancestor.IsInstance():
-                    ancestor=ancestor.GetParent()
-                collision_root=f'/World/envs/env_{env_id}/Robot/{side}_wrist_yaw_link/collisions'
-                if not ancestor.IsValid() or not (str(ancestor.GetPath())==collision_root or
-                                                   str(ancestor.GetPath()).startswith(collision_root+'/')):
-                    raise ValueError(f'Unexpected palm collision instance ancestor: {ancestor.GetPath()}')
-                ancestor.SetInstanceable(False)
-                prim=stage.GetPrimAtPath(path)
-            if prim.IsInstanceProxy():
-                raise ValueError('Palm collision approximation is not editable')
+            prim=editable_collision_prim(stage,path)
             UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set('convexDecomposition')
             decomposition=PhysxSchema.PhysxConvexDecompositionCollisionAPI.Apply(prim)
             decomposition.CreateMaxConvexHullsAttr().Set(128)
@@ -143,6 +178,7 @@ def decompose_palm_colliders(stage, num_envs):
             decomposition.CreateVoxelResolutionAttr().Set(2000000)
             decomposition.CreateErrorPercentageAttr().Set(.1)
             decomposition.CreateMinThicknessAttr().Set(.0001)
+            decomposition.CreateShrinkWrapAttr().Set(shrink_wrap)
             changed.append(path)
     return dict(paths=changed,max_hulls=128,hull_vertex_limit=64,voxel_resolution=2000000,
-        error_percentage=.1,min_thickness_m=.0001,filtered_pairs=[],physics_validated=False)
+        error_percentage=.1,min_thickness_m=.0001,shrink_wrap=shrink_wrap,filtered_pairs=[],physics_validated=False)

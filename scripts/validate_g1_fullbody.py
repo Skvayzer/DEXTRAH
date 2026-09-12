@@ -42,6 +42,7 @@ def main():
     p.add_argument('--reference',type=Path,help='Audited aligned teacher reference NPZ; tracking-only test without objects')
     p.add_argument('--filter-thumb-housing',action='store_true',help='DIAGNOSTIC isolate the measured proximal-thumb/palm collision pair only')
     p.add_argument('--decompose-palms',action='store_true',help='Fix the audited palm convex-hull artifact without excluding contact pairs')
+    p.add_argument('--palm-shrink-wrap',action='store_true',help='Project decomposed palm hulls onto original CAD surface')
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -72,7 +73,7 @@ def main():
         from dextrah_lab.wholebody.asset import prepare_urdf
         from dextrah_lab.wholebody.asset_cfg import fullbody_robot_cfg
         from dextrah_lab.wholebody.actuators import body_motors, actuator_manifest
-        from dextrah_lab.wholebody.importer import configure_native_mimics, filter_thumb_housing_pairs, decompose_palm_colliders
+        from dextrah_lab.wholebody.importer import configure_native_mimics, filter_thumb_housing_pairs, decompose_palm_colliders, configure_collision_offsets
         from dextrah_lab.wholebody.contract import BODY_JOINTS, hand_joints, joint_indices, PHYSICS_DT, CONTROL_DT
         from dextrah_lab.wholebody.sonic import FrozenSonic, SonicHistory
         from dextrah_lab.wholebody.teacher_bridge import future_body_reference
@@ -110,7 +111,8 @@ def main():
         print('FULLBODY_PROBE building scene',flush=True)
         begin=time.monotonic()
         scene=InteractiveScene(scene_cfg)
-        palm_collision_configuration=decompose_palm_colliders(sim.stage,args.num_envs) if args.decompose_palms else None
+        palm_collision_configuration=decompose_palm_colliders(sim.stage,args.num_envs,args.palm_shrink_wrap) if args.decompose_palms else None
+        contact_offset_configuration=configure_collision_offsets(sim.stage,args.num_envs,args.contact_offset) if args.contact_offset is not None else None
         coupling_config=configure_native_mimics(sim.stage,audit['mimic_relations'],args.num_envs,
             frequency=args.mimic_frequency,damping_ratio=args.mimic_damping)
         filtered_housing_pairs=filter_thumb_housing_pairs(sim.stage,args.num_envs) if args.filter_thumb_housing else []
@@ -273,7 +275,7 @@ def main():
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
             if teacher_reference is not None:
                 from dextrah_lab.wholebody.reference import _retime_pose
-                query=min(reference_time+CONTROL_DT,teacher_reference['time_s'][-1])
+                query=min(max(0.,(step+1)*CONTROL_DT-1.),teacher_reference['time_s'][-1])
                 reference_wrist=_retime_pose(teacher_reference['time_s'],teacher_reference['wrist_pose'],np.array([query]))[0]
                 values.update(sonic_proprio=obs,reference_q=refq,reference_qd=refqd,reference_ori6=ori,
                     wrist_pose=torch.cat((robot.data.body_pos_w[:,wrist_id]-scene.env_origins,
@@ -340,6 +342,7 @@ def main():
         report['hand_motor_armature_kg_m2']=args.hand_armature
         report['hand_motor_armature_calibrated']=False
         report['contact_offset_override_m']=args.contact_offset
+        report['contact_offset_configuration']=contact_offset_configuration
         report['convex_decomposition']=args.convex_decomposition
         report['self_contact_peak_forces_n']={name:{path:float(force) for path,force in
             zip(item['partners'],item['peak'].cpu()) if force>.01}

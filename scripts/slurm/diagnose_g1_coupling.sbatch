@@ -41,6 +41,9 @@ for variant in ${DIAGNOSTIC_VARIANTS:-rigid rigid32 compliant32 no_self low_gain
         compliant_velocity0) extra+=(--velocity-iterations 0) ;;
         thumb_housing) extra+=(--mimic-frequency 0 --filter-thumb-housing --diagnose-contacts) ;;
         palm_geometry) extra+=(--mimic-frequency 0 --decompose-palms --diagnose-contacts) ;;
+        palm1mm) extra+=(--mimic-frequency 0 --decompose-palms --diagnose-contacts --contact-offset 0.001) ;;
+        palm_shrink) extra+=(--mimic-frequency 0 --decompose-palms --palm-shrink-wrap --diagnose-contacts --contact-offset 0.001) ;;
+        palm_shrink01mm) extra+=(--mimic-frequency 0 --decompose-palms --palm-shrink-wrap --diagnose-contacts --contact-offset 0.0001) ;;
         *) printf 'Unknown diagnostic variant: %s\n' "$variant" >&2; exit 2 ;;
     esac
     if timeout --signal=TERM --kill-after=15s 180s python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
