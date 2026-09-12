@@ -176,7 +176,13 @@ class G1Revo2TouchEnv(G1Revo2BpsEnv):
         self.touch_force_w = torch.zeros_like(self.touch_raw)
         self.touch_friction_w = torch.zeros_like(self.touch_raw)
         self.touch_link_force_w = torch.zeros_like(self.touch_raw)
-        self.g1_urdf = Path(__file__).resolve().parents[4] / 'play2perfect' / cfg.assets.robot_urdf
+        # Resolve from the actual imported P2P asset root, just as its scene
+        # importer does. Our source may live in an immutable Slurm snapshot
+        # under outputs/; checkout-relative sibling assumptions fail there.
+        from isaacsimenvs.tasks.play.utils.scene_utils import _resolve_asset_path
+        self.g1_urdf = Path(_resolve_asset_path(cfg.assets.robot_urdf))
+        if cfg.touch.enabled and not self.g1_urdf.is_file():
+            raise FileNotFoundError(f'Tactile source URDF not found: {self.g1_urdf}')
         if cfg.touch.enabled:
             self.pad_geometry = load_pad_geometry(self.g1_urdf, Path(cfg.touch.touch_description))
             self.pad_frames = torch.as_tensor(sensor_frames(self.g1_urdf, self.pad_geometry), device=self.device)
