@@ -95,8 +95,25 @@ IsaacLab passes `convert_mimic_joints_to_normal_joints` directly to the native
 We inspect that expression and choose the value that actually enables native
 couplings; do not replace follower drives with independent position drives.
 Probe 434 confirmed ten `PhysxMimicJointAPI` instances (not tendons).
-Probe 436 is queued to test both hands moving in 768 full-body environments.
-This measures physics/controller resource use, not yet SAPG optimizer capacity.
+Probe **436** ran 768 full-body environments: standing passed, all independent
+fingers moved, approximately **19,840 environment-steps/s** and **1.767 GiB**
+sampled total device usage. **Moving native coupling failed**, with up to
+1.737 rad deviation from the URDF relation. These are physics/controller-only
+resource measurements, not a validated manipulation batch or optimizer budget.
+
+Probes 437–439 isolated the coupling problem at four environments. Explicit
+100 Hz/critical-damping parameters and disabling physics replication did not
+resolve it. Those parameters remain provisional, not hardware calibration.
+Do not hide this failure by resetting/clamping follower joint positions or
+claim the full robot ready to grasp. Native reaction-force/coupling behavior
+must be corrected or replaced by an explicitly validated physical model.
+
+Reduced-teacher smoke **435** strictly loaded the BPS actor and executed 120
+finite steps in 12 environments. Its final report hit an empty-family division
+by zero (the tiny probe did not include every object family); fixed with a test.
+Full 27-case teacher comparison resubmitted as **440**, immutable source
+`42bcfe8`, output `outputs/teacher_selection_20260912_retry`. This is evaluation,
+not a training/W&B run; no winner yet. Each attempt has a 30-minute timeout.
 
 ## Remaining gates
 
