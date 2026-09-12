@@ -1,12 +1,13 @@
 """Floating-base G1 + BOTH Revo2 hands; import only after AppLauncher."""
 from .actuators import body_motors
 from pathlib import Path
+import xml.etree.ElementTree as ET
 from .contract import BODY_JOINTS, hand_joints, nominal_body_pose
 from .importer import native_mimic_cfg_flag
 
 
 def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
-                       self_collision=True, position_iterations=8):
+                       self_collision=True, position_iterations=8, bound_distal_speed=False):
     import isaaclab.sim as sim
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -14,6 +15,17 @@ def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
     hands = [*hand_joints('left'), *hand_joints('right')]
     distal = [f'{side}_{finger}_distal_joint' for side in ('left','right')
               for finger in ('thumb','index','middle','ring','pinky')]
+    passive_limits, motor_limits = {}, {}
+    if bound_distal_speed:
+        joints = {j.get('name'):j for j in ET.parse(urdf).getroot().findall('joint')}
+        for name in hands:
+            motor_limits[name] = float(joints[name].find('limit').get('velocity'))
+        for name in distal:
+            joint = joints[name]
+            relation = joint.find('mimic')
+            passive_limits[name] = float(joint.find('limit').get('velocity'))
+            source, ratio = relation.get('joint'), abs(float(relation.get('multiplier', '1')))
+            motor_limits[source] = min(motor_limits[source], passive_limits[name]/ratio)
     return ArticulationCfg(
         prim_path='{ENV_REGEX_NS}/Robot',
         spawn=sim.UrdfFileCfg(
@@ -47,6 +59,8 @@ def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
             # Keep the teacher's hand PD gains and URDF motor limits for this
             # first probe. Unlike that teacher, distal joints are PASSIVE and
             # follow native mimic constraints. Validate this transfer gap.
-            'hands': ImplicitActuatorCfg(joint_names_expr=hands, stiffness=hand_stiffness, damping=hand_damping),
-            'coupled_distal': ImplicitActuatorCfg(joint_names_expr=distal, stiffness=0., damping=0.),
+            'hands': ImplicitActuatorCfg(joint_names_expr=hands, stiffness=hand_stiffness, damping=hand_damping,
+                velocity_limit_sim=motor_limits or None),
+            'coupled_distal': ImplicitActuatorCfg(joint_names_expr=distal, stiffness=0., damping=0.,
+                velocity_limit_sim=passive_limits or None),
         })

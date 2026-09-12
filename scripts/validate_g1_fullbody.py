@@ -32,6 +32,8 @@ def main():
     p.add_argument('--hand-stiffness',type=float,default=1200.)
     p.add_argument('--hand-damping',type=float,default=25.)
     p.add_argument('--position-iterations',type=int,default=8)
+    p.add_argument('--physics-hz',type=int,choices=[200,400,800,1000],default=200)
+    p.add_argument('--bound-distal-speed',action='store_true',help='Restore importer-ignored passive URDF limits and compatible motor speeds')
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -70,7 +72,8 @@ def main():
         model=(FrozenSonic(args.workspace/'GRAIL',
             args.workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base',args.device)
             if args.controller=='sonic' else None)
-        cfg=sim_utils.SimulationCfg(dt=PHYSICS_DT,device=args.device,render_interval=4,
+        physics_dt=1/args.physics_hz
+        cfg=sim_utils.SimulationCfg(dt=physics_dt,device=args.device,render_interval=round(CONTROL_DT/physics_dt),
             physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.,dynamic_friction=1.,restitution=0.))
         cfg.physx.gpu_max_rigid_contact_count=2**20
         cfg.physx.gpu_max_rigid_patch_count=2**18
@@ -83,7 +86,8 @@ def main():
         scene_cfg.ground=AssetBaseCfg(prim_path='/World/ground',spawn=sim_utils.GroundPlaneCfg())
         scene_cfg.robot=fullbody_robot_cfg(urdf,args.output/'usd',
             hand_stiffness=args.hand_stiffness,hand_damping=args.hand_damping,
-            self_collision=not args.disable_self_collisions,position_iterations=args.position_iterations)
+            self_collision=not args.disable_self_collisions,position_iterations=args.position_iterations,
+            bound_distal_speed=args.bound_distal_speed)
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
             update_period=0.,history_length=1,debug_vis=False)
         print('FULLBODY_PROBE building scene',flush=True)
@@ -176,10 +180,10 @@ def main():
             if args.exercise_hands:
                 target[:,hand_ids]+=.25*(1-np.cos(2*np.pi*.3*step*CONTROL_DT))
             robot.set_joint_position_target(target)
-            for _ in range(round(CONTROL_DT/PHYSICS_DT)):
+            for _ in range(round(CONTROL_DT/physics_dt)):
                 scene.write_data_to_sim()
                 sim.step(render=False)
-                scene.update(PHYSICS_DT)
+                scene.update(physics_dt)
             values=dict(root_state=robot.data.root_state_w,joint_pos=robot.data.joint_pos,
                 joint_vel=robot.data.joint_vel,targets=target,
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
@@ -216,7 +220,7 @@ def main():
         standing=bool(failure is None and (final_height>.5).all() and (final_height<.95).all()
             and (ratio>.5).all() and (ratio<1.5).all())
         report=dict(controller=args.controller,reference='constant nominal pose, fixed world yaw; interface probe only',
-            num_envs=args.num_envs,physics_hz=200,controller_hz=50,
+            num_envs=args.num_envs,physics_hz=args.physics_hz,controller_hz=50,
             duration_simulated_s=len(z)*CONTROL_DT,rollout_wall_s=elapsed,
             env_steps_per_second=len(z)*args.num_envs/elapsed,total_wall_s=time.monotonic()-begin,
             fixed_base=robot.is_fixed_base,total_mass_kg_min=float(mass.min()),total_mass_kg_max=float(mass.max()),
@@ -235,6 +239,7 @@ def main():
         report['replicate_physics']=not args.no_physics_replication
         report['self_collision']=not args.disable_self_collisions
         report['position_iterations']=args.position_iterations
+        report['bound_distal_speed']=args.bound_distal_speed
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:

@@ -16,7 +16,7 @@ export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y
 cd "$project"
 # One GPU, sequential fresh processes. Expected diagnostic failures are retained;
 # each child writes validation.json/failure.json, not hidden by a successful sweep.
-for variant in rigid rigid32 compliant32 no_self low_gain; do
+for variant in ${DIAGNOSTIC_VARIANTS:-rigid rigid32 compliant32 no_self low_gain}; do
     extra=()
     case "$variant" in
         rigid) extra+=(--mimic-frequency 0) ;;
@@ -24,6 +24,11 @@ for variant in rigid rigid32 compliant32 no_self low_gain; do
         compliant32) extra+=(--position-iterations 32) ;;
         no_self) extra+=(--disable-self-collisions) ;;
         low_gain) extra+=(--hand-stiffness 20 --hand-damping 0.2) ;;
+        bounded) extra+=(--mimic-frequency 0 --bound-distal-speed) ;;
+        bounded400) extra+=(--mimic-frequency 0 --bound-distal-speed --physics-hz 400) ;;
+        bounded800) extra+=(--mimic-frequency 0 --bound-distal-speed --physics-hz 800) ;;
+        rigid800) extra+=(--mimic-frequency 0 --physics-hz 800) ;;
+        *) printf 'Unknown diagnostic variant: %s\n' "$variant" >&2; exit 2 ;;
     esac
     if python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
         --output "outputs/coupling_${SLURM_JOB_ID}_${variant}" \
