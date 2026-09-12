@@ -41,6 +41,7 @@ def main():
     p.add_argument('--convex-decomposition',action='store_true',help='Diagnose convex-hull self-contact artifacts using closer collision geometry')
     p.add_argument('--reference',type=Path,help='Audited aligned teacher reference NPZ; tracking-only test without objects')
     p.add_argument('--filter-thumb-housing',action='store_true',help='DIAGNOSTIC isolate the measured proximal-thumb/palm collision pair only')
+    p.add_argument('--decompose-palms',action='store_true',help='Fix the audited palm convex-hull artifact without excluding contact pairs')
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -71,7 +72,7 @@ def main():
         from dextrah_lab.wholebody.asset import prepare_urdf
         from dextrah_lab.wholebody.asset_cfg import fullbody_robot_cfg
         from dextrah_lab.wholebody.actuators import body_motors, actuator_manifest
-        from dextrah_lab.wholebody.importer import configure_native_mimics, filter_thumb_housing_pairs
+        from dextrah_lab.wholebody.importer import configure_native_mimics, filter_thumb_housing_pairs, decompose_palm_colliders
         from dextrah_lab.wholebody.contract import BODY_JOINTS, hand_joints, joint_indices, PHYSICS_DT, CONTROL_DT
         from dextrah_lab.wholebody.sonic import FrozenSonic, SonicHistory
         from dextrah_lab.wholebody.teacher_bridge import future_body_reference
@@ -109,6 +110,7 @@ def main():
         print('FULLBODY_PROBE building scene',flush=True)
         begin=time.monotonic()
         scene=InteractiveScene(scene_cfg)
+        palm_collision_configuration=decompose_palm_colliders(sim.stage,args.num_envs) if args.decompose_palms else None
         coupling_config=configure_native_mimics(sim.stage,audit['mimic_relations'],args.num_envs,
             frequency=args.mimic_frequency,damping_ratio=args.mimic_damping)
         filtered_housing_pairs=filter_thumb_housing_pairs(sim.stage,args.num_envs) if args.filter_thumb_housing else []
@@ -333,6 +335,7 @@ def main():
         report['velocity_iterations']=args.velocity_iterations
         report['diagnostic_filtered_thumb_housing_pairs']=filtered_housing_pairs
         report['housing_collision_model_validated']=False
+        report['palm_collision_configuration']=palm_collision_configuration
         report['bound_distal_speed']=args.bound_distal_speed
         report['hand_motor_armature_kg_m2']=args.hand_armature
         report['hand_motor_armature_calibrated']=False
