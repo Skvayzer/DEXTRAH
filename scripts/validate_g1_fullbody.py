@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import time
+import traceback
+import sys
 
 
 def main():
@@ -178,6 +180,15 @@ def main():
         print(json.dumps(report,indent=2),flush=True)
         if not standing:
             raise RuntimeError('Standing probe failed; see saved trace. Do not launch manipulation training.')
+    except Exception as error:
+        # Kit's fast shutdown can exit(0) before a pending exception is printed.
+        # Persist the original error FIRST and return a failure to Slurm.
+        (args.output/'failure.json').write_text(json.dumps(dict(
+            error=repr(error),traceback=traceback.format_exc(),training_started=False),indent=2)+'\n')
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
     finally:
         # This workstation's IsaacLab stop callback deliberately renders until
         # play resumes. Unsubscribe it before App.close(), otherwise shutdown

@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import time
+import traceback
+import sys
 
 
 def main():
@@ -64,6 +66,11 @@ def main():
             if not .035<z<.075:
                 raise ValueError(f'Cube did not settle on ground: z={z}')
             stage('passed',z=z)
+        except Exception:
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(1)
         finally:
             if 'sim' in locals():
                 sim.clear_all_callbacks()
