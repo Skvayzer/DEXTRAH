@@ -53,6 +53,7 @@ def main():
         from dextrah_lab.wholebody.asset import prepare_urdf
         from dextrah_lab.wholebody.asset_cfg import fullbody_robot_cfg
         from dextrah_lab.wholebody.actuators import body_motors, actuator_manifest
+        from dextrah_lab.wholebody.importer import configure_native_mimics
         from dextrah_lab.wholebody.contract import BODY_JOINTS, hand_joints, joint_indices, PHYSICS_DT, CONTROL_DT
         from dextrah_lab.wholebody.sonic import FrozenSonic, SonicHistory
         torch.set_num_threads(2)
@@ -79,6 +80,7 @@ def main():
         print('FULLBODY_PROBE building scene',flush=True)
         begin=time.monotonic()
         scene=InteractiveScene(scene_cfg)
+        coupling_config=configure_native_mimics(sim.stage,audit['mimic_relations'],args.num_envs)
         print('FULLBODY_PROBE scene built; resetting simulation',flush=True)
         sim.reset()
         robot=scene['robot']
@@ -214,6 +216,7 @@ def main():
             full_m0_validated=False,training_started=False,optimizer_memory_measured=False,
             torch_peak_allocated_bytes=torch.cuda.max_memory_allocated())
         report['device_peak_used_bytes_sampled']=device_peak_used_bytes
+        report['native_coupling_configuration']=coupling_config
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:
