@@ -72,8 +72,7 @@ class LiveClipTask:
             cfg=RigidObjectCfg(prim_path='{ENV_REGEX_NS}/'+name.capitalize(),
                 spawn=sim.UsdFileCfg(usd_path=baked,activate_contact_sensors=True,
                     rigid_props=sim.RigidBodyPropertiesCfg(kinematic_enabled=name=='table',disable_gravity=name=='table',
-                        solver_position_iteration_count=32,solver_velocity_iteration_count=4),
-                    physics_material=sim.RigidBodyMaterialCfg(static_friction=.5,dynamic_friction=.5)),
+                        solver_position_iteration_count=32,solver_velocity_iteration_count=4)),
                 init_state=RigidObjectCfg.InitialStateCfg(pos=tuple(pose[:3]),rot=tuple(pose[3:])))
             setattr(scene_cfg,name,cfg)
         scene_cfg.object_contact=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Object/.*',update_period=0.,history_length=1)
@@ -112,6 +111,11 @@ class LiveClipTask:
             asset=scene[name];state=asset.data.default_root_state.clone()
             state[:,:3]+=scene.env_origins
             asset.write_root_state_to_sim(state)
+            # This installed UsdFileCfg has no physics_material constructor
+            # field. Set the real imported shapes through their PhysX view.
+            materials=asset.root_physx_view.get_material_properties()
+            materials[...,:2]=.5;materials[...,2]=0.
+            asset.root_physx_view.set_material_properties(materials,torch.arange(n,dtype=torch.int32,device='cpu'))
         self.goal=q.new_tensor(self.initial_poses['goal'])[None].repeat(n,1)
         self.limits=robot.data.joint_pos_limits[0,self.ids].clone()
         # Actor keypoints use per-object dimensions, reward uses fixed size.
