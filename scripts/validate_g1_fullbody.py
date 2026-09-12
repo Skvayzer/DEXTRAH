@@ -27,6 +27,12 @@ def main():
     p.add_argument('--exercise-hands',action='store_true',help='Slowly close/open both hands to check native coupling')
     p.add_argument('--record-envs',type=int,default=4,help='Cap trace copying; physics checks still cover all environments')
     p.add_argument('--no-physics-replication',action='store_true',help='Diagnose native constraint replication separately')
+    p.add_argument('--mimic-frequency',type=float,default=100.,help='Hz; zero tests the non-compliant native constraint')
+    p.add_argument('--mimic-damping',type=float,default=1.)
+    p.add_argument('--hand-stiffness',type=float,default=1200.)
+    p.add_argument('--hand-damping',type=float,default=25.)
+    p.add_argument('--position-iterations',type=int,default=8)
+    p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
     # Isaac's URDF importer uses the export directory to author USD sublayers.
@@ -75,13 +81,16 @@ def main():
         sim=sim_utils.SimulationContext(cfg)
         scene_cfg=InteractiveSceneCfg(num_envs=args.num_envs,env_spacing=3.,replicate_physics=not args.no_physics_replication)
         scene_cfg.ground=AssetBaseCfg(prim_path='/World/ground',spawn=sim_utils.GroundPlaneCfg())
-        scene_cfg.robot=fullbody_robot_cfg(urdf,args.output/'usd')
+        scene_cfg.robot=fullbody_robot_cfg(urdf,args.output/'usd',
+            hand_stiffness=args.hand_stiffness,hand_damping=args.hand_damping,
+            self_collision=not args.disable_self_collisions,position_iterations=args.position_iterations)
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
             update_period=0.,history_length=1,debug_vis=False)
         print('FULLBODY_PROBE building scene',flush=True)
         begin=time.monotonic()
         scene=InteractiveScene(scene_cfg)
-        coupling_config=configure_native_mimics(sim.stage,audit['mimic_relations'],args.num_envs)
+        coupling_config=configure_native_mimics(sim.stage,audit['mimic_relations'],args.num_envs,
+            frequency=args.mimic_frequency,damping_ratio=args.mimic_damping)
         print('FULLBODY_PROBE scene built; resetting simulation',flush=True)
         sim.reset()
         robot=scene['robot']
@@ -119,6 +128,11 @@ def main():
                     raise ValueError(f'Non-dynamic robot body: {prim.GetPath()}')
                 rigid.append(str(prim.GetPath()))
         (args.output/'imported_couplings.json').write_text(json.dumps(mimic_properties,indent=2)+'\n')
+        # Runtime values matter: IsaacLab can overwrite importer-authored gains.
+        motor_state={key:getattr(robot.data,key)[0].cpu().tolist() for key in
+            ('joint_stiffness','joint_damping','joint_armature','joint_effort_limits','joint_vel_limits')}
+        (args.output/'runtime_motors.json').write_text(json.dumps(dict(
+            joint_names=robot.joint_names,**motor_state),indent=2)+'\n')
         if len(mimic)!=10:
             raise ValueError(f'Expected 10 native mimic constraints; found {len(mimic)}')
         if len(rigid)<50:
@@ -208,7 +222,7 @@ def main():
             fixed_base=robot.is_fixed_base,total_mass_kg_min=float(mass.min()),total_mass_kg_max=float(mass.max()),
             rigid_body_count=len(rigid),native_mimic_constraints=mimic,
             joint_names=robot.joint_names,body_joint_indices=body_ids,hand_joint_indices=hand_ids,
-            actuators=actuator_manifest(),hand_gains=dict(stiffness=1200.,damping=25.,calibrated=False),
+            actuators=actuator_manifest(),hand_gains=dict(stiffness=args.hand_stiffness,damping=args.hand_damping,calibrated=False),
             foot_load_over_weight_min=float(ratio.min()),foot_load_over_weight_max=float(ratio.max()),
             min_pelvis_height_m=min_height,recorded_envs=record_n,
             hand_exercise=args.exercise_hands,all_independent_fingers_moved=hands_moved,
@@ -219,6 +233,8 @@ def main():
         report['device_peak_used_bytes_sampled']=device_peak_used_bytes
         report['native_coupling_configuration']=coupling_config
         report['replicate_physics']=not args.no_physics_replication
+        report['self_collision']=not args.disable_self_collisions
+        report['position_iterations']=args.position_iterations
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:

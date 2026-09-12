@@ -5,7 +5,8 @@ from .contract import BODY_JOINTS, hand_joints, nominal_body_pose
 from .importer import native_mimic_cfg_flag
 
 
-def fullbody_robot_cfg(urdf, usd_dir):
+def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
+                       self_collision=True, position_iterations=8):
     import isaaclab.sim as sim
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -19,14 +20,14 @@ def fullbody_robot_cfg(urdf, usd_dir):
             asset_path=str(Path(urdf).resolve()), usd_dir=str(Path(usd_dir).resolve()), usd_file_name='g1_revo2.usd',
             fix_base=False, merge_fixed_joints=True,
             convert_mimic_joints_to_normal_joints=native_mimic_cfg_flag(),
-            self_collision=True, replace_cylinders_with_capsules=True,
+            self_collision=self_collision, replace_cylinders_with_capsules=True,
             activate_contact_sensors=True,
             rigid_props=sim.RigidBodyPropertiesCfg(disable_gravity=False,
                 retain_accelerations=False, linear_damping=0., angular_damping=0.,
                 max_linear_velocity=1000., max_angular_velocity=1000.,
                 max_depenetration_velocity=1.),
             articulation_props=sim.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=True, solver_position_iteration_count=8,
+                enabled_self_collisions=self_collision, solver_position_iteration_count=position_iterations,
                 solver_velocity_iteration_count=4),
             joint_drive=sim.UrdfConverterCfg.JointDriveCfg(
                 # Do NOT overwrite imported mimic followers with position drives.
@@ -46,6 +47,6 @@ def fullbody_robot_cfg(urdf, usd_dir):
             # Keep the teacher's hand PD gains and URDF motor limits for this
             # first probe. Unlike that teacher, distal joints are PASSIVE and
             # follow native mimic constraints. Validate this transfer gap.
-            'hands': ImplicitActuatorCfg(joint_names_expr=hands, stiffness=1200., damping=25.),
+            'hands': ImplicitActuatorCfg(joint_names_expr=hands, stiffness=hand_stiffness, damping=hand_damping),
             'coupled_distal': ImplicitActuatorCfg(joint_names_expr=distal, stiffness=0., damping=0.),
         })

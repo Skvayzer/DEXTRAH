@@ -43,7 +43,9 @@ def configure_native_mimics(stage, relations, num_envs, frequency=100., damping_
     Native PhysX coupling propagates reaction impulses in both directions.
     """
     from pxr import UsdPhysics
-    if not math.isfinite(frequency) or frequency<=0 or not math.isfinite(damping_ratio) or damping_ratio<=0:
+    # Zero frequency requests the native non-compliant constraint. Keep this
+    # available as an explicit diagnostic, not a silent tuning change.
+    if not math.isfinite(frequency) or frequency<0 or not math.isfinite(damping_ratio) or damping_ratio<0:
         raise ValueError('Invalid coupling parameters')
     count=0
     for prim in stage.Traverse():
@@ -78,4 +80,5 @@ def configure_native_mimics(stage, relations, num_envs, frequency=100., damping_
     if count!=num_envs*len(relations):
         raise ValueError(f'Configured {count} couplings, expected {num_envs*len(relations)}')
     return dict(count=count,natural_frequency_hz=frequency,damping_ratio=damping_ratio,
+                compliant=frequency>0,
                 calibrated_hardware_compliance=False)
