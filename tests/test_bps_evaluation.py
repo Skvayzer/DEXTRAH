@@ -45,6 +45,15 @@ def test_lost_counter_and_bad_state_fail():
     assert ReposeStats(1,1.).report()['goal_success_fraction_resolved'] is None
 
 
+def test_empty_family_has_no_defined_throughput():
+    s=ReposeStats(1,.5)
+    s.update(final([0]),[False],[0])
+    report=s.report([])
+    assert report['environments']==0
+    assert report['goals_per_simulated_minute'] is None
+    assert report['object_any_goal_rate'] is None
+
+
 def test_preselection_uses_family_not_outcomes():
     paths=['0_brush_handle_x','1_hammer_handle_x','2_brush_handle_x']
     assert select_family_envs(paths,[2,1,0],['hammer','brush']) == {'hammer':1,'brush':0}

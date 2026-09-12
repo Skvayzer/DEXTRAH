@@ -76,7 +76,7 @@ class ReposeStats:
         return dict(environments=n, seconds_per_environment=seconds,
             total_environment_seconds=n*seconds, **sums,
             goal_success_fraction_resolved=(sums['hits']/attempts if attempts else None),
-            goals_per_simulated_minute=(60*sums['hits']/(n*seconds) if seconds else None),
+            goals_per_simulated_minute=(60*sums['hits']/(n*seconds) if n and seconds else None),
             episode_any_goal_success_rate=(sums['any_goal']/ep if ep else None),
             episode_ever_lifted_rate=(sums['lifted']/ep if ep else None),
             episode_all_50_goals_rate=(sums['all_goals']/ep if ep else None),
