@@ -27,6 +27,9 @@ def main():
     p.add_argument('--max-epochs', type=int, default=120, help='Development smoke limit; --continuous removes it')
     p.add_argument('--continuous', action='store_true')
     p.add_argument('--resume', type=Path)
+    p.add_argument('--memory-trace', action='store_true')
+    p.add_argument('--memory-gc-probe-epoch', type=int, default=0,
+                   help='One diagnostic garbage collection after this absolute epoch; zero disables')
     p.add_argument('--wandb', choices=['online', 'disabled'], default='online')
     p.add_argument('--numerical-failure-mode', choices=['reset', 'abort'], default='reset',
                    help='Finite extreme joint speeds reset that environment; non-finite states always abort')
@@ -83,6 +86,9 @@ def main():
         contract['nonfinite_state_handling'] = 'abort before rewards and terminal observations'
         contract['finite_numerical_failure_reward'] = 'unchanged source reward; separately logged true termination'
         contract['touch_global_partners'] = 'enabled static collision shapes under /World/ground'
+        contract['memory_trace'] = args.memory_trace
+        contract['memory_gc_probe_epoch'] = args.memory_gc_probe_epoch
+        contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
             wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',
@@ -151,6 +157,9 @@ def main():
                 if previous[key] != contract[key]:
                     raise ValueError(f'Incompatible continuation contract: {key}')
             report['resume'] = resume_at_episode_boundary(algo, args.resume)
+        if args.memory_trace:
+            from dextrah_lab.wholebody.memory_diagnostics import install_memory_trace
+            install_memory_trace(algo, args.output, args.memory_gc_probe_epoch)
         def request_stop(signum, frame):
             observer.stop_requested = signal.Signals(signum).name
             print('CHECKPOINTED_STOP_REQUESTED '+observer.stop_requested, flush=True)

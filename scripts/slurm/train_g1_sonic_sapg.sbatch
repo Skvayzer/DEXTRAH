@@ -20,6 +20,10 @@ unset DISPLAY
 cd "$source_snapshot"
 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
 extra_args=()
+if [[ "${MEMORY_TRACE:-0}" == 1 ]]; then extra_args+=(--memory-trace); fi
+if [[ -n "${MEMORY_GC_PROBE_EPOCH:-}" ]]; then
+    extra_args+=(--memory-gc-probe-epoch "$MEMORY_GC_PROBE_EPOCH")
+fi
 if [[ -n "${NUMERICAL_FAILURE_MODE:-}" ]]; then
     extra_args+=(--numerical-failure-mode "$NUMERICAL_FAILURE_MODE")
 fi
