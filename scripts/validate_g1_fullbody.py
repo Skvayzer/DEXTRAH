@@ -134,6 +134,8 @@ def main():
             live_task=LiveClipTask(args.task_clip,
                 args.workspace/'play2perfect/unitree_ros/robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf',
                 args.output,args.device)
+            if live_task.metadata['checkpoint_sha256']!=student_metadata['source_sapg_sha256']:
+                raise ValueError('Live task clip and distilled teacher checkpoint differ')
             live_task.add_assets(scene_cfg)
         if args.diagnose_contacts:
             scene_cfg.all_body_contacts=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*',

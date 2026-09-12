@@ -15,8 +15,12 @@ are not prerequisites for the new route.
 - A recurrent task encoder consumes current manipulation observations (object,
   goal, BPS-128, hand state; optional 25-channel right tactile packet). A zero-
   initialized projection adds its features to SONIC's first body hidden layer.
-  Before learning, every body output equals the pretrained controller.
-- A continuous six-output finger head shares task/body features. The resulting
+  Before learning, every body output equals the pretrained controller. The
+  current variant copies **SAPG's trained 1024-unit LSTM, LayerNorm, 512-feature
+  MLP output and six-channel finger head**. It does not relearn fingers from
+  random weights. The copied task modules are frozen during the first body
+  bootstrap and can later fine-tune with a smaller learning rate.
+- A continuous six-output finger head reads the shared SAPG task features. The resulting
   policy has **35 actions: 29 body + 6 right fingers**. All 29 body joints,
   including the right arm, have exactly one target writer. The old SAPG actor
   supplies supervision; it does not overwrite student arm actions.
@@ -26,15 +30,19 @@ are not prerequisites for the new route.
 
 The initial model is
 
-    h_t = GRU(task_observation_t, h_(t-1))
+    features_t, memory_t = copied_SAPG_LSTM_and_MLP(task_observation_t, memory_(t-1))
     z_stand = frozen_SONIC_encoder_and_FSQ(nominal_standing_reference)
     x_t = concat(z_stand, actual_body_history_t)
-    v_t = SiLU(W0_SONIC x_t + b0_SONIC + Wtask h_t)
+    v_t = SiLU(W0_SONIC x_t + b0_SONIC + task_active * Wtask features_t)
     a_body = trainable_remaining_SONIC_decoder(v_t)
-    a_hand = continuous_finger_head(body_features, h_t)
+    a_hand = copied_continuous_finger_head(features_t)
 
 `Wtask` starts at zero. All copied body-decoder layers may learn. This is not
 an old SAPG arm controller running alongside an independent SONIC controller.
+`task_active=False` explicitly disables task conditioning for standing-only
+rehearsal/probes. A mean-valued task observation alone is not a reliable mode
+switch: a recurrent network can evolve even on a constant input. This gate
+does not freeze the legs during manipulation.
 
 ## Reusing the trained skill
 
@@ -101,5 +109,47 @@ Source SONIC SHA-256:
 Source SAPG SHA-256:
 `53c4b009cdd341b4a0e007111c4009da57898dcb00d264c12c81b18817637fec`
 
-Status at this decision: architecture implementation starting; no trained
-route-2 student or full-body SAPG run yet.
+## Implementation evidence
+
+- Commits on `feature/g1-wholebody-sapg`; source checkpoints unmodified.
+- Real SONIC validation **475**, repeated in **481**: initial body output
+  difference **0.0**. All **10,184,221** dynamic decoder parameters trainable;
+  gradients reach its first and final layers. The reference encoder/FSQ remain
+  frozen, not the body decoder.
+- The first fresh-GRU bootstrap (**476**) reduced arm error but transferred
+  fingers poorly. Preserved as a diagnostic, not a manipulation result.
+- Pretrained-feature validation: original 60 Hz captured states/observations,
+  **106 samples**, copied raw finger means exactly match the strict-loaded
+  SAPG actor. Captured *player-clipped* commands differ by at most **2.50e-6**.
+  SAPG coefficient IDs run from 50 to 0; the zero-entropy leader is the **last**
+  embedding row. The source arm output layer is not used to command the robot.
+- Corrected supervised run **479** completed 1,200 updates; best checkpoint
+  selected at update **400**. Temporal holdout arm RMSE **0.07399 rad** versus
+  **1.49442 rad** initially; finger RMSE **0.11389** in normalized action units;
+  standing-rehearsal RMSE **0.001341 rad**. Finger error includes running the
+  copied 60 Hz memory on a 50 Hz sampled stream; exact-rate equivalence is a
+  different test. These are offline errors, **not grasping success rates**.
+- Dataset: four 30 s source clips (brush, eraser, hammer, spatula), up to 7,200
+  original samples; reset-separated temporal splits with a 50-step gap and
+  burn-in. They come from the 1,200-object teacher bank but contain **four
+  objects**, not 1,200 demonstrations. Separate real standing rehearsal comes
+  from probe 470. Manipulation body histories are kinematic lifts of recorded
+  arm states, not real full-body rollouts.
+- W&B: [supervised run 479](https://wandb.ai/skvayzer/adept/runs/6x2x0xct).
+  New files: `outputs/sonic_distillation_479/{initial,best,last}_student.pt`.
+- Added strict student loading, standing regression, and a live one-object/
+  table probe using current simulator observations and no future replay.
+  It reconstructs merged palm/tip frames with locked joint angles, retains BPS,
+  commands all 29 body joints through the student, and physically actuates the
+  six right-hand motors through native finger couplings.
+- Standing probe **480** ended in a native segmentation fault after its last
+  upright sample at step 550; no final validation artifact. **Not a pass.**
+  Added intermediate finite-state/progress snapshots; retry **482** underway.
+
+Remaining before full-body SAPG: finish standing and live loaded-contact
+validation; port original action delay/filter and observation randomization;
+integrate real full-body tactile including self-contact at 70 Hz; add reset/
+goal/reward/termination logic and the actual 35-action mixed-group SAPG actor,
+critic and optimizer; benchmark that complete workload. The live diagnostic
+is deliberately **not** labeled a training-ready task. No full-body RL updates
+or standing-manipulation success have been claimed.
