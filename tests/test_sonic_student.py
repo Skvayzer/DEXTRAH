@@ -8,7 +8,10 @@ from dextrah_lab.wholebody.student import (
 
 def student():
     torch.manual_seed(12)
-    decoder=nn.Sequential(nn.Linear(994,32),nn.SiLU(),nn.Linear(32,16),nn.SiLU(),nn.Linear(16,29))
+    # Match the released MLP builder's shared activation object. children()
+    # deduplicates it; iterating Sequential must not omit later activations.
+    activation=nn.SiLU()
+    decoder=nn.Sequential(nn.Linear(994,32),activation,nn.Linear(32,16),activation,nn.Linear(16,29))
     decoder.requires_grad_(False)
     return decoder,SonicManipulationStudent(decoder,torch.zeros(20),torch.ones(20),hidden_dim=16)
 

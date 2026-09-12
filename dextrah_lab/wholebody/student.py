@@ -111,7 +111,10 @@ class SonicManipulationStudent(nn.Module):
             context = torch.cat(contexts,1)
         x = torch.cat((tokens,proprio),-1)
         x = self.decoder[0](x) + self.task_to_body(context)
-        for layer in list(self.decoder.children())[1:-1]:
+        # SONIC reuses ONE SiLU instance at multiple Sequential positions.
+        # children() deduplicates shared instances and would silently drop
+        # five activations. Sequential slicing/iteration preserves each call.
+        for layer in self.decoder[1:-1]:
             x = layer(x)
         body = self.decoder[-1](x)
         fingers = torch.tanh(self.fingers(torch.cat((x,context),-1)))
