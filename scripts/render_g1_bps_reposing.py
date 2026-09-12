@@ -176,7 +176,7 @@ def main():
             image.paste(Image.fromarray(rgb),(0,96));image.paste(Image.fromarray(shape_rgb),(1280,96))
             draw=ImageDraw.Draw(image)
             draw.text((24,15),f"SAPG + BPS-128 | G1 + BrainCo Revo2 | {meta['object_family'].capitalize()}",font=title,fill=(25,38,52))
-            draw.text((24,58),'Final 8B checkpoint | deterministic leader | training disturbances retained | continuous rollout',font=text,fill=(60,75,90))
+            draw.text((24,58),f"Epoch {meta['checkpoint_epoch']} | deterministic leader | {meta.get('split', 'Training objects')} | continuous rollout",font=text,fill=(60,75,90))
             draw.text((1300,106),'BPS-128: canonical object shape',font=text,fill=(234,240,248))
             draw.text((1300,651),'Amber: queries   Mint: nearest surface samples',font=small,fill=(225,235,245))
             draw.text((1300,697),'128 distance values supplied to the policy',font=small,fill=(25,38,52))
@@ -194,7 +194,8 @@ def main():
             draw.text((24,938),line,font=text,fill=(25,38,52))
             draw.text((24,978),'Orange: object | Green: target pose | Success: max 4-keypoint error <= 1.5 cm for 10 accumulated control steps',font=small,fill=(60,75,90))
             draw.text((24,1015),'BPS distances describe shape, not collision avoidance. Four original pose keypoints and rewards are unchanged.',font=small,fill=(60,75,90))
-            draw.text((24,1048),'Measured simulated arm/hand motion; whole body is fixed visual context. No tactile sensing, fabrics, PCA, or training during recording.',font=tiny,fill=(60,75,90))
+            touch_label='Tactile feedback enabled.' if meta.get('tactile',False) else 'No tactile feedback.'
+            draw.text((24,1048),'Measured arm/hand motion; whole body is fixed visual context. '+touch_label+' No fabrics, PCA, or training during recording.',font=tiny,fill=(60,75,90))
             if np.any((i-goal_events>=0)&(i-goal_events<2*meta['fps'])):
                 draw.rounded_rectangle([24,115,440,158],radius=8,fill=(212,245,222))
                 draw.text((38,122),'REPOSING GOAL REACHED',font=text,fill=(20,108,48))
