@@ -24,9 +24,8 @@ def apply_wholebody_action(env, actions, source_pipeline):
     the 29 body joints. Preserve source queue shape for diagnostic consumers.
     """
     if actions.shape != (env.num_envs, 35) or not torch.isfinite(actions).all():
-        raise ValueError('Expected finite 29 SONIC + 6 finger actions')
-    actions = actions.clone()
-    actions[:, 29:] = actions[:, 29:].clamp(-1, 1)
+        raise ValueError('Expected finite 29 absolute body + 6 finger actions')
+    actions = actions.clamp(-1, 1)
     actions = delayed_actions(env, actions)
     cfg = copy(env.cfg)
     cfg.domain_randomization = copy(cfg.domain_randomization)
@@ -38,7 +37,7 @@ def apply_wholebody_action(env, actions, source_pipeline):
     proxy = SimpleNamespace(cfg=cfg, **{k: getattr(env, k) for k in keys})
     projected = torch.cat((actions.new_zeros(env.num_envs, 7), actions[:, 29:]), -1)
     source_pipeline(proxy, projected)
-    targets = env._body_nominal + env._body_scales * actions[:, :29]
+    targets = env._body_center + env._body_half_range * actions[:, :29]
     targets = targets.clamp(env._body_lower, env._body_upper)
     env._cur_targets[:, env._body_ids] = targets
     env._prev_targets = env._cur_targets.clone()

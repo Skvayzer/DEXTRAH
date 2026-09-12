@@ -72,7 +72,7 @@ def main():
                 fingers = action_body.new_full((env.num_envs, 6), -1.)
                 if args.exercise_hand:
                     fingers[:] = .8*math_sin(step*env.step_dt*2*np.pi*.3)
-                action = torch.cat((action_body, fingers), -1)
+                action = torch.cat((env.sonic_to_policy_body(action_body), fingers), -1)
                 obs, reward, terminated, truncated, extras = env.step(action)
                 speed = float(env.robot.data.joint_vel.abs().max())
                 if not torch.isfinite(obs['policy']).all() or not np.isfinite(speed) or speed > 1000:

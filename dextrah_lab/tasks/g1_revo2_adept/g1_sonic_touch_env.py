@@ -58,6 +58,8 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
             body_index = self._body_ids.tolist().index(index)
             self._body_lower[:, body_index] = self._arm_lower[:, k]
             self._body_upper[:, body_index] = self._arm_upper[:, k]
+        self._body_center = (self._body_lower+self._body_upper)/2
+        self._body_half_range = (self._body_upper-self._body_lower)/2
         self._last_body_action = torch.zeros(self.num_envs, 29, device=self.device)
         self._wholebody_action_queue = torch.zeros(self.num_envs, self._action_queue.shape[1], 35, device=self.device)
         self._body_history = TimedSonicHistory(self.num_envs, self.step_dt, self.device)
@@ -68,10 +70,7 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._reference_qd = torch.zeros_like(self._reference_q)
         self._reference_heading = torch.tensor(cfg.assets.robot_init_rot, device=self.device).expand(self.num_envs, -1)
         cfg.action_space = 35
-        lower = ((self._body_lower[0]-self._body_nominal)/self._body_scales).cpu().numpy()
-        upper = ((self._body_upper[0]-self._body_nominal)/self._body_scales).cpu().numpy()
-        self.single_action_space = gym.spaces.Box(np.r_[lower, -np.ones(6)].astype(np.float32),
-                                                  np.r_[upper, np.ones(6)].astype(np.float32))
+        self.single_action_space = gym.spaces.Box(-1., 1., shape=(35,), dtype=np.float32)
         self.action_space = gym.vector.utils.batch_space(self.single_action_space, self.num_envs)
         cfg.observation_space = TASK_ACTOR_DIM + BODY_EXTRA_DIM
         cfg.state_space = TASK_CRITIC_DIM + BODY_EXTRA_DIM
@@ -86,6 +85,10 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
     def _pre_physics_step(self, actions):
         apply_wholebody_action(self, actions, apply_action_pipeline)
         apply_wrench_dr(self)
+
+    def sonic_to_policy_body(self, sonic_action):
+        targets = self._body_nominal+self._body_scales*sonic_action
+        return (targets-self._body_center)/self._body_half_range
 
     def _body_terms(self):
         data = self.robot.data

@@ -393,7 +393,7 @@ def main():
             initial_validation=before,final_validation=metrics,best_update=best_update,
             best_selection_loss=best,source_checkpoints_unchanged=True,
             kinematic_manipulation_bootstrap_only=True,standing_rehearsal_real_physics=True,
-            manipulation_success_validated=False,tactile_training=False,
+            manipulation_success_validated=False,tactile_training=(model.task_dim==249),
             next_gate='Online full-body object/table/contact observations and loaded closed-loop validation, then SAPG fine-tuning',
             wall_s=time.monotonic()-wall,source_commit=config['source_commit'])
         write_json(args.output/'result.json',report)
