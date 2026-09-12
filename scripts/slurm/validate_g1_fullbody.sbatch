@@ -15,5 +15,10 @@ export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 PYTHONUNBUFFERED=1
 export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y
 cd "$project"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
+extra_args=()
+if [[ "${EXERCISE_HANDS:-0}" == 1 ]]; then
+    extra_args+=(--exercise-hands)
+fi
 python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
-    --output "outputs/fullbody_probe_${SLURM_JOB_ID}" --num-envs 4 --seconds 10
+    --output "outputs/fullbody_probe_${SLURM_JOB_ID}" \
+    --num-envs "${NUM_ENVS:-4}" --seconds "${PROBE_SECONDS:-10}" "${extra_args[@]}"

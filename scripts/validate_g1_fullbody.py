@@ -130,6 +130,7 @@ def main():
         load_history=torch.zeros(50,args.num_envs,device=args.device)
         min_height=float('inf')
         max_coupling_error=0.
+        device_peak_used_bytes=0
         hand_range=torch.zeros(args.num_envs,len(hand_ids),device=args.device)
         failure=None
         wall=time.monotonic()
@@ -174,6 +175,8 @@ def main():
                 failure='fall_or_large_tilt'
                 break
             if step%50==0:
+                free,total=torch.cuda.mem_get_info()
+                device_peak_used_bytes=max(device_peak_used_bytes,total-free)
                 print(f'FULLBODY_PROBE step={step} z={height.min().item():.3f} upright={upright.min().item():.3f}',flush=True)
         elapsed=time.monotonic()-wall
         arrays={k:np.asarray(v) for k,v in records.items()}
@@ -202,6 +205,7 @@ def main():
             standing_probe_passed=standing,failure=failure,physics_import_validated=True,
             full_m0_validated=False,training_started=False,optimizer_memory_measured=False,
             torch_peak_allocated_bytes=torch.cuda.max_memory_allocated())
+        report['device_peak_used_bytes_sampled']=device_peak_used_bytes
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:
