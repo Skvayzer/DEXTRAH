@@ -10,7 +10,23 @@ Status: implementation in progress. **No whole-body SAPG training, teacher
 selection, validated manipulation, or optimizer-inclusive capacity
 result yet.** The four-environment probe is a diagnostic, not a training size.
 
-Latest: hand-range numerical probe **470 passed** with refined palm geometry
+Latest route-2 results: supervised student runs **479/485 completed**, copying
+the original SAPG LSTM/MLP/finger head into a task-conditioned, trainable
+29-body-output SONIC decoder. Best 485 temporal-holdout arm error is
+**0.07267 rad**; not a manipulation success metric. Twenty targeted tests pass
+(488). The 479 student passed 20 s of real standing physics (482).
+
+Live object integration exposed initial left-hand/table penetration, absent
+from the reduced teacher. Fixed with an explicit 0.6-rad left shoulder-roll
+rest reference, applied consistently in bootstrap/body references (not an arm
+target override), and restored source finger smoothing retimed to 50 Hz.
+First moving right-hand contact tests still became numerically unstable;
+487 was stopped at 0.22 s after extreme passive finger velocities. A 400 Hz
+physics diagnostic (489) is running; 50 Hz control remains unchanged. **No
+full-body SAPG run or successful standing manipulation yet.** See the route-2
+document for the new checkpoint, source reuse, data scope and remaining gates.
+
+Historical frozen-decoder result: hand-range numerical probe **470 passed** with refined palm geometry
 and 32 solver iterations. Teacher-reference tracking **466 failed the wrist
 accuracy gate**, despite standing successfully. Latent label fitting **469/471
 accepted 0/64 and 1/64 samples**, respectively: not a usable adapter

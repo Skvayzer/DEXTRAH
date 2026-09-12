@@ -144,10 +144,51 @@ Source SAPG SHA-256:
   six right-hand motors through native finger couplings.
 - Standing probe **480** ended in a native segmentation fault after its last
   upright sample at step 550; no final validation artifact. **Not a pass.**
-  Added intermediate finite-state/progress snapshots; retry **482** underway.
+  Added intermediate finite-state/progress snapshots; retry **482 passed**:
+  20 s, four floating robots, minimum pelvis 0.75390 m, maximum native coupling
+  error 0.01273 rad, final foot load / weight 0.99957–1.00012. This was standing
+  only, not loaded manipulation. The one-off native crash remains unexplained.
 
-Remaining before full-body SAPG: finish standing and live loaded-contact
-validation; port original action delay/filter and observation randomization;
+### Live manipulation integration continuation
+
+- The first live task found **four left fingertips initially inside the table**
+  at SONIC's nominal rest pose. Source SAPG removed the left arm, so its
+  successful recordings could not expose this. With the table frame's half
+  extents `(0.2375, 0.2, 0.15)` m, left index/middle/ring/thumb tip positions
+  were all inside the volume. Do not disable hand/table collisions to hide it.
+- Set an explicit **left shoulder-roll rest reference of 0.6 rad**, versus
+  SONIC's nominal 0.2 rad. Update the kinematic bootstrap, previous-action
+  history, initial physical pose and reference encoder consistently. All 29
+  body commands still come from the student. No left-arm target overwrite or
+  welded joint. Initial tip/wrist point clearances are 64–155 mm; this is a
+  point preflight, not a complete CAD collision proof.
+- Restored the source finger **0.02-rad command margin** and EMA, with
+  `alpha_50 = 1 - (1 - 0.1)^(60/50) = 0.11876647`. This preserves the source
+  filter's time constant. The stochastic action delay remains off in the
+  diagnostic. These are source actuator-pipeline settings, not fabrics/PCA.
+- New bootstrap **485** completed 1,200 updates; best at 400. Held-out arm
+  RMSE **0.072666 rad**, finger RMSE **0.113889**, other-body retention RMSE
+  **0.049654 rad**, standing rehearsal RMSE **0.001438 rad**. This still uses
+  four objects and the original 8B teacher, not a newly selected tactile winner.
+  [W&B 485](https://wandb.ai/skvayzer/adept/runs/3kzird8t);
+  `outputs/sonic_distillation_485/best_student.pt`.
+- Live first-state palm and five-tip relative positions agree with source
+  observations to about **3.2 micrometres**; joint positions, previous targets,
+  object size and BPS agree exactly. Source qd reset noise and object noise are
+  intentionally absent in this probe. Also preserved the original object
+  quaternion hemisphere: matrix conversion can flip q/-q without changing
+  physical orientation but does change a neural observation.
+- **487 failed at control step 11 (0.22 s)**: extreme passive right-finger
+  velocities preceded the rejected body command. Saved current state/actions
+  in `rejected_action.npz`; do not interpret the post-explosion policy output
+  as evidence of normal learned behavior. Native coupling passed slow free-
+  space cycles, but that did **not** establish contact/fast-action stability.
+- **489** tests 400 Hz physics with unchanged 50 Hz control. This is a
+  timestep diagnostic, not a silent change to the agreed training defaults.
+  The next physical gate is stable driven-hand/object/table interaction.
+
+Remaining before full-body SAPG: finish stable live loaded-contact validation;
+port original action delay and observation randomization;
 integrate real full-body tactile including self-contact at 70 Hz; add reset/
 goal/reward/termination logic and the actual 35-action mixed-group SAPG actor,
 critic and optimizer; benchmark that complete workload. The live diagnostic
