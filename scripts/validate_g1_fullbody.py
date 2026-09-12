@@ -96,18 +96,26 @@ def main():
             raise ValueError(f'Imported mass differs from URDF: {mass}')
         # Inspect imported runtime schema, not just our Python configuration.
         mimic=[]
+        mimic_properties=[]
         rigid=[]
         for prim in sim.stage.Traverse():
             if not str(prim.GetPath()).startswith('/World/envs/env_0/Robot/'):
                 continue
             schemas=list(prim.GetAppliedSchemas())
             mimic.extend((str(prim.GetPath()),s) for s in schemas if 'MimicJoint' in s)
+            if any('MimicJoint' in s for s in schemas):
+                mimic_properties.append(dict(path=str(prim.GetPath()),
+                    attributes={a.GetName():str(a.Get()) for a in prim.GetAttributes()
+                                if 'mimic' in a.GetName().lower()},
+                    relations={r.GetName():[str(t) for t in r.GetTargets()] for r in prim.GetRelationships()
+                               if 'mimic' in r.GetName().lower()}))
             if prim.HasAPI(UsdPhysics.RigidBodyAPI):
                 disabled=prim.GetAttribute('physxRigidBody:disableGravity').Get()
                 kinematic=prim.GetAttribute('physics:kinematicEnabled').Get()
                 if disabled or kinematic:
                     raise ValueError(f'Non-dynamic robot body: {prim.GetPath()}')
                 rigid.append(str(prim.GetPath()))
+        (args.output/'imported_couplings.json').write_text(json.dumps(mimic_properties,indent=2)+'\n')
         if len(mimic)!=10:
             raise ValueError(f'Expected 10 native mimic constraints; found {len(mimic)}')
         if len(rigid)<50:
@@ -209,7 +217,7 @@ def main():
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:
-            raise RuntimeError('Standing probe failed; see saved trace. Do not launch manipulation training.')
+            raise RuntimeError(f'Probe failed: standing={standing}, coupling={coupling_passed}, fingers_moved={hands_moved}. Do not launch manipulation training.')
     except Exception as error:
         # Kit's fast shutdown can exit(0) before a pending exception is printed.
         # Persist the original error FIRST and return a failure to Slurm.
