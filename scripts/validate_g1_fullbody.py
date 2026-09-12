@@ -36,6 +36,8 @@ def main():
     p.add_argument('--bound-distal-speed',action='store_true',help='Restore importer-ignored passive URDF limits and compatible motor speeds')
     p.add_argument('--hand-armature',type=float,default=0.,help='DIAGNOSTIC reflected motor inertia kg m^2, not measured hardware data')
     p.add_argument('--diagnose-contacts',action='store_true',help='Identify thumb/index self-contact partners in a small probe')
+    p.add_argument('--contact-offset',type=float,default=None,help='Diagnostic robot contact generation distance, metres')
+    p.add_argument('--convex-decomposition',action='store_true',help='Diagnose convex-hull self-contact artifacts using closer collision geometry')
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -57,7 +59,7 @@ def main():
     try:
         import numpy as np
         import torch
-        from pxr import UsdPhysics
+        from pxr import Usd, UsdPhysics, PhysxSchema
         import isaaclab.sim as sim_utils
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
@@ -91,7 +93,9 @@ def main():
         scene_cfg.robot=fullbody_robot_cfg(urdf,args.output/'usd',
             hand_stiffness=args.hand_stiffness,hand_damping=args.hand_damping,
             self_collision=not args.disable_self_collisions,position_iterations=args.position_iterations,
-            bound_distal_speed=args.bound_distal_speed,hand_armature=args.hand_armature)
+            bound_distal_speed=args.bound_distal_speed,hand_armature=args.hand_armature,
+            contact_offset=args.contact_offset,
+            collider_type='convex_decomposition' if args.convex_decomposition else 'convex_hull')
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
             update_period=0.,history_length=1,debug_vis=False)
         print('FULLBODY_PROBE building scene',flush=True)
@@ -112,7 +116,11 @@ def main():
                         filter_prim_paths_expr=[path.replace('/env_0/','/env_.*/') for path in partners]))
                     name=f'{side}_{finger}_contacts'
                     scene.sensors[name]=sensor
-                    contact_diagnostics[name]=dict(sensor=sensor,partners=partners,peak=None)
+                    contact_diagnostics[name]=dict(sensor=sensor,partners=partners,peak=None,net_peak=0.)
+                    # Make reporting observational and independent of threshold.
+                    for env_path in scene.env_prim_paths:
+                        prim=sim.stage.GetPrimAtPath(source.replace('/World/envs/env_0',env_path))
+                        PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr().Set(0.)
         print('FULLBODY_PROBE scene built; resetting simulation',flush=True)
         sim.reset()
         robot=scene['robot']
@@ -155,6 +163,13 @@ def main():
             ('joint_stiffness','joint_damping','joint_armature','joint_effort_limits','joint_vel_limits')}
         (args.output/'runtime_motors.json').write_text(json.dumps(dict(
             joint_names=robot.joint_names,**motor_state),indent=2)+'\n')
+        collision_audit=[]
+        for prim in Usd.PrimRange(sim.stage.GetPrimAtPath('/World/envs/env_0/Robot'),Usd.TraverseInstanceProxies()):
+            if prim.HasAPI(UsdPhysics.CollisionAPI):
+                collision_audit.append(dict(path=str(prim.GetPath()), attributes={
+                    name:str(prim.GetAttribute(name).Get()) for name in (
+                        'physxCollision:contactOffset','physxCollision:restOffset','physics:approximation')}))
+        (args.output/'collision_audit.json').write_text(json.dumps(collision_audit,indent=2)+'\n')
         if len(mimic)!=10:
             raise ValueError(f'Expected 10 native mimic constraints; found {len(mimic)}')
         if len(rigid)<50:
@@ -205,6 +220,7 @@ def main():
                 for item in contact_diagnostics.values():
                     forces=item['sensor'].data.force_matrix_w.norm(dim=-1).amax(dim=(0,1))
                     item['peak']=forces if item['peak'] is None else torch.maximum(item['peak'],forces)
+                    item['net_peak']=max(item['net_peak'],float(item['sensor'].data.net_forces_w.norm(dim=-1).max()))
             values=dict(root_state=robot.data.root_state_w,joint_pos=robot.data.joint_pos,
                 joint_vel=robot.data.joint_vel,targets=target,
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
@@ -263,9 +279,12 @@ def main():
         report['bound_distal_speed']=args.bound_distal_speed
         report['hand_motor_armature_kg_m2']=args.hand_armature
         report['hand_motor_armature_calibrated']=False
+        report['contact_offset_override_m']=args.contact_offset
+        report['convex_decomposition']=args.convex_decomposition
         report['self_contact_peak_forces_n']={name:{path:float(force) for path,force in
             zip(item['partners'],item['peak'].cpu()) if force>.01}
             for name,item in contact_diagnostics.items()}
+        report['finger_net_contact_peak_n']={name:item['net_peak'] for name,item in contact_diagnostics.items()}
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:

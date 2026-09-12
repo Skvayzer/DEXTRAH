@@ -8,7 +8,7 @@ from .importer import native_mimic_cfg_flag
 
 def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
                        self_collision=True, position_iterations=8, bound_distal_speed=False,
-                       hand_armature=0.):
+                       hand_armature=0., contact_offset=None, collider_type='convex_hull'):
     import isaaclab.sim as sim
     from isaaclab.actuators import ImplicitActuatorCfg
     from isaaclab.assets import ArticulationCfg
@@ -34,6 +34,9 @@ def fullbody_robot_cfg(urdf, usd_dir, *, hand_stiffness=1200., hand_damping=25.,
             fix_base=False, merge_fixed_joints=True,
             convert_mimic_joints_to_normal_joints=native_mimic_cfg_flag(),
             self_collision=self_collision, replace_cylinders_with_capsules=True,
+            collider_type=collider_type,
+            collision_props=(sim.CollisionPropertiesCfg(contact_offset=contact_offset,rest_offset=0.)
+                             if contact_offset is not None else None),
             activate_contact_sensors=True,
             rigid_props=sim.RigidBodyPropertiesCfg(disable_gravity=False,
                 retain_accelerations=False, linear_damping=0., angular_damping=0.,
