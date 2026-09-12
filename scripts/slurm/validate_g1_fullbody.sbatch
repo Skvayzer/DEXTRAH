@@ -8,12 +8,15 @@
 #SBATCH --output=slurm-fullbody-probe-%j.out
 set -euo pipefail
 project="${WHOLEBODY_REPO:?Set WHOLEBODY_REPO}"
+export FULLBODY_SOURCE_COMMIT="$(git -C "$project" rev-parse HEAD)"
+source_snapshot="$(mktemp -d "$project/outputs/fullbody_source.XXXXXX")"
+git -C "$project" archive "$FULLBODY_SOURCE_COMMIT" | tar -x -C "$source_snapshot"
 environment=/data1/users/konstantin.smirnov/venvs/g1_sonic
 export PATH="$environment/bin:/data1/users/konstantin.smirnov/miniconda3/envs/adept_dextrah/bin:$PATH"
-export PYTHONPATH="$project${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$source_snapshot${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 PYTHONUNBUFFERED=1
 export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y
-cd "$project"
+cd "$source_snapshot"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
 extra_args=()
 if [[ "${EXERCISE_HANDS:-0}" == 1 ]]; then
@@ -37,5 +40,5 @@ if [[ -n "${TEACHER_REFERENCE:-}" ]]; then
     extra_args+=(--reference "$TEACHER_REFERENCE")
 fi
 python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
-    --output "outputs/fullbody_probe_${SLURM_JOB_ID}" \
+    --output "$project/outputs/fullbody_probe_${SLURM_JOB_ID}" \
     --num-envs "${NUM_ENVS:-4}" --seconds "${PROBE_SECONDS:-10}" "${extra_args[@]}"

@@ -6,6 +6,7 @@ establish failure on the controller's original reference-motion distribution.
 """
 import argparse
 import faulthandler
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -49,6 +50,10 @@ def main():
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
+    project=Path(__file__).resolve().parents[1]
+    provenance=dict(commit=os.environ.get('FULLBODY_SOURCE_COMMIT'),source_root=str(project),
+        sha256={str(path.relative_to(project)):hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in [Path(__file__).resolve(),*sorted((project/'dextrah_lab/wholebody').glob('*.py'))]})
     # Isaac's URDF importer uses the export directory to author USD sublayers.
     # A relative directory can generate broken /configuration/... references.
     args.output=args.output.resolve()
@@ -329,7 +334,7 @@ def main():
         hands_moved=bool((hand_range>.1).all()) if args.exercise_hands else None
         standing=bool(failure is None and (final_height>.5).all() and (final_height<.95).all()
             and (ratio>.5).all() and (ratio<1.5).all())
-        report=dict(controller=args.controller,reference='constant nominal pose, fixed world yaw; interface probe only',
+        report=dict(code_provenance=provenance,controller=args.controller,reference='constant nominal pose, fixed world yaw; interface probe only',
             num_envs=args.num_envs,physics_hz=args.physics_hz,controller_hz=50,
             duration_simulated_s=len(z)*CONTROL_DT,rollout_wall_s=elapsed,
             env_steps_per_second=len(z)*args.num_envs/elapsed,total_wall_s=time.monotonic()-begin,

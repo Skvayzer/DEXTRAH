@@ -8,12 +8,15 @@
 #SBATCH --output=slurm-coupling-%j.out
 set -euo pipefail
 project="${WHOLEBODY_REPO:?Set WHOLEBODY_REPO}"
+export FULLBODY_SOURCE_COMMIT="$(git -C "$project" rev-parse HEAD)"
+source_snapshot="$(mktemp -d "$project/outputs/coupling_source.XXXXXX")"
+git -C "$project" archive "$FULLBODY_SOURCE_COMMIT" | tar -x -C "$source_snapshot"
 environment=/data1/users/konstantin.smirnov/venvs/g1_sonic
 export PATH="$environment/bin:/data1/users/konstantin.smirnov/miniconda3/envs/adept_dextrah/bin:$PATH"
-export PYTHONPATH="$project${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$source_snapshot${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 PYTHONUNBUFFERED=1
 export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y
-cd "$project"
+cd "$source_snapshot"
 # One GPU, sequential fresh processes. Expected diagnostic failures are retained;
 # each child writes validation.json/failure.json, not hidden by a successful sweep.
 for variant in ${DIAGNOSTIC_VARIANTS:-rigid rigid32 compliant32 no_self low_gain}; do
@@ -49,7 +52,7 @@ for variant in ${DIAGNOSTIC_VARIANTS:-rigid rigid32 compliant32 no_self low_gain
         *) printf 'Unknown diagnostic variant: %s\n' "$variant" >&2; exit 2 ;;
     esac
     if timeout --signal=TERM --kill-after=15s 180s python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
-        --output "outputs/coupling_${SLURM_JOB_ID}_${variant}" \
+        --output "$project/outputs/coupling_${SLURM_JOB_ID}_${variant}" \
         --num-envs 4 --seconds 6 --exercise-hands "${extra[@]}"; then
         printf 'DIAGNOSTIC_PASS %s\n' "$variant"
     else
