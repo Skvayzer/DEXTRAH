@@ -24,12 +24,14 @@ def main():
     p.add_argument('--num-envs',type=int,default=4)
     p.add_argument('--seconds',type=float,default=10.)
     p.add_argument('--controller',choices=['sonic','pd'],default='sonic')
+    p.add_argument('--exercise-hands',action='store_true',help='Slowly close/open both hands to check native coupling')
+    p.add_argument('--record-envs',type=int,default=4,help='Cap trace copying; physics checks still cover all environments')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
     # Isaac's URDF importer uses the export directory to author USD sublayers.
     # A relative directory can generate broken /configuration/... references.
     args.output=args.output.resolve()
-    if args.num_envs < 1 or args.seconds < 2:
+    if args.num_envs < 1 or args.seconds < 2 or args.record_envs<1:
         raise ValueError('Invalid probe size/duration')
     if args.output.exists():
         raise FileExistsError(args.output)
@@ -83,6 +85,11 @@ def main():
         assert not robot.is_fixed_base, 'Unexpected welded/fixed base'
         body_ids=joint_indices(robot.joint_names,BODY_JOINTS)
         hand_ids=joint_indices(robot.joint_names,(*hand_joints('left'),*hand_joints('right')))
+        mimic_target_ids=joint_indices(robot.joint_names,tuple(audit['mimic_relations']))
+        mimic_source_ids=joint_indices(robot.joint_names,tuple(
+            r['joint'] for r in audit['mimic_relations'].values()))
+        mimic_scale=torch.tensor([float(r['multiplier']) for r in audit['mimic_relations'].values()],device=args.device)
+        mimic_offset=torch.tensor([float(r.get('offset',0)) for r in audit['mimic_relations'].values()],device=args.device)
         assert robot.num_joints==51, f'Expected 29 body + 12 independent + 10 coupled joints, got {robot.num_joints}'
         mass=robot.root_physx_view.get_masses().sum(-1)
         if not torch.allclose(mass,torch.full_like(mass,audit['total_mass_kg']),atol=.02,rtol=1e-4):
@@ -119,6 +126,11 @@ def main():
         refqd=torch.zeros_like(refq)
         scales=torch.tensor([m.action_scale for m in body_motors().values()],device=args.device)
         records={k:[] for k in ('root_state','joint_pos','joint_vel','targets','foot_force','normalized_action')}
+        record_n=min(args.record_envs,args.num_envs)
+        load_history=torch.zeros(50,args.num_envs,device=args.device)
+        min_height=float('inf')
+        max_coupling_error=0.
+        hand_range=torch.zeros(args.num_envs,len(hand_ids),device=args.device)
         failure=None
         wall=time.monotonic()
         steps=round(args.seconds/CONTROL_DT)
@@ -135,6 +147,8 @@ def main():
             target=q0.clone()
             target[:,body_ids]=q0[:,body_ids]+last*scales
             target[:,hand_ids]=q0[:,hand_ids]
+            if args.exercise_hands:
+                target[:,hand_ids]+=.25*(1-np.cos(2*np.pi*.3*step*CONTROL_DT))
             robot.set_joint_position_target(target)
             for _ in range(round(CONTROL_DT/PHYSICS_DT)):
                 scene.write_data_to_sim()
@@ -144,11 +158,17 @@ def main():
                 joint_vel=robot.data.joint_vel,targets=target,
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
             for key,value in values.items():
-                records[key].append(value.detach().cpu().numpy().copy())
+                records[key].append(value[:record_n].detach().cpu().numpy().copy())
+            load_history[step%50]=values['foot_force'][...,2].sum(-1)
+            coupling_error=(robot.data.joint_pos[:,mimic_target_ids]-
+                robot.data.joint_pos[:,mimic_source_ids]*mimic_scale-mimic_offset).abs().max()
+            max_coupling_error=max(max_coupling_error,float(coupling_error))
+            hand_range=torch.maximum(hand_range,(robot.data.joint_pos[:,hand_ids]-q0[:,hand_ids]).abs())
             if not all(torch.isfinite(v).all() for v in values.values()):
                 failure='nonfinite_state'
                 break
             height=robot.data.root_pos_w[:,2]-scene.env_origins[:,2]
+            min_height=min(min_height,float(height.min()))
             upright=-robot.data.projected_gravity_b[:,2]
             if (height<.35).any() or (upright<.5).any():
                 failure='fall_or_large_tilt'
@@ -160,25 +180,31 @@ def main():
         np.savez_compressed(args.output/'trace.npz',**arrays)
         z=arrays['root_state'][...,2]
         # Averages over the final second, not an instantaneous contact spike.
-        load=arrays['foot_force'][-50:,...,2].sum(-1).mean(0)
+        load=load_history[:min(step+1,50)].mean(0).cpu().numpy()
         ratio=load/(mass.cpu().numpy()*9.81)
-        standing=bool(failure is None and (z[-1]>.5).all() and (z[-1]<.95).all()
+        final_height=height.cpu().numpy()
+        coupling_passed=max_coupling_error<.03
+        hands_moved=bool((hand_range>.1).all()) if args.exercise_hands else None
+        standing=bool(failure is None and (final_height>.5).all() and (final_height<.95).all()
             and (ratio>.5).all() and (ratio<1.5).all())
         report=dict(controller=args.controller,reference='constant nominal pose, fixed world yaw; interface probe only',
             num_envs=args.num_envs,physics_hz=200,controller_hz=50,
             duration_simulated_s=len(z)*CONTROL_DT,rollout_wall_s=elapsed,
             env_steps_per_second=len(z)*args.num_envs/elapsed,total_wall_s=time.monotonic()-begin,
-            fixed_base=robot.is_fixed_base,total_mass_kg=mass.tolist(),
+            fixed_base=robot.is_fixed_base,total_mass_kg_min=float(mass.min()),total_mass_kg_max=float(mass.max()),
             rigid_body_count=len(rigid),native_mimic_constraints=mimic,
             joint_names=robot.joint_names,body_joint_indices=body_ids,hand_joint_indices=hand_ids,
             actuators=actuator_manifest(),hand_gains=dict(stiffness=1200.,damping=25.,calibrated=False),
-            foot_load_over_weight=ratio.tolist(),min_pelvis_height_m=float(z.min()),
+            foot_load_over_weight_min=float(ratio.min()),foot_load_over_weight_max=float(ratio.max()),
+            min_pelvis_height_m=min_height,recorded_envs=record_n,
+            hand_exercise=args.exercise_hands,all_independent_fingers_moved=hands_moved,
+            max_native_coupling_error_rad=max_coupling_error,native_coupling_passed=coupling_passed,
             standing_probe_passed=standing,failure=failure,physics_import_validated=True,
             full_m0_validated=False,training_started=False,optimizer_memory_measured=False,
             torch_peak_allocated_bytes=torch.cuda.max_memory_allocated())
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
-        if not standing:
+        if not standing or not coupling_passed or hands_moved is False:
             raise RuntimeError('Standing probe failed; see saved trace. Do not launch manipulation training.')
     except Exception as error:
         # Kit's fast shutdown can exit(0) before a pending exception is printed.
