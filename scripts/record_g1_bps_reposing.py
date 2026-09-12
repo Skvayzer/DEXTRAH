@@ -5,6 +5,7 @@ No optimizer, training, W&B run, changed reward, or outcome-based clip selection
 """
 import argparse
 import copy
+import faulthandler
 import hashlib
 import json
 import math
@@ -18,6 +19,10 @@ import traceback
 def main():
     if not os.environ.get('SLURM_JOB_ID'):
         raise RuntimeError('Run capture inside a Slurm GPU allocation')
+    # Report a real stack if Kit/PhysX initialization stops progressing.
+    # Diagnostic only: no changes to environment or evaluation protocol.
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(180, repeat=True)
     from isaaclab.app import AppLauncher
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--run',type=Path,required=True)
