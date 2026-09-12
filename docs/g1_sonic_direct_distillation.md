@@ -183,9 +183,27 @@ Source SAPG SHA-256:
   in `rejected_action.npz`; do not interpret the post-explosion policy output
   as evidence of normal learned behavior. Native coupling passed slow free-
   space cycles, but that did **not** establish contact/fast-action stability.
-- **489** tests 400 Hz physics with unchanged 50 Hz control. This is a
-  timestep diagnostic, not a silent change to the agreed training defaults.
-  The next physical gate is stable driven-hand/object/table interaction.
+- **489** used 400 Hz physics with unchanged 50 Hz control. It avoided the
+  immediate velocity explosion, but ended in a native segmentation fault
+  after the last saved state at 1.02 s. This is not a numerical-stability pass
+  or a change to the agreed training defaults.
+- **490**, one environment with physics replication disabled at 400 Hz,
+  reached 3.92 s before the normalized-body-action guard rejected a right
+  wrist-yaw command of 20.016. Joint speeds were finite (maximum 4.95 rad/s),
+  unlike 487's finger explosion. The pelvis had drifted and tilted: this is
+  evidence of a closed-loop control-transfer gap, not proof of another
+  numerical explosion. A short one-environment result cannot establish that
+  replication caused the earlier native crashes.
+- Probe state checking now also runs after each physics substep. Catastrophic
+  velocities/nonfinite states abort and save `rejected_physics.npz` before
+  another actor invocation. No positions or velocities are reset/clamped to
+  hide the failure. Four-environment repeat **491** reached 3.94 s with finite
+  joint velocities (maximum 5.31 rad/s at rejection), then stopped on a body
+  command of magnitude 20.182. Neither this nor 490 passed the requested 20 s
+  probe. These short repeats distinguish ordinary control drift from the
+  previous huge finger velocities; they do not prove long-run physics stability
+  or identify the root cause of the native crashes. No GPU job remains active
+  after these diagnostics.
 
 Remaining before full-body SAPG: finish stable live loaded-contact validation;
 port original action delay and observation randomization;
@@ -194,3 +212,10 @@ goal/reward/termination logic and the actual 35-action mixed-group SAPG actor,
 critic and optimizer; benchmark that complete workload. The live diagnostic
 is deliberately **not** labeled a training-ready task. No full-body RL updates
 or standing-manipulation success have been claimed.
+
+Do **not** require a successful grasp or perfect standing manipulation from
+the bootstrap student before permitting RL: learning that behavior is the
+purpose of full-body fine-tuning. The pre-RL physics gate concerns valid
+contacts/couplings and recoverable finite states. Falls/control failures must
+be handled by explicit task terminations and resets, not confused with a
+simulator crash or hidden by altering the robot's physical constraints.

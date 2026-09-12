@@ -22,9 +22,16 @@ rest reference, applied consistently in bootstrap/body references (not an arm
 target override), and restored source finger smoothing retimed to 50 Hz.
 First moving right-hand contact tests still became numerically unstable;
 487 was stopped at 0.22 s after extreme passive finger velocities. A 400 Hz
-physics diagnostic (489) is running; 50 Hz control remains unchanged. **No
-full-body SAPG run or successful standing manipulation yet.** See the route-2
-document for the new checkpoint, source reuse, data scope and remaining gates.
+physics diagnostic (489) then crashed natively after its last snapshot at
+1.02 s. Non-replicated repeats 490/491 reached 3.92/3.94 s with finite joint
+velocities, then the body-action guard stopped them during control drift.
+This is a separate closed-loop skill-transfer gap, not another observed
+finger explosion. Neither repeat passed the 20 s gate; native-crash root cause
+and longer contact stability remain unresolved. Control remains 50 Hz.
+**No full-body SAPG run or successful standing manipulation yet; no GPU job
+left running at this handoff.** See the route-2 document for the new checkpoint,
+source reuse, data scope and remaining gates. Successful manipulation is the
+future RL objective, not a requirement imposed on the bootstrap student.
 
 Historical frozen-decoder result: hand-range numerical probe **470 passed** with refined palm geometry
 and 32 solver iterations. Teacher-reference tracking **466 failed the wrist
