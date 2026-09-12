@@ -35,6 +35,7 @@ def main():
     p.add_argument('--physics-hz',type=int,choices=[200,400,800,1000],default=200)
     p.add_argument('--bound-distal-speed',action='store_true',help='Restore importer-ignored passive URDF limits and compatible motor speeds')
     p.add_argument('--hand-armature',type=float,default=0.,help='DIAGNOSTIC reflected motor inertia kg m^2, not measured hardware data')
+    p.add_argument('--diagnose-contacts',action='store_true',help='Identify thumb/index self-contact partners in a small probe')
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -43,6 +44,8 @@ def main():
     args.output=args.output.resolve()
     if args.num_envs < 1 or args.seconds < 2 or args.record_envs<1:
         raise ValueError('Invalid probe size/duration')
+    if args.diagnose_contacts and args.num_envs > 16:
+        raise ValueError('Per-pair contact diagnostics are restricted to <=16 environments')
     if args.output.exists():
         raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
@@ -58,7 +61,7 @@ def main():
         import isaaclab.sim as sim_utils
         from isaaclab.assets import AssetBaseCfg
         from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
-        from isaaclab.sensors import ContactSensorCfg
+        from isaaclab.sensors import ContactSensor, ContactSensorCfg
         from isaaclab.utils.math import matrix_from_quat, quat_conjugate, yaw_quat
         from dextrah_lab.wholebody.asset import prepare_urdf
         from dextrah_lab.wholebody.asset_cfg import fullbody_robot_cfg
@@ -96,6 +99,20 @@ def main():
         scene=InteractiveScene(scene_cfg)
         coupling_config=configure_native_mimics(sim.stage,audit['mimic_relations'],args.num_envs,
             frequency=args.mimic_frequency,damping_ratio=args.mimic_damping)
+        contact_diagnostics={}
+        if args.diagnose_contacts:
+            paths=[str(p.GetPath()) for p in sim.stage.Traverse()
+                   if str(p.GetPath()).startswith('/World/envs/env_0/Robot/') and p.HasAPI(UsdPhysics.RigidBodyAPI)]
+            for side in ('left','right'):
+                for finger in ('thumb','index'):
+                    source=next(path for path in paths if path.rsplit('/',1)[-1].lower()==f'{side}_{finger}_distal_link')
+                    partners=[path for path in paths if path!=source]
+                    sensor=ContactSensor(ContactSensorCfg(
+                        prim_path=source.replace('/env_0/','/env_.*/'),update_period=0.,
+                        filter_prim_paths_expr=[path.replace('/env_0/','/env_.*/') for path in partners]))
+                    name=f'{side}_{finger}_contacts'
+                    scene.sensors[name]=sensor
+                    contact_diagnostics[name]=dict(sensor=sensor,partners=partners,peak=None)
         print('FULLBODY_PROBE scene built; resetting simulation',flush=True)
         sim.reset()
         robot=scene['robot']
@@ -185,6 +202,9 @@ def main():
                 scene.write_data_to_sim()
                 sim.step(render=False)
                 scene.update(physics_dt)
+                for item in contact_diagnostics.values():
+                    forces=item['sensor'].data.force_matrix_w.norm(dim=-1).amax(dim=(0,1))
+                    item['peak']=forces if item['peak'] is None else torch.maximum(item['peak'],forces)
             values=dict(root_state=robot.data.root_state_w,joint_pos=robot.data.joint_pos,
                 joint_vel=robot.data.joint_vel,targets=target,
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
@@ -243,6 +263,9 @@ def main():
         report['bound_distal_speed']=args.bound_distal_speed
         report['hand_motor_armature_kg_m2']=args.hand_armature
         report['hand_motor_armature_calibrated']=False
+        report['self_contact_peak_forces_n']={name:{path:float(force) for path,force in
+            zip(item['partners'],item['peak'].cpu()) if force>.01}
+            for name,item in contact_diagnostics.items()}
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:
