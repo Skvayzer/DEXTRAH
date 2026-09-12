@@ -1,5 +1,11 @@
 # Whole-body SAPG implementation — 2026-09-12
 
+Current architecture: **route 2, trainable SONIC body decoder**, explicitly
+requested by the user. See [direct distillation](g1_sonic_direct_distillation.md).
+The frozen-decoder architecture below is historical and superseded. Teacher
+comparison 472 subsequently **failed** on snapshot-relative tactile URDF
+resolution, after completing nine BPS cases; no teacher winner was selected.
+
 Status: implementation in progress. **No whole-body SAPG training, teacher
 selection, validated manipulation, or optimizer-inclusive capacity
 result yet.** The four-environment probe is a diagnostic, not a training size.
