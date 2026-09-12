@@ -15,8 +15,6 @@ import time
 def main():
     if not os.environ.get('SLURM_JOB_ID'):
         raise RuntimeError('Run in a Slurm GPU allocation')
-    faulthandler.enable()
-    faulthandler.dump_traceback_later(180, repeat=True)
     from isaaclab.app import AppLauncher
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--workspace',type=Path,default=Path('/data1/users/konstantin.smirnov'))
@@ -36,6 +34,9 @@ def main():
     args.output.mkdir(parents=True)
     args.headless=True
     app=AppLauncher(args).app
+    stack_log=(args.output/'stacks.log').open('w')
+    faulthandler.enable(file=stack_log)
+    faulthandler.dump_traceback_later(30, repeat=True, file=stack_log)
     try:
         import numpy as np
         import torch
