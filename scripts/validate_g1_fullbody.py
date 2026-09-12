@@ -365,7 +365,17 @@ def main():
             if step%50==0:
                 free,total=torch.cuda.mem_get_info()
                 device_peak_used_bytes=max(device_peak_used_bytes,total-free)
-                print(f'FULLBODY_PROBE step={step} z={height.min().item():.3f} upright={upright.min().item():.3f}',flush=True)
+                progress=dict(step=step,simulated_s=(step+1)*CONTROL_DT,
+                    min_height_m=float(height.min()),min_upright=float(upright.min()),
+                    max_coupling_error_rad=max_coupling_error,max_joint_speed_rad_s=float(robot.data.joint_vel.abs().max()),
+                    max_body_action=float(last.abs().max()),device_used_bytes=total-free,
+                    student_checkpoint=str(args.student_checkpoint) if args.student_checkpoint else None,
+                    live_task=live_task.report() if live_task is not None else None)
+                (args.output/'progress.json').write_text(json.dumps(progress,indent=2)+'\n')
+                # Preserve the latest finite physical state if a native crash
+                # bypasses Python exception handling and the final trace export.
+                np.savez_compressed(args.output/'last_state.npz',**{k:v[:record_n].detach().cpu().numpy() for k,v in values.items()})
+                print('FULLBODY_PROBE '+json.dumps(progress),flush=True)
         elapsed=time.monotonic()-wall
         arrays={k:np.asarray(v) for k,v in records.items()}
         np.savez_compressed(args.output/'trace.npz',**arrays)

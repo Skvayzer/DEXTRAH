@@ -15,5 +15,5 @@ export PATH="/data1/users/konstantin.smirnov/venvs/g1_sonic/bin:/data1/users/kon
 export PYTHONPATH="$source_snapshot${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 PYTHONUNBUFFERED=1
 cd "$source_snapshot"
-python -m pytest -q tests/test_sonic_student.py tests/test_sonic_history.py tests/test_teacher_data.py tests/test_transfer_labels.py
+python -m pytest -q tests/test_sonic_student.py tests/test_sonic_history.py tests/test_teacher_data.py tests/test_transfer_labels.py tests/test_sonic_bootstrap.py tests/test_sapg_features.py tests/test_clip_task_math.py
 python scripts/validate_g1_sonic_student.py --output "$project/outputs/student_contract_${SLURM_JOB_ID}"
