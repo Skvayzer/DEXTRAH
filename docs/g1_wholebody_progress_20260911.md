@@ -1,5 +1,8 @@
 # Whole-body SAPG preparation — 2026-09-11
 
+Historical record. See [September 12 implementation and validation progress](g1_wholebody_progress_20260912.md)
+for the post-reboot controller/asset work and current gates.
+
 Status: **partial implementation; simulation blocked by workstation driver mismatch.**
 No teacher selected, no full-body physics validated, no new training launched.
 
