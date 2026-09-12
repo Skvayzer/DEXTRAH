@@ -51,6 +51,15 @@ def main():
         raise ValueError('Reference capture requires selected recording environments')
     args.headless=True
     app=AppLauncher(args).app
+    # We are a standalone headless process, not an interactive Kit extension.
+    # In this workstation's IsaacLab that distinction disables the STOP-event
+    # callback which otherwise waits forever for a UI "play" command.
+    import builtins
+    builtins.ISAAC_LAUNCHED_FROM_TERMINAL=True
+    args.output.mkdir(parents=True)
+    stack_log=(args.output/'stacks.log').open('w')
+    faulthandler.enable(file=stack_log)
+    faulthandler.dump_traceback_later(180,repeat=True,file=stack_log)
     try:
         import numpy as np
         import torch
@@ -106,7 +115,6 @@ def main():
             raise ValueError('Video FPS must divide the policy rate')
         steps=round(args.seconds/dt)
         clip_steps=round(args.video_seconds/dt)
-        args.output.mkdir(parents=True)
         checkpoint=torch.load(args.checkpoint,map_location='cpu',weights_only=False)
         checkpoint=checkpoint[0] if 0 in checkpoint else checkpoint
         actor_dim,critic_dim=(249,271) if tactile else (224,246)
