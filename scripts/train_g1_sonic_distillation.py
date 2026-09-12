@@ -42,12 +42,14 @@ def write_json(path,value):
 
 
 @torch.no_grad()
-def add_body_teacher(data,sonic,device,standing=False):
+def add_body_teacher(data,sonic,device,standing=False,rest_pose=None):
     converted={k:torch.as_tensor(v,device=device) for k,v in data.items()
                if k in ('proprio','task','arm_targets','finger_actions','valid','sonic_action',
                         'teacher_rnn_state_0','teacher_rnn_state_1')}
     count=len(data['proprio'])
     q=torch.as_tensor(nominal_body_pose(),device=device)[None,None].repeat(1,10,1)
+    if rest_pose is not None and not standing:
+        q[:]=torch.as_tensor(rest_pose,device=device)
     zero=torch.zeros_like(q)
     ori=q.new_tensor([1.,0.,0.,1.,0.,0.])[None,None].repeat(1,10,1)
     if not standing:
@@ -77,6 +79,8 @@ def add_body_teacher(data,sonic,device,standing=False):
 
 def prepare(args,sonic):
     training=[];validation=[];reports=[];normalizer=None;checkpoint=None
+    rest=nominal_body_pose()
+    rest[BODY_JOINTS.index('left_shoulder_roll_joint')]=args.left_clearance_roll
     for clip in sorted((args.capture/'clips').iterdir()):
         if not clip.is_dir():
             continue
@@ -101,7 +105,7 @@ def prepare(args,sonic):
         for start,stop in zip(boundaries[:-1],boundaries[1:]):
             if stop-start<2:
                 continue
-            episode=causal_episode(data,meta,int(start),int(stop))
+            episode=causal_episode(data,meta,int(start),int(stop),rest_pose=rest)
             split=split_episode(len(episode['proprio']),min_steps=args.sequence+args.burn_in)
             if split is None:
                 continue
@@ -113,7 +117,7 @@ def prepare(args,sonic):
                 raise ValueError('Demonstration has unhandled body limit violations')
             for target,sl in zip((training,validation),split):
                 part={k:v[sl].copy() for k,v in episode.items()}
-                target.append(add_body_teacher(part,sonic,args.device))
+                target.append(add_body_teacher(part,sonic,args.device,rest_pose=rest))
             entries.append(dict(source_start=int(start),source_stop=int(stop),
                 training_interval=[split[0].start,split[0].stop],
                 validation_interval=[split[1].start,split[1].stop],
@@ -145,7 +149,8 @@ def prepare(args,sonic):
         standing_body_data='Measured pre-action states reconstructed from passing real nominal SONIC standing probe',
         split='Within-episode contiguous time holdout, 50-step separation; NOT held-out objects',
         future_motion_input=False,physics_hz=200,student_control_hz=50,source_teacher_control_hz=60,
-        task_dim=224,tactile_training=False,action_joint_order=list(ACTION_JOINTS),source_body_order=list(BODY_JOINTS))
+        task_dim=224,tactile_training=False,action_joint_order=list(ACTION_JOINTS),source_body_order=list(BODY_JOINTS),
+        manipulation_rest_pose=rest.tolist(),left_clearance_roll=args.left_clearance_roll)
     return training,validation,rehearsal_train,rehearsal_val,normalizer,report
 
 
@@ -229,11 +234,14 @@ def main():
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--wandb',choices=['online','disabled'],default='online')
     p.add_argument('--reuse-sapg-features',action='store_true',help='Also copy source LSTM/MLP/finger head; no random finger relearning')
+    p.add_argument('--left-clearance-roll',type=float,default=.6,help='Planned left-arm rest reference to clear the table; no welded or overridden body joints')
     args=p.parse_args()
     if not os.environ.get('SLURM_JOB_ID') or args.output.exists():
         raise ValueError('Use Slurm and a new output directory')
     if min(args.updates,args.batch_size,args.sequence,args.burn_in)<=0:
         raise ValueError('Require positive training sizes')
+    if not .2<=args.left_clearance_roll<=.8:
+        raise ValueError('Left clearance reference outside the audited candidate range')
     if args.urdf is None:
         args.urdf=args.workspace/'play2perfect/unitree_ros/robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf'
     contract=json.loads(args.contract.read_text())
@@ -294,7 +302,7 @@ def main():
             sonic_sha256=WEIGHTS_SHA256,task_dim=model.task_dim,hidden_dim=model.hidden_dim,
             standing_weight=10.,other_body_weight=1.,no_future_motion_input=True,
             reuse_sapg_features=args.reuse_sapg_features,feature_equivalence=feature_report,
-            explicit_task_activity_gate=True)
+            explicit_task_activity_gate=True,left_clearance_roll=args.left_clearance_roll)
         write_json(args.output/'config.json',config)
         if args.wandb=='online':
             import wandb

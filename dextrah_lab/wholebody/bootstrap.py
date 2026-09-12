@@ -23,7 +23,7 @@ def term_history(*terms):
     return np.concatenate([x[ids].reshape(len(ids),-1) for x in terms],-1).astype(np.float32)
 
 
-def causal_episode(trace, metadata, start, stop):
+def causal_episode(trace, metadata, start, stop, rest_pose=None):
     """Hold the latest complete 60 Hz sample onto a 50 Hz bootstrap clock.
 
     Do not smooth object observations, interpolate through goal changes or
@@ -44,12 +44,15 @@ def causal_episode(trace, metadata, start, stop):
     arm=joint_indices(metadata['joint_names'],RIGHT_ARM)
     body_arm=joint_indices(BODY_JOINTS,RIGHT_ARM)
     nominal=nominal_body_pose()
+    rest=nominal if rest_pose is None else np.asarray(rest_pose,dtype=np.float32)
+    if rest.shape!=(29,) or not np.isfinite(rest).all():
+        raise ValueError('Invalid standing rest pose')
     scales=np.asarray([m.action_scale for m in body_motors().values()])
-    q=np.tile(nominal,(len(ids),1))
+    q=np.tile(rest,(len(ids),1))
     qd=np.zeros_like(q)
     q[:,body_arm]=trace['joint_pos'][ids][:,arm]
     qd[:,body_arm]=trace['joint_vel'][ids][:,arm]
-    previous=np.tile(nominal,(len(ids),1))
+    previous=np.tile(rest,(len(ids),1))
     previous[:,body_arm]=trace['commanded_joint_targets'][ids][:,arm]
     last=(previous-nominal)/scales
     gravity=np.tile([0.,0.,-1.],(len(ids),1))

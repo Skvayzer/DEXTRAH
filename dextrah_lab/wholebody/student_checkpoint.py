@@ -33,4 +33,5 @@ def load_student_checkpoint(path,sonic,device):
         raise ValueError('Nonfinite student parameter')
     return model.to(device).eval().requires_grad_(False),dict(architecture=payload['architecture'],
         checkpoint=str(path),supervised_update=payload['update'],source_sonic_sha256=WEIGHTS_SHA256,
-        source_sapg_sha256=cfg['source_teacher_sha256'],action_dim=35,fullbody_rl_updates=payload['fullbody_rl_updates'])
+        source_sapg_sha256=cfg['source_teacher_sha256'],action_dim=35,fullbody_rl_updates=payload['fullbody_rl_updates'],
+        left_clearance_roll=cfg.get('left_clearance_roll',.2))

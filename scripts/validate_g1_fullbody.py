@@ -133,7 +133,7 @@ def main():
             from dextrah_lab.wholebody.clip_task import LiveClipTask
             live_task=LiveClipTask(args.task_clip,
                 args.workspace/'play2perfect/unitree_ros/robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf',
-                args.output,args.device)
+                args.output,args.device,left_clearance_roll=student_metadata['left_clearance_roll'])
             if live_task.metadata['checkpoint_sha256']!=student_metadata['source_sapg_sha256']:
                 raise ValueError('Live task clip and distilled teacher checkpoint differ')
             live_task.add_assets(scene_cfg)
@@ -257,6 +257,8 @@ def main():
         history=SonicHistory(args.num_envs,args.device)
         last=torch.zeros(args.num_envs,29,device=args.device)
         refq=q0[:,body_ids,None].transpose(1,2).repeat(1,10,1)
+        if live_task is not None:
+            refq[:,:,BODY_JOINTS.index('left_shoulder_roll_joint')]=live_task.left_clearance_roll
         refqd=torch.zeros_like(refq)
         scales=torch.tensor([m.action_scale for m in body_motors().values()],device=args.device)
         records={k:[] for k in ('root_state','joint_pos','joint_vel','targets','foot_force','normalized_action')}

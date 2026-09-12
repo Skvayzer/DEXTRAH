@@ -6,12 +6,14 @@ constant inverse scene alignment preserves the original teacher task frame.
 Observation noise/delays and tactile are not yet enabled in this diagnostic.
 """
 import json
+import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import numpy as np
 import torch
 
 from .contract import BODY_JOINTS,hand_joints,joint_indices
-from .kinematics import UrdfKinematics,matrix_pose
+from .kinematics import UrdfKinematics,matrix_pose,pose_matrix
 from .reference import Segment
 from .teacher_bridge import RIGHT_ARM,align_teacher_segment
 
@@ -35,7 +37,7 @@ def compose(a,b):
 
 
 class LiveClipTask:
-    def __init__(self,clip,urdf,output,device):
+    def __init__(self,clip,urdf,output,device,left_clearance_roll=.6):
         self.clip=Path(clip);self.device=device;self.urdf=Path(urdf)
         self.metadata=json.loads((self.clip/'metadata.json').read_text())
         if self.metadata['actor_dim']!=224 or self.metadata['tactile']:
@@ -47,6 +49,8 @@ class LiveClipTask:
         aligned,audit=align_teacher_segment(source,self.metadata,Segment(0,stop,0),urdf)
         self.audit=audit
         self.initial_body=aligned['body_q'][0]
+        self.initial_body[BODY_JOINTS.index('left_shoulder_roll_joint')]=left_clearance_roll
+        self.left_clearance_roll=left_clearance_roll
         self.initial_hand=aligned['right_hand_q'][0]
         self.initial_poses={k:aligned[k+'_pose'][0] for k in ('object','table','goal')}
         self.source_from_world=torch.tensor(matrix_pose(np.linalg.inv(np.asarray(audit['scene_alignment']))),device=device,dtype=torch.float32)
@@ -58,6 +62,35 @@ class LiveClipTask:
         self.bps=torch.as_tensor(features,device=device)
         self.output=Path(output)
         self.tree=UrdfKinematics(urdf)
+        table_collision=ET.parse(self.clip/'table.urdf').getroot().find('link/collision')
+        box=table_collision.find('geometry/box')
+        origin=table_collision.find('origin')
+        if box is None or (origin is not None and any(
+                np.any(np.fromstring(origin.get(k,'0 0 0'),sep=' ')!=0) for k in ('xyz','rpy'))):
+            raise ValueError('The initial table-clearance preflight currently supports a centered box table')
+        half=np.fromstring(box.get('size'),sep=' ')/2
+        q=dict(zip(BODY_JOINTS,self.initial_body))
+        q.update(dict.fromkeys(hand_joints('left'),0.))
+        q.update(dict(zip(hand_joints('right'),self.initial_hand)))
+        table_from_root=np.linalg.inv(pose_matrix(self.initial_poses['table']))@pose_matrix(aligned['root_pose'][0])
+        clearances={}
+        for name in self.tree.links:
+            if name.startswith('left_') and ('tip' in name.lower() or 'wrist_yaw' in name.lower()):
+                point=(table_from_root@self.tree.transform(name,q,1)[0])[:3,3]
+                delta=np.abs(point)-half
+                clearances[name]=float(np.linalg.norm(np.maximum(delta,0))+min(float(delta.max()),0.))
+        self.initial_left_point_clearance=clearances
+        if min(clearances.values())<.025:
+            raise ValueError(f'Initial left hand/table point clearance is below 25 mm: {clearances}')
+        import yaml
+        class Loader(yaml.SafeLoader):
+            pass
+        Loader.add_constructor('tag:yaml.org,2002:python/tuple',lambda loader,node:tuple(loader.construct_sequence(node)))
+        source_cfg=yaml.load((Path(self.metadata['source_run'])/'params/env_resolved.yaml').read_text(),Loader=Loader)
+        self.action_cfg=source_cfg['action']
+        if self.action_cfg['joint_limit_overrides']:
+            raise ValueError('Implement source joint overrides before probing this source')
+        self.hand_alpha=retimed_smoothing(self.action_cfg['hand_moving_average'],1/60,1/50)
 
     def add_assets(self,scene_cfg):
         from isaaclab.assets import RigidObjectCfg
@@ -118,6 +151,10 @@ class LiveClipTask:
             asset.root_physx_view.set_material_properties(materials,torch.arange(n,dtype=torch.int32,device='cpu'))
         self.goal=q.new_tensor(self.initial_poses['goal'])[None].repeat(n,1)
         self.limits=robot.data.joint_pos_limits[0,self.ids].clone()
+        self.hand_limits=self.limits[7:].clone()
+        margin=float(self.action_cfg['joint_limit_margin'])
+        mask=self.hand_limits[:,1]-self.hand_limits[:,0]>2*margin
+        self.hand_limits[mask,0]+=margin;self.hand_limits[mask,1]-=margin
         # Actor keypoints use per-object dimensions, reward uses fixed size.
         self.kp_offsets=q.new_tensor(CORNERS)[None]*(self.object_scale*.04*1.5*.5)[None,None]
         self.reward_offsets=q.new_tensor(CORNERS)[None]*q.new_tensor([.141,.03025,.0271])[None,None]*.75
@@ -158,8 +195,10 @@ class LiveClipTask:
     def set_finger_targets(self,target,actions):
         clipped=actions.clamp(-1,1)
         self.finger_clipping_count+=int((actions!=clipped).sum())
-        lower,upper=self.limits[7:,0],self.limits[7:,1]
-        target[:,self.hand_ids]=lower+(clipped+1)*.5*(upper-lower)
+        lower,upper=self.hand_limits[:,0],self.hand_limits[:,1]
+        desired=lower+(clipped+1)*.5*(upper-lower)
+        previous=self.previous[:,self.hand_ids]
+        target[:,self.hand_ids]=(previous+self.hand_alpha*(desired-previous)).clamp(lower,upper)
         self.previous=target.clone()
 
     def record(self):
@@ -184,5 +223,15 @@ class LiveClipTask:
             samples_below_15mm=self.near_goal_samples.cpu().tolist(),peak_object_contact_n=self.peak_object_contact,
             finger_clipped_channels_count=self.finger_clipping_count,
             tactile_enabled=False,observation_delay_noise_enabled=False,
-            finger_action_pipeline='absolute URDF-range targets; original teacher delays/filter not yet ported',
+            left_clearance_roll_reference_rad=self.left_clearance_roll,
+            initial_left_frame_point_clearance_m=self.initial_left_point_clearance,
+            initial_clearance_check='tip/wrist reference points versus table box, not a complete CAD collision proof',
+            finger_action_pipeline='source absolute targets and joint margin; EMA retimed 60->50 Hz; stochastic delay still disabled',
+            finger_ema_alpha_50hz=self.hand_alpha,
             training_task_ready=False,grasp_success_rate_measured=False)
+
+
+def retimed_smoothing(alpha,source_dt,target_dt):
+    if not 0<alpha<=1 or min(source_dt,target_dt)<=0:
+        raise ValueError('Invalid source smoothing/timebase')
+    return 1. if alpha==1 else -math.expm1(math.log1p(-alpha)*target_dt/source_dt)
