@@ -48,6 +48,18 @@ def main():
     differentiable.square().mean().backward()
     assert residual.grad is not None and torch.isfinite(residual.grad).all() and residual.grad.abs().max()>0
     assert all(parameter.grad is None for parameter in model.parameters())
+    from dextrah_lab.wholebody.transfer import fit_teacher_arm_targets
+    from dextrah_lab.wholebody.teacher_bridge import RIGHT_ARM
+    from dextrah_lab.wholebody.contract import BODY_JOINTS, joint_indices
+    from dextrah_lab.wholebody.actuators import body_motors
+    scales=torch.tensor([m.action_scale for m in body_motors().values()])
+    arm_ids=joint_indices(BODY_JOINTS,RIGHT_ARM)
+    # Known-reachable synthetic targets test the real quantized fitting path.
+    # This does not substitute for fitting/evaluating the old SAPG teacher.
+    targets=(torch.as_tensor(nominal_body_pose())+changed*scales)[:,arm_ids]
+    fitted=fit_teacher_arm_targets(model,obs,q,qd,ori,targets,steps=80,
+        residual_penalty=1e-6,body_retention_weight=.01,tolerance_rad=.02)
+    assert (fitted.arm_error_rad<fitted.baseline_arm_error_rad).all()
     model.train(True)
     assert not model.training and not model.actor.training
     assert not any(p.requires_grad for p in model.parameters())
@@ -57,6 +69,10 @@ def main():
         finite_outputs=bool(torch.isfinite(changed).all()),body_actions=29,latent=64,
         imitation_gradient_verified=True,residual_gradient_max=float(residual.grad.abs().max()),
         imitation_forward_matches_inference=True,sonic_weight_gradients=False,
+        synthetic_arm_fit_baseline_max_error_rad=float(fitted.baseline_arm_error_rad.max()),
+        synthetic_arm_fit_final_max_error_rad=float(fitted.arm_error_rad.max()),
+        synthetic_arm_fit_other_body_max_change_rad=float(fitted.other_body_error_rad.max()),
+        synthetic_arm_fit_accepted=int(fitted.accepted.sum()),
         source_asset_mass_kg=asset['total_mass_kg'],asset_warnings=asset['warnings'],
         physics_validated=False,training_started=False)
     (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')

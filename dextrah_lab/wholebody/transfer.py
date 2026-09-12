@@ -19,13 +19,14 @@ class LatentFit:
     normalized_body_action: torch.Tensor
     arm_error_rad: torch.Tensor
     baseline_arm_error_rad: torch.Tensor
+    other_body_error_rad: torch.Tensor
     accepted: torch.Tensor
 
 
 def fit_teacher_arm_targets(sonic, proprio, reference_q, reference_qd, reference_ori6,
                            teacher_arm_targets, *, steps=80, learning_rate=.05,
                            tolerance_rad=.05, residual_penalty=1e-4,
-                           body_retention_weight=.1, max_residual=5.):
+                           body_retention_weight=.1, max_residual=5., body_retention_tolerance_rad=.05):
     """Fit residual labels by matching decoded SEVEN arm targets in radians.
 
     This does NOT compare the teacher's 13-vector with a 70-vector. Fingers
@@ -35,11 +36,13 @@ def fit_teacher_arm_targets(sonic, proprio, reference_q, reference_qd, reference
     independently per sample because straight-through FSQ loss is nonsmooth.
     """
     if steps < 1 or not all(math.isfinite(v) and v > 0 for v in
-        (learning_rate, tolerance_rad, max_residual)):
+        (learning_rate, tolerance_rad, max_residual, body_retention_tolerance_rad)):
         raise ValueError('Invalid fitting schedule')
     if not all(math.isfinite(v) and v >= 0 for v in (residual_penalty, body_retention_weight)):
         raise ValueError('Invalid fitting regularization')
     count = len(proprio)
+    if count<1:
+        raise ValueError('Cannot fit an empty state batch')
     if teacher_arm_targets.shape != (count, 7) or not torch.isfinite(teacher_arm_targets).all():
         raise ValueError('Expected finite seven-joint targets in radians')
     target = teacher_arm_targets.detach()
@@ -79,8 +82,10 @@ def fit_teacher_arm_targets(sonic, proprio, reference_q, reference_qd, reference
             residual.clamp_(-max_residual, max_residual)
     error = ((nominal+best_action*scales)[:, arm_ids]-target).abs().amax(-1)
     baseline_error = (baseline_targets[:, arm_ids]-target).abs().amax(-1)
+    other_error = ((nominal+best_action*scales)[:, other_ids]-baseline_targets[:, other_ids]).abs().amax(-1)
     return LatentFit(best.detach(), best_action.detach(), error.detach(),
-                     baseline_error.detach(), (error<=tolerance_rad).detach())
+                     baseline_error.detach(), other_error.detach(),
+                     ((error<=tolerance_rad)&(other_error<=body_retention_tolerance_rad)).detach())
 
 
 class TeacherInitializedAdapter(nn.Module):

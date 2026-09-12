@@ -43,7 +43,7 @@ for variant in ${DIAGNOSTIC_VARIANTS:-rigid rigid32 compliant32 no_self low_gain
         palm_geometry) extra+=(--mimic-frequency 0 --decompose-palms --diagnose-contacts) ;;
         *) printf 'Unknown diagnostic variant: %s\n' "$variant" >&2; exit 2 ;;
     esac
-    if python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
+    if timeout --signal=TERM --kill-after=15s 180s python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
         --output "outputs/coupling_${SLURM_JOB_ID}_${variant}" \
         --num-envs 4 --seconds 6 --exercise-hands "${extra[@]}"; then
         printf 'DIAGNOSTIC_PASS %s\n' "$variant"
