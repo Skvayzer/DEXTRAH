@@ -317,7 +317,15 @@ def main():
                     predicted,student_hidden=student(obs[:,None],task,tokens[:,None],student_hidden,task_active=live_task is not None)
                     last=predicted[:,0,:29]
                 if not torch.isfinite(last).all() or (last.abs()>20).any():
-                    raise ValueError('Student command is nonfinite or exceeds the SONIC action limit')
+                    np.savez_compressed(args.output/'rejected_action.npz',
+                        step=np.asarray(step),proprio=obs.detach().cpu().numpy(),
+                        task=task.detach().cpu().numpy(),action=predicted.detach().cpu().numpy(),
+                        joint_pos=robot.data.joint_pos.detach().cpu().numpy(),
+                        joint_vel=robot.data.joint_vel.detach().cpu().numpy(),
+                        root_state=robot.data.root_state_w.detach().cpu().numpy())
+                    raise ValueError(f'Student command rejected at step {step}: max normalized body magnitude '
+                        f'{float(last.abs().max())}; max joint speed {float(robot.data.joint_vel.abs().max())}. '
+                        'Saved rejected_action.npz; do not treat this as trained manipulation.')
             else:
                 last=model(obs,refq,refqd,ori) if model is not None else torch.zeros_like(last)
             target=q0.clone()
