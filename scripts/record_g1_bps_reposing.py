@@ -266,7 +266,10 @@ def main():
                     obs,reward,done,info=player.env_step(wrapped,action)
                     if args.capture_distillation and policy_record is not None:
                         policy_record['applied_joint_targets_after_step']=array(env._cur_targets[ids])
-                        policy_record['transition_valid']=array(~done.reshape(-1)[ids].bool())
+                        # rl_games may return done on CPU even when observations
+                        # and actions are CUDA tensors. Python index lists work
+                        # on either device; CUDA ids cannot index CPU done.
+                        policy_record['transition_valid']=array(~done.reshape(-1)[list(selected.values())].bool())
                     if not torch.isfinite(obs).all():
                         raise RuntimeError('Nonfinite observation')
                     terminal={k:array(v) for k,v in info['episode_final'].items()
