@@ -38,12 +38,12 @@ def load_sapg_actor(checkpoint, agent_path, sha256, device='cpu'):
             or network['mlp']['units']!=[1024,1024,512,512] or network['mlp']['activation']!='elu'):
         raise ValueError('SAPG recurrent feature architecture changed')
     groups=state['a2c_network.extra_params'].shape[0]
-    # Only the zero-entropy leader is queried. It must select row zero. Other
-    # synthetic coefficient IDs only instantiate correctly sized saved tensors;
-    # this helper must not be used to resume mixed-group SAPG training.
+    # Match the actual saved SAPG player's ordered IDs (50 -> 0). The zero-
+    # entropy leader is the LAST row, not row zero. Preserve all group shapes;
+    # this helper is not an optimizer/rollout resume implementation.
     model=model_builder.ModelBuilder().load(config).build(dict(actions_num=13,
         input_shape=(dim+32,),num_seqs=1,value_size=1,normalize_value=True,
-        normalize_input=True,type='extra_param',coef_ids=torch.arange(groups,device=device,dtype=torch.float32),coef_id_idx=dim)).to(device)
+        normalize_input=True,type='extra_param',coef_ids=torch.linspace(50.,0.,groups,device=device),coef_id_idx=dim)).to(device)
     model.load_state_dict(state,strict=True)
     model.eval().requires_grad_(False)
     return model
@@ -57,7 +57,10 @@ class SapgTaskFeatures(nn.Module):
         self.rnn=deepcopy(network.rnn.rnn)
         self.layer_norm=deepcopy(network.layer_norm)
         self.mlp=deepcopy(network.actor_mlp)
-        self.register_buffer('leader_embedding',network.extra_params[0].detach().clone())
+        leaders=torch.nonzero(network.param_ids==0,as_tuple=True)[0]
+        if len(leaders)!=1:
+            raise ValueError('SAPG source must have one zero-entropy leader')
+        self.register_buffer('leader_embedding',network.extra_params[int(leaders[0])].detach().clone())
         self.hidden_size=self.rnn.hidden_size
 
     def forward(self, normalized, hidden=None, episode_starts=None):

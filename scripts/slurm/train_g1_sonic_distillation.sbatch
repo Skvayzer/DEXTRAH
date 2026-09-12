@@ -17,7 +17,7 @@ export PYTHONPATH="$source_snapshot${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 PYTHONUNBUFFERED=1
 cd "$source_snapshot"
 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
-python -m pytest -q tests/test_sonic_student.py tests/test_sonic_bootstrap.py tests/test_teacher_data.py
+python -m pytest -q tests/test_sonic_student.py tests/test_sonic_bootstrap.py tests/test_teacher_data.py tests/test_sapg_features.py
 extra_args=()
 if [[ "${REUSE_SAPG_FEATURES:-0}" == 1 ]]; then
     extra_args+=(--reuse-sapg-features)

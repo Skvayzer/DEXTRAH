@@ -268,13 +268,16 @@ def main():
                 features,next_state=model.task_encoder(model.normalizer(raw[:,:224,None].transpose(1,2)),state)
                 copied=model.fingers(features[:,0])
                 expected=torch.as_tensor(capture['teacher_action'][ids,7:13],device=args.device)
-                torch.testing.assert_close(copied,expected,rtol=1e-5,atol=5e-5)
+                # Capture records the player's output, which already clips
+                # its Gaussian mean to the [-1,1] environment action range.
+                torch.testing.assert_close(copied.clamp(-1,1),expected,rtol=1e-5,atol=5e-5)
                 actual=sapg(dict(is_train=True,prev_actions=torch.zeros(len(ids),13,device=args.device),
                     obs=raw,rnn_states=state,seq_length=1))
                 torch.testing.assert_close(copied,actual['mus'][:,7:13],rtol=1e-5,atol=5e-5)
                 for a,b in zip(next_state,actual['rnn_states']):
                     torch.testing.assert_close(a,b,rtol=1e-5,atol=5e-5)
-            feature_report=dict(samples=len(ids),raw_finger_mean_max_error=float((copied-expected).abs().max()),
+            feature_report=dict(samples=len(ids),clipped_finger_max_error=float((copied.clamp(-1,1)-expected).abs().max()),
+                raw_mean_vs_source_model_max_error=float((copied-actual['mus'][:,7:13]).abs().max()),
                 copied_source_recurrence=True,source_arm_output_not_used_for_control=True,
                 source_task_weights_frozen_during_bootstrap=True)
             write_json(args.output/'sapg_feature_equivalence.json',feature_report)
