@@ -82,6 +82,7 @@ def main():
         contract['body_termination'] = cfg.sonic_body.to_dict()
         contract['nonfinite_state_handling'] = 'abort before rewards and terminal observations'
         contract['finite_numerical_failure_reward'] = 'unchanged source reward; separately logged true termination'
+        contract['touch_global_partners'] = 'enabled static collision shapes under /World/ground'
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
             wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',
@@ -196,15 +197,16 @@ def main():
     finally:
         (args.output/'training_result.json').write_text(json.dumps(report, indent=2))
         faulthandler.cancel_dump_traceback_later()
-        if env is not None:
-            env.close()
-        app.close()
-        # Kit's shutdown can replace Python's pending exception/exit status.
-        # A failed diagnostic must not appear as a successful Slurm completion.
+        # Kit shutdown can exit the process with status zero BEFORE returning
+        # from close(). On failure, preserve the report/W&B result and let the
+        # OS release CUDA resources without entering that shutdown path.
         if not report['completed']:
             import sys
             sys.stdout.flush(); sys.stderr.flush()
             os._exit(1)
+        if env is not None:
+            env.close()
+        app.close()
 
 
 if __name__ == '__main__':

@@ -13,7 +13,7 @@ from dextrah_lab.wholebody.actuators import body_motors
 from dextrah_lab.wholebody.contract import BODY_JOINTS, nominal_body_pose, joint_indices
 from dextrah_lab.wholebody.source_actions import apply_wholebody_action
 from dextrah_lab.wholebody.body_termination import classify_body_state, combine_terminations
-from dextrah_lab.wholebody.source_scene import floating_sonic_robot_scene
+from dextrah_lab.wholebody.source_scene import floating_sonic_robot_scene, ground_contact_partners
 from dextrah_lab.wholebody.timed_history import TimedSonicHistory
 from dextrah_lab.wholebody.task_contract import TASK_ACTOR_DIM, TASK_CRITIC_DIM, BODY_EXTRA_DIM, BANK_SHA256
 from .g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
@@ -33,6 +33,12 @@ class G1SonicTouchEnvCfg(G1Revo2TouchEnvCfg):
 
 
 class G1SonicTouchEnv(G1Revo2TouchEnv):
+    def _extra_touch_partners(self):
+        import isaaclab.sim as sim_utils
+        paths = ground_contact_partners(sim_utils.get_current_stage())
+        print('SONIC_TOUCH_GLOBAL_PARTNERS '+str(paths), flush=True)
+        return paths
+
     def _setup_scene(self):
         with floating_sonic_robot_scene():
             super()._setup_scene()

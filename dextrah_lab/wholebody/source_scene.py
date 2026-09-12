@@ -11,6 +11,20 @@ from .contract import BODY_JOINTS, nominal_body_pose
 from .teacher_bridge import RIGHT_ARM
 
 
+def ground_contact_partners(stage):
+    """Global static colliders aren't found by the source env-local body scan."""
+    from pxr import Usd, UsdPhysics
+    root = stage.GetPrimAtPath('/World/ground')
+    if not root.IsValid():
+        raise RuntimeError('Source ground is missing from the whole-body scene')
+    paths = [str(p.GetPath()) for p in Usd.PrimRange(root)
+             if p.HasAPI(UsdPhysics.CollisionAPI)
+             and UsdPhysics.CollisionAPI(p).GetCollisionEnabledAttr().Get()]
+    if not paths:
+        raise RuntimeError('No enabled ground collision shapes for fingertip contact filtering')
+    return paths
+
+
 def standing_reset_pose():
     pose = dict(zip(BODY_JOINTS, map(float, nominal_body_pose())))
     pose.update(dict.fromkeys(RIGHT_ARM, 0.))  # original manipulation reset
