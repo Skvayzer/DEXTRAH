@@ -1,5 +1,6 @@
 """Floating-base G1 + BOTH Revo2 hands; import only after AppLauncher."""
 from .actuators import body_motors
+from pathlib import Path
 from .contract import BODY_JOINTS, hand_joints, nominal_body_pose
 
 
@@ -14,7 +15,7 @@ def fullbody_robot_cfg(urdf, usd_dir):
     return ArticulationCfg(
         prim_path='{ENV_REGEX_NS}/Robot',
         spawn=sim.UrdfFileCfg(
-            asset_path=str(urdf), usd_dir=str(usd_dir), usd_file_name='g1_revo2.usd',
+            asset_path=str(Path(urdf).resolve()), usd_dir=str(Path(usd_dir).resolve()), usd_file_name='g1_revo2.usd',
             fix_base=False, merge_fixed_joints=True,
             convert_mimic_joints_to_normal_joints=False,
             self_collision=True, replace_cylinders_with_capsules=True,

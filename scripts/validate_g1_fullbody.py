@@ -26,6 +26,9 @@ def main():
     p.add_argument('--controller',choices=['sonic','pd'],default='sonic')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
+    # Isaac's URDF importer uses the export directory to author USD sublayers.
+    # A relative directory can generate broken /configuration/... references.
+    args.output=args.output.resolve()
     if args.num_envs < 1 or args.seconds < 2:
         raise ValueError('Invalid probe size/duration')
     if args.output.exists():
