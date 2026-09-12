@@ -105,7 +105,7 @@ def main():
             sorted([*project.glob('dextrah_lab/**/*.py'),
                     project/'scripts/record_g1_bps_reposing.py', Path(__file__).resolve(),
                     project/'scripts/render_g1_bps_reposing.py'])},
-        num_envs=1200, seconds=120., one_gpu=True, training_updates=0,
+        num_envs=1200, seconds=120., one_gpu=True, training_updates=0,case_timeout_seconds=1800,
         selection='Training-bank throughput with success/lift and stress regression guards; held-out not used for selection')
     args.output.mkdir(parents=True, exist_ok=True)
     manifest = args.output/'protocol.json'
@@ -132,7 +132,11 @@ def main():
             command = rollout_command(case, candidate, attempt, p2p)
             print('TEACHER_EVAL_START '+json.dumps(dict(index=index+1,total=27,case=case,output=str(attempt))),flush=True)
             with (directory/f'{attempt.name}.log').open('x') as log:
-                result = subprocess.run(command, cwd=project, stdout=log, stderr=subprocess.STDOUT)
+                try:
+                    result = subprocess.run(command, cwd=project, stdout=log, stderr=subprocess.STDOUT,
+                                            timeout=protocol['case_timeout_seconds'])
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError(f'Evaluation timed out; inspect {log.name}. No teacher selected.') from error
             if result.returncode:
                 raise RuntimeError(f'Evaluation failed ({result.returncode}); inspect {log.name}. No teacher selected.')
             report = validate_result(attempt, case, candidate)
