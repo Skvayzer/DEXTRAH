@@ -26,6 +26,7 @@ def main():
     p.add_argument('--controller',choices=['sonic','pd'],default='sonic')
     p.add_argument('--exercise-hands',action='store_true',help='Slowly close/open both hands to check native coupling')
     p.add_argument('--record-envs',type=int,default=4,help='Cap trace copying; physics checks still cover all environments')
+    p.add_argument('--no-physics-replication',action='store_true',help='Diagnose native constraint replication separately')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
     # Isaac's URDF importer uses the export directory to author USD sublayers.
@@ -72,7 +73,7 @@ def main():
         cfg.physx.gpu_total_aggregate_pairs_capacity=2**20
         cfg.physx.gpu_collision_stack_size=2**26
         sim=sim_utils.SimulationContext(cfg)
-        scene_cfg=InteractiveSceneCfg(num_envs=args.num_envs,env_spacing=3.,replicate_physics=True)
+        scene_cfg=InteractiveSceneCfg(num_envs=args.num_envs,env_spacing=3.,replicate_physics=not args.no_physics_replication)
         scene_cfg.ground=AssetBaseCfg(prim_path='/World/ground',spawn=sim_utils.GroundPlaneCfg())
         scene_cfg.robot=fullbody_robot_cfg(urdf,args.output/'usd')
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
@@ -217,6 +218,7 @@ def main():
             torch_peak_allocated_bytes=torch.cuda.max_memory_allocated())
         report['device_peak_used_bytes_sampled']=device_peak_used_bytes
         report['native_coupling_configuration']=coupling_config
+        report['replicate_physics']=not args.no_physics_replication
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:

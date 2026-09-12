@@ -19,6 +19,9 @@ extra_args=()
 if [[ "${EXERCISE_HANDS:-0}" == 1 ]]; then
     extra_args+=(--exercise-hands)
 fi
+if [[ "${NO_PHYSICS_REPLICATION:-0}" == 1 ]]; then
+    extra_args+=(--no-physics-replication)
+fi
 python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
     --output "outputs/fullbody_probe_${SLURM_JOB_ID}" \
     --num-envs "${NUM_ENVS:-4}" --seconds "${PROBE_SECONDS:-10}" "${extra_args[@]}"
