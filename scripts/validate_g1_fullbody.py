@@ -102,6 +102,9 @@ def main():
             velocity_iterations=args.velocity_iterations)
         scene_cfg.feet=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*ankle_roll_link',
             update_period=0.,history_length=1,debug_vis=False)
+        if args.diagnose_contacts:
+            scene_cfg.all_body_contacts=ContactSensorCfg(prim_path='{ENV_REGEX_NS}/Robot/.*',
+                update_period=0.,history_length=1,debug_vis=False)
         print('FULLBODY_PROBE building scene',flush=True)
         begin=time.monotonic()
         scene=InteractiveScene(scene_cfg)
@@ -217,6 +220,7 @@ def main():
         load_history=torch.zeros(50,args.num_envs,device=args.device)
         min_height=float('inf')
         max_coupling_error=0.
+        all_body_contact_peak=None
         device_peak_used_bytes=0
         hand_range=torch.zeros(args.num_envs,len(hand_ids),device=args.device)
         failure=None
@@ -257,6 +261,9 @@ def main():
                     forces=item['sensor'].data.force_matrix_w.norm(dim=-1).amax(dim=(0,1))
                     item['peak']=forces if item['peak'] is None else torch.maximum(item['peak'],forces)
                     item['net_peak']=max(item['net_peak'],float(item['sensor'].data.net_forces_w.norm(dim=-1).max()))
+                if args.diagnose_contacts:
+                    forces=scene['all_body_contacts'].data.net_forces_w.norm(dim=-1).amax(0)
+                    all_body_contact_peak=forces if all_body_contact_peak is None else torch.maximum(all_body_contact_peak,forces)
             values=dict(root_state=robot.data.root_state_w,joint_pos=robot.data.joint_pos,
                 joint_vel=robot.data.joint_vel,targets=target,
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
@@ -331,6 +338,9 @@ def main():
             zip(item['partners'],item['peak'].cpu()) if force>.01}
             for name,item in contact_diagnostics.items()}
         report['finger_net_contact_peak_n']={name:item['net_peak'] for name,item in contact_diagnostics.items()}
+        if all_body_contact_peak is not None:
+            report['all_body_contact_peak_n']={name:float(force) for name,force in
+                zip(scene['all_body_contacts'].body_names,all_body_contact_peak.cpu()) if force>.01}
         if teacher_reference is not None:
             wrist_error=np.linalg.norm(arrays['wrist_pose'][...,:3]-arrays['reference_wrist_pose'][...,:3],axis=-1)
             report.update(reference=str(args.reference.resolve()),
