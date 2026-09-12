@@ -19,6 +19,9 @@ extra_args=()
 if [[ "${EXERCISE_HANDS:-0}" == 1 ]]; then
     extra_args+=(--exercise-hands)
 fi
+if [[ "${FULL_HAND_RANGE:-0}" == 1 ]]; then
+    extra_args+=(--full-hand-range)
+fi
 if [[ "${NO_PHYSICS_REPLICATION:-0}" == 1 ]]; then
     extra_args+=(--no-physics-replication)
 fi

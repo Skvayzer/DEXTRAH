@@ -25,6 +25,7 @@ def main():
     p.add_argument('--seconds',type=float,default=10.)
     p.add_argument('--controller',choices=['sonic','pd'],default='sonic')
     p.add_argument('--exercise-hands',action='store_true',help='Slowly close/open both hands to check native coupling')
+    p.add_argument('--full-hand-range',action='store_true',help='Exercise 90 percent of each motor range at 0.15 Hz, not only 0.5 rad')
     p.add_argument('--record-envs',type=int,default=4,help='Cap trace copying; physics checks still cover all environments')
     p.add_argument('--no-physics-replication',action='store_true',help='Diagnose native constraint replication separately')
     p.add_argument('--mimic-frequency',type=float,default=100.,help='Hz; zero tests the non-compliant native constraint')
@@ -53,6 +54,10 @@ def main():
     args.output=args.output.resolve()
     if args.num_envs < 1 or args.seconds < 2 or args.record_envs<1:
         raise ValueError('Invalid probe size/duration')
+    if args.full_hand_range and not args.exercise_hands:
+        raise ValueError('--full-hand-range requires --exercise-hands')
+    if min(args.tracking_rms_tolerance,args.tracking_max_tolerance)<=0:
+        raise ValueError('Tracking tolerances must be positive')
     if args.diagnose_contacts and args.num_envs > 16:
         raise ValueError('Per-pair contact diagnostics are restricted to <=16 environments')
     if args.output.exists():
@@ -190,6 +195,13 @@ def main():
         if len(rigid)<50:
             raise ValueError('Unexpectedly reduced robot rigid-body count')
         q0=robot.data.default_joint_pos.clone()
+        if args.full_hand_range:
+            import xml.etree.ElementTree as ET
+            joints={j.get('name'):j for j in ET.parse(urdf).getroot().findall('joint')}
+            hand_upper=q0.new_tensor([float(joints[robot.joint_names[i]].find('limit').get('upper')) for i in hand_ids])
+            hand_amplitude=.9*(hand_upper-q0[:,hand_ids])
+        else:
+            hand_amplitude=.5
         root=robot.data.default_root_state.clone()
         root[:,:3]+=scene.env_origins
         robot.write_root_pose_to_sim(root[:,:7])
@@ -259,7 +271,8 @@ def main():
             target[:,body_ids]=q0[:,body_ids]+last*scales
             target[:,hand_ids]=q0[:,hand_ids]
             if args.exercise_hands:
-                target[:,hand_ids]+=.25*(1-np.cos(2*np.pi*.3*step*CONTROL_DT))
+                frequency=.15 if args.full_hand_range else .3
+                target[:,hand_ids]+=hand_amplitude*.5*(1-np.cos(2*np.pi*frequency*step*CONTROL_DT))
             robot.set_joint_position_target(target)
             for _ in range(round(CONTROL_DT/physics_dt)):
                 scene.write_data_to_sim()
@@ -327,6 +340,7 @@ def main():
             foot_load_over_weight_min=float(ratio.min()),foot_load_over_weight_max=float(ratio.max()),
             min_pelvis_height_m=min_height,recorded_envs=record_n,
             hand_exercise=args.exercise_hands,all_independent_fingers_moved=hands_moved,
+            full_hand_range_exercise=args.full_hand_range,
             max_native_coupling_error_rad=max_coupling_error,native_coupling_passed=coupling_passed,
             standing_probe_passed=standing,failure=failure,physics_import_validated=True,
             full_m0_validated=False,training_started=False,optimizer_memory_measured=False,
