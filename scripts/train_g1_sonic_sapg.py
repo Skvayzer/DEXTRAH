@@ -28,6 +28,8 @@ def main():
     p.add_argument('--continuous', action='store_true')
     p.add_argument('--resume', type=Path)
     p.add_argument('--wandb', choices=['online', 'disabled'], default='online')
+    p.add_argument('--numerical-failure-mode', choices=['reset', 'abort'], default='reset',
+                   help='Finite extreme joint speeds reset that environment; non-finite states always abort')
     p.add_argument('--diagnostic-capture-seconds', type=float, default=0.,
                    help='Opt-in physics-state ring buffer for reproducing a numerical failure')
     AppLauncher.add_app_launcher_args(p)
@@ -67,6 +69,7 @@ def main():
         if revision != P2P_REVISION:
             raise ValueError('Pinned Play2Perfect revision changed')
         cfg, contract = source_task_config(args.output, args.num_envs, args.device)
+        cfg.sonic_body.numerical_failure_mode = args.numerical_failure_mode
         agent = load_yaml(Path(TOUCH_RUN)/'params/agent.yaml')
         with args.bootstrap.open('rb') as f:
             bootstrap_sha = hashlib.file_digest(f, 'sha256').hexdigest()
@@ -76,6 +79,9 @@ def main():
             new_body_exploration_std_rad=.025, fresh_optimizers_for_architecture_migration=True,
             continuous=args.continuous, periodic_evaluation=False,
             source_training_transitions=17364025344, source_commit=report['source_commit'])
+        contract['body_termination'] = cfg.sonic_body.to_dict()
+        contract['nonfinite_state_handling'] = 'abort before rewards and terminal observations'
+        contract['finite_numerical_failure_reward'] = 'unchanged source reward; separately logged true termination'
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
             wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',

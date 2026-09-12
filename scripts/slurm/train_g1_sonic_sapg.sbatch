@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=g1_sonic_sapg
 #SBATCH --partition=batch
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:rtx_6000_ada:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=02:00:00
@@ -20,6 +20,9 @@ unset DISPLAY
 cd "$source_snapshot"
 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
 extra_args=()
+if [[ -n "${NUMERICAL_FAILURE_MODE:-}" ]]; then
+    extra_args+=(--numerical-failure-mode "$NUMERICAL_FAILURE_MODE")
+fi
 if [[ "${CONTINUOUS:-0}" == 1 ]]; then extra_args+=(--continuous); fi
 if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then extra_args+=(--resume "$RESUME_CHECKPOINT"); fi
 if [[ -n "${DIAGNOSTIC_CAPTURE_SECONDS:-}" ]]; then

@@ -38,6 +38,10 @@ class SonicTransferObserver(AlgoObserver):
             tactile_normal_mean_n=float(env.touch_raw[..., 0].mean()),
             tactile_shear_mean_n=float(env.touch_raw[..., 1:].norm(dim=-1).mean()),
             tactile_valid_fraction=float(env.touch_model.valid.float().mean()),
+            body_falls_total=int(env._body_falls_total),
+            numerical_failures_total=int(env._body_numerical_failures_total),
+            numerical_failures_per_million_transitions=1e6*float(env._body_numerical_failures_total)/max(env._body_checked_transitions, 1),
+            maximum_joint_speed_seen_rad_s=float(env._body_max_joint_speed),
             tolerance=env._current_success_tolerance,
             pelvis_height_mean_m=float((env.robot.data.root_pos_w[:, 2]-env.scene.env_origins[:, 2]).mean()))
         for key, value in data.items():

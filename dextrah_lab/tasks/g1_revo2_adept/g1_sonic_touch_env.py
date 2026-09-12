@@ -12,6 +12,7 @@ from isaacsimenvs.tasks.play.utils.action_utils import apply_action_pipeline, ap
 from dextrah_lab.wholebody.actuators import body_motors
 from dextrah_lab.wholebody.contract import BODY_JOINTS, nominal_body_pose, joint_indices
 from dextrah_lab.wholebody.source_actions import apply_wholebody_action
+from dextrah_lab.wholebody.body_termination import classify_body_state, combine_terminations
 from dextrah_lab.wholebody.source_scene import floating_sonic_robot_scene
 from dextrah_lab.wholebody.timed_history import TimedSonicHistory
 from dextrah_lab.wholebody.task_contract import TASK_ACTOR_DIM, TASK_CRITIC_DIM, BODY_EXTRA_DIM, BANK_SHA256
@@ -22,6 +23,8 @@ from .g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
 class SonicBodyCfg:
     minimum_pelvis_height: float = .4
     minimum_upright_cosine: float = .5
+    maximum_joint_speed: float = 1000.
+    numerical_failure_mode: str = 'abort'  # diagnostic default; trainer selects reset explicitly
 
 
 @configclass
@@ -66,6 +69,11 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._body_extra_step = None
         self._body_extra = None
         self._body_fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._body_numerical_failure = torch.zeros_like(self._body_fallen)
+        self._body_falls_total = torch.zeros((), dtype=torch.long, device=self.device)
+        self._body_numerical_failures_total = torch.zeros_like(self._body_falls_total)
+        self._body_max_joint_speed = torch.zeros((), device=self.device)
+        self._body_checked_transitions = 0
         self._reference_q = self.robot.data.default_joint_pos[:, self._body_ids, None].transpose(1, 2).expand(-1, 10, -1).clone()
         self._reference_qd = torch.zeros_like(self._reference_q)
         self._reference_heading = torch.tensor(cfg.assets.robot_init_rot, device=self.device).expand(self.num_envs, -1)
@@ -119,20 +127,26 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         return {k: torch.cat((v, extra), -1) for k, v in source.items()}
 
     def _get_dones(self):
+        data, cfg = self.robot.data, self.cfg.sonic_body
+        self._body_fallen, self._body_numerical_failure, speed = classify_body_state(
+            data.joint_pos, data.joint_vel, data.root_state_w, data.projected_gravity_b,
+            self.scene.env_origins, self.object.data.root_state_w,
+            minimum_height=cfg.minimum_pelvis_height,
+            minimum_upright=cfg.minimum_upright_cosine,
+            maximum_joint_speed=cfg.maximum_joint_speed,
+            numerical_failure_mode=cfg.numerical_failure_mode)
+        self._body_falls_total += self._body_fallen.sum()
+        self._body_numerical_failures_total += self._body_numerical_failure.sum()
+        self._body_max_joint_speed = torch.maximum(self._body_max_joint_speed, speed.max())
+        self._body_checked_transitions += self.num_envs
         task_terminated, truncated = super()._get_dones()
-        speed = self.robot.data.joint_vel.abs().amax()
-        if not torch.isfinite(speed) or speed > 1000:
-            raise RuntimeError(f'Numerically invalid articulation: maximum joint speed {float(speed)} rad/s')
-        height = self.robot.data.root_pos_w[:, 2]-self.scene.env_origins[:, 2]
-        upright = -self.robot.data.projected_gravity_b[:, 2]
-        self._body_fallen = ((height < self.cfg.sonic_body.minimum_pelvis_height) |
-                            (upright < self.cfg.sonic_body.minimum_upright_cosine))
         # A robot fall is NOT the source task's object-fall metric.
-        return task_terminated | self._body_fallen, truncated & ~self._body_fallen
+        return combine_terminations(task_terminated, truncated, self._body_fallen, self._body_numerical_failure)
 
     def _get_rewards(self):
         reward = super()._get_rewards()  # exact original manipulation reward
         self.extras['episode_final']['robot_fall'] = self._body_fallen.float()
+        self.extras['episode_final']['numerical_failure'] = self._body_numerical_failure.float()
         if 'final_observation' in self.extras:
             final = self.extras['final_observation']
             final['critic'] = torch.cat((final['critic'], self._wholebody_observation()), -1)
@@ -153,3 +167,4 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._last_body_action[ids] = (self._cur_targets[ids][:, self._body_ids]-self._body_nominal)/self._body_scales
         self._wholebody_action_queue[ids] = 0
         self._body_fallen[ids] = False
+        self._body_numerical_failure[ids] = False
