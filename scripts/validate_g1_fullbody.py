@@ -38,6 +38,7 @@ def main():
     p.add_argument('--diagnose-contacts',action='store_true',help='Identify thumb/index self-contact partners in a small probe')
     p.add_argument('--contact-offset',type=float,default=None,help='Diagnostic robot contact generation distance, metres')
     p.add_argument('--convex-decomposition',action='store_true',help='Diagnose convex-hull self-contact artifacts using closer collision geometry')
+    p.add_argument('--reference',type=Path,help='Audited aligned teacher reference NPZ; tracking-only test without objects')
     p.add_argument('--disable-self-collisions',action='store_true',help='Diagnostic ONLY; never a manipulation-ready result')
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -71,6 +72,7 @@ def main():
         from dextrah_lab.wholebody.importer import configure_native_mimics
         from dextrah_lab.wholebody.contract import BODY_JOINTS, hand_joints, joint_indices, PHYSICS_DT, CONTROL_DT
         from dextrah_lab.wholebody.sonic import FrozenSonic, SonicHistory
+        from dextrah_lab.wholebody.teacher_bridge import future_body_reference
         torch.set_num_threads(2)
         torch.manual_seed(42)
         urdf=args.output/'g1_revo2_fullbody.urdf'
@@ -182,12 +184,33 @@ def main():
         robot.write_joint_state_to_sim(q0,torch.zeros_like(q0))
         robot.set_joint_position_target(q0)
         scene.reset()
+        teacher_reference=None
+        if args.reference:
+            manifest=json.loads((args.reference.parent/'manifest.json').read_text())
+            entries=[item for item in manifest['references'] if item['file']==args.reference.name]
+            if len(entries)!=1 or entries[0]['limit_violations'] or not entries[0]['same_robot_kinematic_alignment']:
+                raise ValueError('Reference must have passed the explicit kinematic audit')
+            if entries[0]['body_joint_order']!=list(BODY_JOINTS):
+                raise ValueError('Reference body order mismatch')
+            with np.load(args.reference,allow_pickle=False) as archive:
+                teacher_reference=dict(archive)
+            if not np.allclose(teacher_reference['root_pose'],[0.,0.,.76,1.,0.,0.,0.],atol=1e-6):
+                raise ValueError('This first tracking probe requires the nominal world-root reference')
+            initial=q0.clone()
+            initial[:,body_ids]=torch.as_tensor(teacher_reference['body_q'][0],device=args.device,dtype=q0.dtype)
+            robot.write_joint_state_to_sim(initial,torch.zeros_like(initial))
+            robot.set_joint_position_target(initial)
+            scene.reset()
         history=SonicHistory(args.num_envs,args.device)
         last=torch.zeros(args.num_envs,29,device=args.device)
         refq=q0[:,body_ids,None].transpose(1,2).repeat(1,10,1)
         refqd=torch.zeros_like(refq)
         scales=torch.tensor([m.action_scale for m in body_motors().values()],device=args.device)
         records={k:[] for k in ('root_state','joint_pos','joint_vel','targets','foot_force','normalized_action')}
+        if teacher_reference is not None:
+            records.update({k:[] for k in ('sonic_proprio','reference_q','reference_qd','reference_ori6',
+                'wrist_pose','reference_wrist_pose','reference_time_s')})
+            wrist_id=robot.body_names.index('right_wrist_yaw_link')
         record_n=min(args.record_envs,args.num_envs)
         load_history=torch.zeros(50,args.num_envs,device=args.device)
         min_height=float('inf')
@@ -206,6 +229,17 @@ def main():
             # the CURRENT pelvis yaw, never its full roll/pitch orientation.
             ori=matrix_from_quat(quat_conjugate(yaw_quat(robot.data.root_quat_w)))[:,:,:2]
             ori=ori.reshape(args.num_envs,1,6).repeat(1,10,1)
+            if teacher_reference is not None:
+                # First second is a stationary settling reference. Afterwards
+                # follow a planned successful teacher segment (not live future
+                # student states); fingers remain neutral in this body-only test.
+                reference_time=max(0.,step*CONTROL_DT-1.)
+                rq,rqd,_=future_body_reference(teacher_reference,reference_time)
+                if step*CONTROL_DT<1.:
+                    rq[:]=teacher_reference['body_q'][0]
+                    rqd[:]=0.
+                refq=torch.as_tensor(rq,device=args.device,dtype=q0.dtype)[None].repeat(args.num_envs,1,1)
+                refqd=torch.as_tensor(rqd,device=args.device,dtype=q0.dtype)[None].repeat(args.num_envs,1,1)
             last=model(obs,refq,refqd,ori) if model is not None else torch.zeros_like(last)
             target=q0.clone()
             target[:,body_ids]=q0[:,body_ids]+last*scales
@@ -224,6 +258,15 @@ def main():
             values=dict(root_state=robot.data.root_state_w,joint_pos=robot.data.joint_pos,
                 joint_vel=robot.data.joint_vel,targets=target,
                 foot_force=scene['feet'].data.net_forces_w,normalized_action=last)
+            if teacher_reference is not None:
+                from dextrah_lab.wholebody.reference import _retime_pose
+                query=min(reference_time+CONTROL_DT,teacher_reference['time_s'][-1])
+                reference_wrist=_retime_pose(teacher_reference['time_s'],teacher_reference['wrist_pose'],np.array([query]))[0]
+                values.update(sonic_proprio=obs,reference_q=refq,reference_qd=refqd,reference_ori6=ori,
+                    wrist_pose=torch.cat((robot.data.body_pos_w[:,wrist_id]-scene.env_origins,
+                                          robot.data.body_quat_w[:,wrist_id]),-1),
+                    reference_wrist_pose=torch.as_tensor(reference_wrist,device=args.device,dtype=q0.dtype)[None].repeat(args.num_envs,1),
+                    reference_time_s=torch.full((args.num_envs,),reference_time,device=args.device))
             for key,value in values.items():
                 records[key].append(value[:record_n].detach().cpu().numpy().copy())
             load_history[step%50]=values['foot_force'][...,2].sum(-1)
@@ -285,6 +328,13 @@ def main():
             zip(item['partners'],item['peak'].cpu()) if force>.01}
             for name,item in contact_diagnostics.items()}
         report['finger_net_contact_peak_n']={name:item['net_peak'] for name,item in contact_diagnostics.items()}
+        if teacher_reference is not None:
+            wrist_error=np.linalg.norm(arrays['wrist_pose'][...,:3]-arrays['reference_wrist_pose'][...,:3],axis=-1)
+            report.update(reference=str(args.reference.resolve()),
+                reference_type='aligned successful SAPG segment; body tracking only, neutral fingers and no objects',
+                recorded_wrist_error_rms_m=float(np.sqrt(np.mean(wrist_error**2))),
+                recorded_wrist_error_max_m=float(wrist_error.max()),
+                grasping_validated=False)
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
         if not standing or not coupling_passed or hands_moved is False:
