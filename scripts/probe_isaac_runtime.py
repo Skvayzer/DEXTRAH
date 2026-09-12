@@ -65,8 +65,11 @@ def main():
                 raise ValueError(f'Cube did not settle on ground: z={z}')
             stage('passed',z=z)
         finally:
-            faulthandler.cancel_dump_traceback_later()
+            if 'sim' in locals():
+                sim.clear_all_callbacks()
+                sim.clear_instance()
             app.close()
+            faulthandler.cancel_dump_traceback_later()
 
 
 if __name__=='__main__':

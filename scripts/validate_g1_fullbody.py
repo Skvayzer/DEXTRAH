@@ -179,8 +179,14 @@ def main():
         if not standing:
             raise RuntimeError('Standing probe failed; see saved trace. Do not launch manipulation training.')
     finally:
-        faulthandler.cancel_dump_traceback_later()
+        # This workstation's IsaacLab stop callback deliberately renders until
+        # play resumes. Unsubscribe it before App.close(), otherwise shutdown
+        # hangs and can hide the ORIGINAL validation exception.
+        if 'sim' in locals():
+            sim.clear_all_callbacks()
+            sim.clear_instance()
         app.close()
+        faulthandler.cancel_dump_traceback_later()
 
 
 if __name__=='__main__':
