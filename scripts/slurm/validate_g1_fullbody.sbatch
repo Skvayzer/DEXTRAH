@@ -30,6 +30,7 @@ case "${HAND_PHYSICS_PRESET:-original}" in
     thumb_pair_diagnostic) extra_args+=(--mimic-frequency 0 --filter-thumb-housing) ;;
     palm_decomposition) extra_args+=(--mimic-frequency 0 --decompose-palms --palm-shrink-wrap --contact-offset 0.001) ;;
     palm_decomposition16) extra_args+=(--mimic-frequency 0 --decompose-palms --palm-shrink-wrap --contact-offset 0.001 --position-iterations 16) ;;
+    palm_decomposition32) extra_args+=(--mimic-frequency 0 --decompose-palms --palm-shrink-wrap --contact-offset 0.001 --position-iterations 32) ;;
     *) printf 'Unknown HAND_PHYSICS_PRESET\n' >&2; exit 2 ;;
 esac
 if [[ -n "${TEACHER_REFERENCE:-}" ]]; then

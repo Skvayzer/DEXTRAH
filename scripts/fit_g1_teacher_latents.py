@@ -35,6 +35,8 @@ def main():
     p.add_argument('--samples',type=int,default=64)
     p.add_argument('--steps',type=int,default=120)
     p.add_argument('--batch-size',type=int,default=16)
+    p.add_argument('--max-residual',type=float,default=5.,help='Unscaled latent-action fit bound, not a new deployed action limit')
+    p.add_argument('--learning-rate',type=float,default=.05)
     p.add_argument('--device',default='cpu')
     args=p.parse_args()
     if not os.environ.get('SLURM_JOB_ID'):
@@ -72,7 +74,8 @@ def main():
         tensors=[torch.as_tensor(trace[key][ids,0],dtype=torch.float32,device=args.device)
                  for key in ('sonic_proprio','reference_q','reference_qd','reference_ori6')]
         targets=torch.as_tensor(labels['right_arm_targets'][ids],dtype=torch.float32,device=args.device)
-        fit=fit_teacher_arm_targets(sonic,*tensors,targets,steps=args.steps)
+        fit=fit_teacher_arm_targets(sonic,*tensors,targets,steps=args.steps,
+            max_residual=args.max_residual,learning_rate=args.learning_rate)
         for key,value in vars(fit).items():
             result.setdefault(key,[]).append(value.cpu().numpy())
         print(f'Fitted {min(offset+args.batch_size,len(selected))}/{len(selected)} real-state targets',flush=True)
@@ -81,6 +84,8 @@ def main():
         source_reference=str(reference_path),source_reference_sha256=checksum(reference_path),
         teacher_checkpoint_sha256=meta['checkpoint_sha256'],sonic_checkpoint_sha256=WEIGHTS_SHA256,
         source_teacher_trace_sha256=manifest['source_trace_sha256'],samples=len(selected),steps=args.steps,
+        max_residual=args.max_residual,learning_rate=args.learning_rate,
+        prequantization_residual_scale=.1,
         accepted_labels=int(result['accepted'].sum()),
         arm_error_median_rad=float(np.median(result['arm_error_rad'])),
         arm_error_max_rad=float(result['arm_error_rad'].max()),
