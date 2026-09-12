@@ -39,6 +39,15 @@ def main():
     torch.testing.assert_close(base,zero,atol=1e-6,rtol=1e-6)
     torch.manual_seed(42)
     changed=model(obs,q,qd,ori,torch.randn(n,64))
+    # Verify the actual released FSQ's surrogate gradient, not just a mock
+    # decoder. These are synthetic interface tests, NOT grasping training.
+    residual=torch.randn(n,64,requires_grad=True)
+    differentiable=model.decode_for_imitation(obs,q,qd,ori,residual)
+    inference=model(obs,q,qd,ori,residual.detach())
+    torch.testing.assert_close(differentiable,inference,atol=1e-6,rtol=1e-6)
+    differentiable.square().mean().backward()
+    assert residual.grad is not None and torch.isfinite(residual.grad).all() and residual.grad.abs().max()>0
+    assert all(parameter.grad is None for parameter in model.parameters())
     model.train(True)
     assert not model.training and not model.actor.training
     assert not any(p.requires_grad for p in model.parameters())
@@ -46,6 +55,8 @@ def main():
         zero_residual_max_error=float((base-zero).abs().max()),
         nonzero_residual_max_action_change=float((changed-base).abs().max()),
         finite_outputs=bool(torch.isfinite(changed).all()),body_actions=29,latent=64,
+        imitation_gradient_verified=True,residual_gradient_max=float(residual.grad.abs().max()),
+        imitation_forward_matches_inference=True,sonic_weight_gradients=False,
         source_asset_mass_kg=asset['total_mass_kg'],asset_warnings=asset['warnings'],
         physics_validated=False,training_started=False)
     (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')

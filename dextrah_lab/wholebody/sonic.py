@@ -120,8 +120,7 @@ class FrozenSonic(nn.Module):
             raise ValueError('Tokenizer packing mismatch')
         return dict(actor_obs=proprio[:,None,:],tokenizer=tokenizer[:,None,:])
 
-    @torch.no_grad()
-    def forward(self, proprio, reference_q, reference_qd, reference_ori6, residual=None):
+    def _decode(self, proprio, reference_q, reference_qd, reference_ori6, residual=None):
         obs = self.observations(proprio,reference_q,reference_qd,reference_ori6)
         kwargs = {}
         if residual is not None:
@@ -132,6 +131,23 @@ class FrozenSonic(nn.Module):
         if action.shape != (proprio.shape[0],29) or not torch.isfinite(action).all():
             raise ValueError('Invalid SONIC body command')
         return action
+
+    @torch.no_grad()
+    def forward(self, proprio, reference_q, reference_qd, reference_ori6, residual=None):
+        return self._decode(proprio, reference_q, reference_qd, reference_ori6, residual)
+
+    def decode_for_imitation(self, proprio, reference_q, reference_qd, reference_ori6, residual):
+        """Frozen weights, gradients ONLY through the proposed latent correction.
+
+        The released FSQ provides a straight-through gradient approximation.
+        Forward outputs still use real quantized codes. This is offline action
+        fitting, not differentiable physics, and must be checked on the actual
+        forward loss: surrogate gradients cannot guarantee reachable targets.
+        """
+        if any(p.requires_grad for p in self.parameters()):
+            raise RuntimeError('SONIC weights must remain frozen during imitation')
+        return self._decode(proprio.detach(), reference_q.detach(), reference_qd.detach(),
+                            reference_ori6.detach(), residual)
 
 
 class SonicHistory:
