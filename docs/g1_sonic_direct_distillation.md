@@ -4,6 +4,66 @@ User decision, 2026-09-12. **This supersedes the frozen-decoder / 64-value
 latent-adapter route.** Historical adapter experiments remain reproducible but
 are not prerequisites for the new route.
 
+## Current training configuration (supersedes historical development details below)
+
+On September 12, after viewing the recorded attempt, the user authorized
+continuous full-body SAPG training. Slurm **513** was submitted with **12,288
+environments**, six groups of 2,048, one RTX 6000 Ada and a 48-hour allocation.
+Startup/optimizer verification is recorded in the run's `progress.json`;
+submission by itself is not evidence of successful training.
+
+- The teacher is now the **completed BPS-128 + 70 Hz touch run 383**, checkpoint
+  `complete_17364025344.pth`, SHA-256
+  `ed9b26a7ba335c25f15df6623c8e0a97f6d5b3285721ae7f8263f82d6227d2cd`.
+  This is an explicit reuse choice, not a tactile-ablation winner.
+- Initialize the body/task projection from **touch-derived bootstrap 503**,
+  `best_student.pt`, SHA-256
+  `05a1f2af6dd0781bd37b548ec8671e02c7ab20acc9344f64ca0b92451ff08302`.
+  It uses four original-rate object clips and a kinematic body lift plus
+  standing rehearsal; offline imitation is not whole-body manipulation success.
+- Copy the source LSTM, MLP, all six exploration embeddings and six finger
+  output rows. The SONIC body decoder, task projection and copied task/finger
+  modules all fine-tune. The SONIC reference encoder remains frozen. Fresh
+  actor/critic optimizers are necessary for the 13-to-35-action migration.
+- **Use the actual original Play2Perfect task**, inherited through BPS/touch,
+  not the earlier `LiveClipTask`. Original rewards, goal/keypoint logic,
+  tolerance, reset noise, delay/DR, 1,200-object bank and finger EMA/PD targets
+  are retained. The full floating robot has 51 joints and 68 rigid bodies.
+- **120 Hz physics, 60 Hz policy, 70 Hz tactile acquisition/publication**.
+  Actual body history is resampled causally at SONIC's 20 ms history spacing.
+  Right fingers use the original independent follower-target drives, not the
+  native mimic constraints tested in older probes. No fabrics/PCA or arm-torque
+  observation is added.
+- Whole-body physics is necessarily different from the fixed-arm teacher:
+  gravity, feet, SONIC body drives and robot-fall termination are added. The
+  old fixed torso proxy is removed; with self-collision still OFF, this does
+  **not preserve its arm-to-torso collision pairs**. Dynamic torso geometry
+  alone does not restore internal collision avoidance. This remains a known
+  fidelity limitation, not a claim of collision-identical transfer.
+- Ordinary falls are episode failures. Recorded attempt 509 additionally
+  showed a finite index-joint speed outlier around 1,254 rad/s. Training now
+  terminates **only the affected environment** above 1,000 rad/s, logs this
+  separately, and keeps the original reward function. It does not clamp or
+  repair physical states. Non-finite states still abort before rewards or
+  terminal critic observations. Diagnostic abort mode remains available.
+  Resetting these cases enables an exploratory run; it does not prove that
+  their underlying numerical cause is fixed.
+- Actual six-group SAPG, source learning rates and update settings; best
+  checkpoint by leader training return, plus atomic latest checkpoints every
+  64 updates. No periodic evaluation orchestration, no frame/epoch cap;
+  Slurm's 48-hour wall limit remains, with an advance checkpoint signal.
+- Source snapshot **d53e533**; CPU job **512: 44 tests passed**, including
+  source finger delay/EMA/follower parity, recurrent/normalizer checks and
+  per-environment numerical termination/non-finite rejection. These tests do
+  not establish learned success or long-run simulator stability.
+
+Output: `outputs/0_sonic_sapg_touch_513` on the workstation.
+[Online W&B run](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_513).
+
+The sections below describe the original route-2 design and earlier experiments;
+their 50/200 Hz clocks, BPS-only teacher and native-coupling assumptions are
+historical, not the current training defaults.
+
 ## Controller
 
 - Initialize the 29-output dynamic body decoder from the pinned SONIC bundle.

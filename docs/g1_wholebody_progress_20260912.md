@@ -1,5 +1,22 @@
 # Whole-body SAPG implementation — 2026-09-12
 
+## Latest update: continuous training launch
+
+User reviewed the failure recording and authorized training. **Job 513** was
+submitted with 12,288 full-body environments, one Ada 6000, online W&B and a
+48-hour allocation. Source commit `d53e533`; **44 targeted tests passed** in
+job 512. It reuses touch teacher 383 via bootstrap 503, with the original
+120 Hz physics / 60 Hz task and 70 Hz touch. Finite extreme joint speeds now
+reset only that environment and are logged separately; non-finite states
+still abort. Ordinary falls are learnable episode outcomes.
+
+See the authoritative current configuration and caveats at the top of
+[direct distillation](g1_sonic_direct_distillation.md). Actual startup/update
+evidence is in `outputs/0_sonic_sapg_touch_513/progress.json`, not implied by
+submission. No successful whole-body manipulation has been established.
+
+## Historical progress notes (superseded where they conflict with the update above)
+
 Current architecture: **route 2, trainable SONIC body decoder**, explicitly
 requested by the user. See [direct distillation](g1_sonic_direct_distillation.md).
 The frozen-decoder architecture below is historical and superseded. Teacher
