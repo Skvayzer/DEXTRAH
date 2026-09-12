@@ -38,6 +38,7 @@ def main():
     p.add_argument('--object-seed',type=int,default=42)
     p.add_argument('--wrench-multiplier',type=float,default=1.)
     p.add_argument('--capture-reference',action='store_true',help='Also retain 60 Hz achieved motion and held joint targets for offline reference construction')
+    p.add_argument('--capture-distillation',action='store_true',help='Opt-in exact pre-action observations, recurrent states, teacher actions and transition validity')
     p.add_argument('--families',nargs='+',default=['hammer','spatula','brush','eraser'])
     AppLauncher.add_app_launcher_args(p)
     args=p.parse_args()
@@ -49,6 +50,8 @@ def main():
         raise ValueError('Invalid wrench multiplier')
     if args.capture_reference and args.metrics_only:
         raise ValueError('Reference capture requires selected recording environments')
+    if args.capture_distillation and not args.capture_reference:
+        raise ValueError('Distillation capture requires full-policy-rate reference capture')
     args.headless=True
     app=AppLauncher(args).app
     # Disable ONLY the interactive STOP-event wait in this headless process.
@@ -184,6 +187,12 @@ def main():
                 domain_randomization='Saved delays/noise/reset variation; object wrench magnitudes multiplied by '+str(args.wrench_multiplier),
                 reference_target_semantics='Previous applied position target at pre-step state; achieved positions/velocities recorded separately',
                 reference_dt=dt if args.capture_reference else None)
+            metadata.update(capture_distillation=args.capture_distillation,
+                action_joint_names=list(env._joint_names_canonical),
+                observation_semantics='Exact wrapped PRE-ACTION observation; includes SAPG coefficient column',
+                policy_action_semantics='Player output at same pre-action state, before environment delay/filter',
+                applied_target_semantics='POST-step applied position targets; invalid on auto-reset transitions',
+                action_clip=float(agent['params']['env']['clip_actions']))
             for family,e in selected.items():
                 directory=args.output/'clips'/family
                 directory.mkdir(parents=True)
@@ -198,6 +207,10 @@ def main():
                     object_name=Path(env._object_urdf_paths[int(indices[e])]).name,
                     object_urdf_sha256=env._bps_manifest['entries'][int(indices[e])]['urdf_sha256'])
                 (directory/'metadata.json').write_text(json.dumps(clip_meta,indent=2))
+                if args.capture_distillation:
+                    np.savez_compressed(directory/'teacher_observation_normalizer.npz',
+                        mean=array(checkpoint['model']['running_mean_std.running_mean']),
+                        variance=array(checkpoint['model']['running_mean_std.running_var']))
             (args.output/'metadata.json').write_text(json.dumps(metadata,indent=2))
             print('BPS_REPOSING_CHECKPOINT_VALIDATED '+json.dumps(metadata),flush=True)
             stats=ReposeStats(env.num_envs,dt)
@@ -230,17 +243,30 @@ def main():
 
             with torch.inference_mode():
                 for step in range(steps):
+                    policy_record=None
                     if not args.metrics_only and step<clip_steps:
                         if args.capture_reference or step%stride==0:
                             state=snapshot(step)
                             if args.capture_reference:
-                                reference_frames.append(state)
+                                policy_record=dict(state)
+                                if args.capture_distillation:
+                                    policy_record['teacher_observation']=array(obs[ids])
+                                    for state_id,rnn_state in enumerate(player.states):
+                                        policy_record[f'teacher_rnn_state_{state_id}']=array(rnn_state[:,ids].transpose(0,1))
+                                reference_frames.append(policy_record)
                             if step%stride==0:
                                 frames.append(state)
                     action=player.get_action(obs,is_deterministic=True)
                     if not torch.isfinite(action).all():
                         raise RuntimeError('Nonfinite policy action')
+                    if args.capture_distillation and policy_record is not None:
+                        policy_record['teacher_action']=array(action[ids])
+                        policy_record['teacher_clipped_action']=array(action[ids].clamp(
+                            -metadata['action_clip'],metadata['action_clip']))
                     obs,reward,done,info=player.env_step(wrapped,action)
+                    if args.capture_distillation and policy_record is not None:
+                        policy_record['applied_joint_targets_after_step']=array(env._cur_targets[ids])
+                        policy_record['transition_valid']=array(~done.reshape(-1)[ids].bool())
                     if not torch.isfinite(obs).all():
                         raise RuntimeError('Nonfinite observation')
                     terminal={k:array(v) for k,v in info['episode_final'].items()
