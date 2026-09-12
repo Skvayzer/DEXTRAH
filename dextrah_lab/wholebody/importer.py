@@ -82,3 +82,27 @@ def configure_native_mimics(stage, relations, num_envs, frequency=100., damping_
     return dict(count=count,natural_frequency_hz=frequency,damping_ratio=damping_ratio,
                 compliant=frequency>0,
                 calibrated_hardware_compliance=False)
+
+
+def filter_thumb_housing_pairs(stage, num_envs):
+    """DIAGNOSTIC narrow exclusion for the measured palm/proximal-thumb pair.
+
+    Do not mistake this for globally disabling hand self-contact. The merged
+    wrist body contains the palm housing. Distal/palm, finger/finger, all robot
+    body contacts, and all hand/object/table contacts remain enabled. Whether
+    this pair should be permanently excluded requires the separate CAD audit.
+    """
+    from pxr import Usd, UsdPhysics
+    pairs=[]
+    for env_id in range(num_envs):
+        root=stage.GetPrimAtPath(f'/World/envs/env_{env_id}/Robot')
+        bodies={p.GetName().lower():p for p in Usd.PrimRange(root) if p.HasAPI(UsdPhysics.RigidBodyAPI)}
+        for side in ('left','right'):
+            palm=bodies[f'{side}_wrist_yaw_link']
+            thumb=bodies[f'{side}_thumb_proximal_link']
+            relation=UsdPhysics.FilteredPairsAPI.Apply(palm).CreateFilteredPairsRel()
+            relation.AddTarget(thumb.GetPath())
+            if thumb.GetPath() not in relation.GetTargets():
+                raise ValueError('Failed to author the specific housing-pair diagnostic')
+            pairs.append([str(palm.GetPath()),str(thumb.GetPath())])
+    return pairs
