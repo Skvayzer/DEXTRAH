@@ -4,6 +4,13 @@ Status: implementation in progress. **No whole-body SAPG training, teacher
 selection, validated manipulation, or optimizer-inclusive capacity
 result yet.** The four-environment probe is a diagnostic, not a training size.
 
+Latest: hand-range numerical probe **470 passed** with refined palm geometry
+and 32 solver iterations. Teacher-reference tracking **466 failed the wrist
+accuracy gate**, despite standing successfully. Latent label fitting **469/471
+accepted 0/64 and 1/64 samples**, respectively: not a usable adapter
+initialization dataset. Frozen teacher comparison resumed as **472**. See the
+continuation results below; earlier diagnostic entries are historical.
+
 ## Architecture written into the research proposal
 
 - Frozen SONIC reference encoder, FSQ quantizer and 29-joint body decoder.
@@ -226,3 +233,121 @@ teacher data/selection, validate reference tracking, collect paired real
 full-body states/teacher labels, run supervised adapter initialization, integrate
 the actual BPS/tactile full-body task and SAPG optimizer, benchmark and only then
 fine-tune. **No full-body SAPG training or completed skill distillation yet.**
+
+## Continuation results: causal capture, geometry and transfer feasibility
+
+### Exact teacher data and reference preparation
+
+- **459 passed:** `outputs/transfer_teacher_459/distillation_capture_validation.json`.
+  Brush, eraser, hammer and spatula each contain 1,800 samples. Valid transition
+  counts are 1,800 / 1,800 / 1,798 / 1,800, respectively. Observation/RNN capture,
+  frozen normalizer, action clipping and post-step target timing passed checks.
+  This is a development capture of the existing 8B BPS teacher, not selection
+  of a winner over the tactile checkpoints.
+- **464 passed:** aligned the new hammer capture to the full-body frame,
+  `outputs/transfer_teacher_459_hammer_aligned/reference_000.npz`, 22.42 s.
+- `transfer_labels.py` holds original 60 Hz commands causally at query times;
+  it rejects reset-crossing references and masks endpoint holds / invalid
+  transitions. Old teacher observations are not passed off as current student
+  BPS/tactile observations.
+- **468 passed 28 targeted tests**, including teacher data/labels, FK/reference
+  conversion, adapter loss/RNN reset, SONIC history and body/asset contracts.
+
+### Collision geometry and hand coupling
+
+All runs below retain floating-base physics and the source robot masses.
+
+| Probe | Change | Maximum coupling error | Result |
+| --- | --- | ---: | --- |
+| 460 | Palm-only decomposition, 8 position iterations | Above 0.03 rad | Failed |
+| 462 / palm1mm | Verified 1 mm contact offsets | 0.08750 rad | Failed |
+| 462 / palm_shrink | Also project hulls onto original CAD | 0.03154 rad | Failed |
+| 462 / palm_shrink01mm | 0.1 mm contact offsets | 0.03154 rad | Failed |
+| 465 / palm_shrink16 | 16 position iterations, short motion | 0.01421 rad | Passed |
+| 465 / palm_shrink32 | 32 position iterations, short motion | 0.01348 rad | Passed |
+| 467 | 16 iterations, 20 s, 90% motor-range motion | 0.06525 rad | Failed |
+| 470 | 32 iterations, 20 s, 90% motor-range motion | 0.02661 rad | Passed |
+
+470 exercised all twelve independent hand motors in four floating-body robots;
+all stayed standing. It uses rigid native mimic constraints, palm-only convex
+decomposition with shrink wrap, verified 1 mm contact / zero rest offsets,
+200 Hz physics and 50 Hz SONIC. **No collision pair exclusions, artificial
+armature, or ignored-URDF-speed-limit experiment was adopted.** The other
+collision shapes, inertias and visuals are unchanged. The 32-iteration preset
+is explicit, not a silent change to the original asset defaults. Loaded contact
+behavior, calibrated mechanical compliance and scale/optimizer memory are still
+unvalidated; a numerical probe is not hardware calibration.
+
+The earlier contact-offset override was skipped on importer instance proxies.
+`configure_collision_offsets` now deinstances only collision containers and
+verifies every authored value: 284 colliders across these four environments.
+
+**463 full-range CAD audit:** 41×41 thumb opposition/flexion samples per hand,
+including all fixed-merged wrist/palm meshes. There are **137 left / 62 right
+CAD surface intersections**. Although convex palm hulls introduced false
+contacts at the earlier six measured poses, some other configurations genuinely
+intersect the housing. A permanent thumb-housing pair exclusion is therefore
+not justified. The old narrow pair filter remains diagnostic-only.
+
+### Frozen SONIC following actual successful teacher motion
+
+**466**, `outputs/fullbody_probe_466/validation.json`: four environments, 25 s,
+the aligned 22.42 s hammer reference, refined palms and 16 iterations. Standing
+and coupling checks pass. No object/table, neutral fingers: body tracking only.
+After the settling interval:
+
+- Wrist position: **0.030574 m RMS**, **0.048020 m maximum**.
+- Wrist orientation: **0.352172 rad RMS**, **0.587474 rad maximum**.
+- Declared limits: 0.03/0.08 m and 0.15/0.30 rad, respectively.
+- **Reference tracking fails.** Do not infer grasping capability from standing.
+
+### Target fitting on real full-body states, not fabricated standing states
+
+`fit_g1_teacher_latents.py` verifies checkpoint/reference/trace provenance and
+requires stable standing and coupling before fitting. It uses pre-action SONIC
+proprioception/reference tensors from the actual full-body rollout, and applied
+seven-joint teacher targets from the matching valid 60 Hz source samples.
+Fingers remain separate normalized six-actuator labels.
+
+| Fit | Adam steps / rate | Unscaled residual bound | Accepted labels | Median sample-wise worst arm error |
+| --- | --- | --- | ---: | ---: |
+| 469 | 120 / 0.05 | ±5 | 0/64 | 0.50923 rad |
+| 471 | 400 / 0.2 | ±50 | 1/64 | 0.39333 rad |
+
+Both retain the 0.1 pre-quantization scale, frozen SONIC weights and 0.05-rad
+arm / other-body acceptance thresholds. Unmodified SONIC's corresponding
+median arm-target error was 0.57420 rad. The broader search changed other body
+commands by as much as 1.06647 rad on rejected samples. The larger search bound
+was **not** adopted as a deployed policy-action limit. No adapter network was
+trained and no SAPG updates occurred. A nonconvex failed fit does not prove that
+all latent controllers are incapable of the motion, but these labels are not a
+sufficient initialization dataset.
+
+Local joint-level analysis identifies large wrist-pitch and elbow discrepancies.
+The old teacher's command-versus-achieved median errors are only 0.0025–0.0034
+rad. SONIC's median achieved-versus-teacher-achieved errors at the sampled frames
+include 0.5519 rad wrist pitch and 0.3544 rad elbow. Old PD targets and new body
+controller targets nevertheless have different gains/dynamics; a target match
+alone would not establish dynamical equivalence.
+
+**Next:** improve controller-compatible reference retargeting and Cartesian
+wrist-motion imitation rather than assume exact old joint commands are latent-
+reachable. Validate in closed loop, then add real object/load interactions and
+paired full-body BPS/tactile state capture, supervised adapter initialization,
+and finally SAPG. Do not silently add direct arm overrides or unfreeze SONIC to
+force a pass. The full-body manipulation task and optimizer still need integration.
+
+### Jobs, source integrity and research notes
+
+- **472** resumed the frozen teacher suite from its original immutable snapshot.
+  The final preserved count was **4/27**, including baseline held-out seed 42,
+  not just the three training seeds observed when cancellation began. The first
+  held-out case performs poorly; assess the completed suite and audit protocol
+  before attributing this to shape generalization. No winner is selected yet.
+- All GPU work is serialized on one Ada by the workstation's per-user Slurm
+  limit. CPU fitting/audits do not consume another GPU allocation.
+- New physics batch submissions archive a committed source snapshot and record
+  code hashes, so later development cannot change a running diagnostic's source.
+  This does not retroactively add hashes to earlier probe artifacts.
+- The Obsidian proposal's teacher-transfer section now contains these results,
+  explicitly distinguishing code implemented from skills actually trained.
