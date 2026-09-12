@@ -19,6 +19,9 @@ export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y
 cd "$source_snapshot"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
 extra_args=()
+if [[ -n "${PHYSICS_HZ:-}" ]]; then
+    extra_args+=(--physics-hz "$PHYSICS_HZ")
+fi
 if [[ "${EXERCISE_HANDS:-0}" == 1 ]]; then
     extra_args+=(--exercise-hands)
 fi

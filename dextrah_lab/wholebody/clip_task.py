@@ -54,6 +54,13 @@ class LiveClipTask:
         self.initial_hand=aligned['right_hand_q'][0]
         self.initial_poses={k:aligned[k+'_pose'][0] for k in ('object','table','goal')}
         self.source_from_world=torch.tensor(matrix_pose(np.linalg.inv(np.asarray(audit['scene_alignment']))),device=device,dtype=torch.float32)
+        # Matrix->quaternion conversion may select the opposite hemisphere.
+        # Preserve the captured initial object sign in the actor input; q/-q
+        # are the same physical rotation but not the same neural observation.
+        initial_world=torch.tensor(self.initial_poses['object'],device=device,dtype=torch.float32)
+        mapped=compose(self.source_from_world,initial_world)
+        recorded=torch.tensor(source['object'][0,3:],device=device,dtype=torch.float32)
+        self.object_quaternion_sign=-1. if float(torch.dot(mapped[3:],recorded))<0 else 1.
         self.object_scale=torch.tensor(source['teacher_observation'][0,89:92],device=device)
         with np.load(self.clip/'bps_geometry.npz',allow_pickle=False) as geom:
             features=np.r_[geom['distances'],geom['centroid'],geom['radius']].astype(np.float32)
@@ -175,6 +182,7 @@ class LiveClipTask:
         palm=compose(source,self._body_pose(self.palm))
         tips=torch.stack([compose(source,self._body_pose(item))[:,:3] for item in self.tips],1)
         obj=compose(source,torch.cat((self.object.data.root_pos_w-self.scene.env_origins,self.object.data.root_quat_w),-1))
+        obj[:,3:]*=self.object_quaternion_sign
         goal=compose(source,self.goal)
         count=len(obj)
         offsets=self.kp_offsets.expand(count,-1,-1)
@@ -228,6 +236,7 @@ class LiveClipTask:
             initial_clearance_check='tip/wrist reference points versus table box, not a complete CAD collision proof',
             finger_action_pipeline='source absolute targets and joint margin; EMA retimed 60->50 Hz; stochastic delay still disabled',
             finger_ema_alpha_50hz=self.hand_alpha,
+            source_object_quaternion_sign=self.object_quaternion_sign,
             training_task_ready=False,grasp_success_rate_measured=False)
 
 
