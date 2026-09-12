@@ -136,6 +136,25 @@ class FrozenSonic(nn.Module):
     def forward(self, proprio, reference_q, reference_qd, reference_ori6, residual=None):
         return self._decode(proprio, reference_q, reference_qd, reference_ori6, residual)
 
+    @torch.no_grad()
+    def reference_tokens(self, reference_q, reference_qd, reference_ori6):
+        """Pinned g1 encoder + FSQ only, for the trainable route-2 decoder.
+
+        These are reference inputs, not student actions. No adapter or future
+        simulator states are introduced. Test against the complete actor before
+        using the optimized decoder path.
+        """
+        n = reference_q.shape[0]
+        obs = self.observations(reference_q.new_zeros(n,930), reference_q,
+                                reference_qd, reference_ori6)
+        module = self.actor.actor_module
+        if module.encoder_input_features['g1'] != [
+                'command_multi_future_nonflat', 'motion_anchor_ori_heading_mf_nonflat']:
+            raise ValueError('Reference encoder unexpectedly consumes body/task state')
+        parsed = module.parse_tokenizer_obs(obs)
+        tokens, _ = module.encode('g1', parsed)
+        return tokens.reshape(n,64)
+
     def decode_for_imitation(self, proprio, reference_q, reference_qd, reference_ori6, residual):
         """Frozen weights, gradients ONLY through the proposed latent correction.
 
