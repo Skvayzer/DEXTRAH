@@ -89,7 +89,7 @@ class SonicManipulationStudent(nn.Module):
             raise ValueError('Pinned dynamic decoder contract changed')
         return cls(module.decoders['g1_dyn'].module,task_mean,task_variance,hidden_dim)
 
-    def forward(self, proprio, task, tokens, hidden=None, episode_starts=None):
+    def forward(self, proprio, task, tokens, hidden=None, episode_starts=None, task_active=True):
         if task.ndim != 3 or proprio.shape != (*task.shape[:2],930) or tokens.shape != (*task.shape[:2],64):
             raise ValueError('Expected matching batch/time body, task and token observations')
         batch, steps = task.shape[:2]
@@ -110,7 +110,10 @@ class SonicManipulationStudent(nn.Module):
                 contexts.append(current)
             context = torch.cat(contexts,1)
         x = torch.cat((tokens,proprio),-1)
-        x = self.decoder[0](x) + self.task_to_body(context)
+        # Explicit goal-activity mode, available at deployment. Do not pretend
+        # a mean-valued task observation guarantees zero recurrent features.
+        conditioning = context if task_active else torch.zeros_like(context)
+        x = self.decoder[0](x) + self.task_to_body(conditioning)
         # SONIC reuses ONE SiLU instance at multiple Sequential positions.
         # children() deduplicates shared instances and would silently drop
         # five activations. Sequential slicing/iteration preserves each call.

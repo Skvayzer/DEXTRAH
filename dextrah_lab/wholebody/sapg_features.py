@@ -97,11 +97,12 @@ class SonicSapgStudent(SonicManipulationStudent):
         self.fingers.requires_grad_(not freeze_task)
         self.freeze_task=freeze_task
 
-    def forward(self,proprio,task,tokens,hidden=None,episode_starts=None):
+    def forward(self,proprio,task,tokens,hidden=None,episode_starts=None,task_active=True):
         if task.ndim!=3 or proprio.shape!=(*task.shape[:2],930) or tokens.shape!=(*task.shape[:2],64):
             raise ValueError('Expected matching batch/time body, task and token observations')
         context,hidden=self.task_encoder(self.normalizer(task),hidden,episode_starts)
-        x=self.decoder[0](torch.cat((tokens,proprio),-1))+self.task_to_body(context)
+        conditioning=context if task_active else torch.zeros_like(context)
+        x=self.decoder[0](torch.cat((tokens,proprio),-1))+self.task_to_body(conditioning)
         for layer in self.decoder[1:-1]:
             x=layer(x)
         body=self.decoder[-1](x)

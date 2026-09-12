@@ -202,7 +202,7 @@ def evaluate(model,episodes,rehearsal,burn_in):
     # Task-disabled rehearsal uses normalizer mean => zero task features.
     # This preserves standing in the absence of an active manipulation goal.
     action,_=model(rehearsal['proprio'][None],model.normalizer.mean[None,None].expand(1,len(rehearsal['proprio']),-1),
-        rehearsal['tokens'][None])
+        rehearsal['tokens'][None],task_active=False)
     body_error=(action[0,:,:29]-rehearsal['sonic_action'])*model.body_scales
     result=dict(arm_rmse_rad=float(errors[0]),finger_rmse=float(errors[1]),other_body_rmse_rad=float(errors[2]),
         arm_max_error_rad=arm_max,samples=count,standing_rmse_rad=float(body_error.square().mean().sqrt()),
@@ -293,7 +293,8 @@ def main():
             sequence=args.sequence,burn_in=args.burn_in,source_teacher_sha256=TEACHER_SHA256,
             sonic_sha256=WEIGHTS_SHA256,task_dim=model.task_dim,hidden_dim=model.hidden_dim,
             standing_weight=10.,other_body_weight=1.,no_future_motion_input=True,
-            reuse_sapg_features=args.reuse_sapg_features,feature_equivalence=feature_report)
+            reuse_sapg_features=args.reuse_sapg_features,feature_equivalence=feature_report,
+            explicit_task_activity_gate=True)
         write_json(args.output/'config.json',config)
         if args.wandb=='online':
             import wandb
@@ -340,7 +341,7 @@ def main():
                 # Standing samples are independent one-step preservation
                 # queries; body history already contains ten measured steps.
                 stand_action,_=model(standing['proprio'][ids,None],model.normalizer.mean[None,None].expand(count,1,-1),
-                    standing['tokens'][ids,None])
+                    standing['tokens'][ids,None],task_active=False)
                 stand_error=(stand_action[:,0,:29]-standing['sonic_action'][ids])*model.body_scales
                 stand_loss=stand_error.square().mean()
                 total=loss+10.*stand_loss

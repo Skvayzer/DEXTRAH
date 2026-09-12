@@ -283,7 +283,7 @@ def main():
                 with torch.no_grad():
                     tokens=model.reference_tokens(refq,refqd,ori)
                     task=student.normalizer.mean[None,None].expand(args.num_envs,1,-1)
-                    predicted,student_hidden=student(obs[:,None],task,tokens[:,None],student_hidden)
+                    predicted,student_hidden=student(obs[:,None],task,tokens[:,None],student_hidden,task_active=False)
                     last=predicted[:,0,:29]
                 if not torch.isfinite(last).all() or (last.abs()>20).any():
                     raise ValueError('Student command is nonfinite or exceeds the SONIC action limit')
