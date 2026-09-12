@@ -2,6 +2,7 @@
 from .actuators import body_motors
 from pathlib import Path
 from .contract import BODY_JOINTS, hand_joints, nominal_body_pose
+from .importer import native_mimic_cfg_flag
 
 
 def fullbody_robot_cfg(urdf, usd_dir):
@@ -17,7 +18,7 @@ def fullbody_robot_cfg(urdf, usd_dir):
         spawn=sim.UrdfFileCfg(
             asset_path=str(Path(urdf).resolve()), usd_dir=str(Path(usd_dir).resolve()), usd_file_name='g1_revo2.usd',
             fix_base=False, merge_fixed_joints=True,
-            convert_mimic_joints_to_normal_joints=False,
+            convert_mimic_joints_to_normal_joints=native_mimic_cfg_flag(),
             self_collision=True, replace_cylinders_with_capsules=True,
             activate_contact_sensors=True,
             rigid_props=sim.RigidBodyPropertiesCfg(disable_gravity=False,
@@ -28,6 +29,8 @@ def fullbody_robot_cfg(urdf, usd_dir):
                 enabled_self_collisions=True, solver_position_iteration_count=8,
                 solver_velocity_iteration_count=4),
             joint_drive=sim.UrdfConverterCfg.JointDriveCfg(
+                # Do NOT overwrite imported mimic followers with position drives.
+                target_type={f'^{name}$':'position' for name in (*BODY_JOINTS,*hands)},
                 gains=sim.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0.,damping=0.))),
         init_state=ArticulationCfg.InitialStateCfg(pos=(0.,0.,.76),
             joint_pos={**dict(zip(BODY_JOINTS,map(float,nominal_body_pose()))),
