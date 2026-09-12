@@ -4,6 +4,7 @@ __pycache__
 logs
 *.npy
 .thumbs/
+.venv_report/
 
 runs/
 pretrained_ckpts/
