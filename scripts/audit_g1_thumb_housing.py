@@ -79,9 +79,9 @@ def main():
                 if partner is None:
                     continue
                 relative=np.linalg.inv(thumb_tf) @ tree.transform(partner_name,positions,1)[0]
-                for approximation in ('cad_triangles','convex_hulls'):
-                    a=thumb if approximation=='cad_triangles' else thumb.convex_hull
-                    b=partner if approximation=='cad_triangles' else partner.convex_hull
+                for approximation in ('cad_triangles','convex_hulls','convex_thumb_only','convex_palm_only'):
+                    a=thumb.convex_hull if approximation in ('convex_hulls','convex_thumb_only') else thumb
+                    b=partner.convex_hull if approximation in ('convex_hulls','convex_palm_only') else partner
                     manager=trimesh.collision.CollisionManager()
                     manager.add_object(partner_name,b,transform=relative)
                     hit,contacts=manager.in_collision_single(a,return_data=True)
