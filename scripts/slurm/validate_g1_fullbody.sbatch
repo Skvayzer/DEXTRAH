@@ -22,6 +22,15 @@ fi
 if [[ "${NO_PHYSICS_REPLICATION:-0}" == 1 ]]; then
     extra_args+=(--no-physics-replication)
 fi
+case "${HAND_PHYSICS_PRESET:-original}" in
+    original) ;;
+    thumb_pair_diagnostic) extra_args+=(--mimic-frequency 0 --filter-thumb-housing) ;;
+    palm_decomposition) extra_args+=(--mimic-frequency 0 --decompose-palms --palm-shrink-wrap --contact-offset 0.001) ;;
+    *) printf 'Unknown HAND_PHYSICS_PRESET\n' >&2; exit 2 ;;
+esac
+if [[ -n "${TEACHER_REFERENCE:-}" ]]; then
+    extra_args+=(--reference "$TEACHER_REFERENCE")
+fi
 python scripts/validate_g1_fullbody.py --headless --device cuda:0 \
     --output "outputs/fullbody_probe_${SLURM_JOB_ID}" \
     --num-envs "${NUM_ENVS:-4}" --seconds "${PROBE_SECONDS:-10}" "${extra_args[@]}"

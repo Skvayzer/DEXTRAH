@@ -40,6 +40,8 @@ def main():
     p.add_argument('--contact-offset',type=float,default=None,help='Diagnostic robot contact generation distance, metres')
     p.add_argument('--convex-decomposition',action='store_true',help='Diagnose convex-hull self-contact artifacts using closer collision geometry')
     p.add_argument('--reference',type=Path,help='Audited aligned teacher reference NPZ; tracking-only test without objects')
+    p.add_argument('--tracking-rms-tolerance',type=float,default=.03,help='Metres, after the settling interval')
+    p.add_argument('--tracking-max-tolerance',type=float,default=.08,help='Metres, after the settling interval')
     p.add_argument('--filter-thumb-housing',action='store_true',help='DIAGNOSTIC isolate the measured proximal-thumb/palm collision pair only')
     p.add_argument('--decompose-palms',action='store_true',help='Fix the audited palm convex-hull artifact without excluding contact pairs')
     p.add_argument('--palm-shrink-wrap',action='store_true',help='Project decomposed palm hulls onto original CAD surface')
@@ -351,17 +353,32 @@ def main():
         if all_body_contact_peak is not None:
             report['all_body_contact_peak_n']={name:float(force) for name,force in
                 zip(scene['all_body_contacts'].body_names,all_body_contact_peak.cpu()) if force>.01}
+        tracking_passed=None
         if teacher_reference is not None:
             wrist_error=np.linalg.norm(arrays['wrist_pose'][...,:3]-arrays['reference_wrist_pose'][...,:3],axis=-1)
+            dot=np.abs(np.sum(arrays['wrist_pose'][...,3:]*arrays['reference_wrist_pose'][...,3:],axis=-1))
+            angular_error=2*np.arccos(np.clip(dot,0.,1.))
+            active=arrays['reference_time_s']>0.
+            position_rms=float(np.sqrt(np.mean(wrist_error[active]**2))) if active.any() else float('inf')
+            position_max=float(wrist_error[active].max()) if active.any() else float('inf')
+            rotation_rms=float(np.sqrt(np.mean(angular_error[active]**2))) if active.any() else float('inf')
+            rotation_max=float(angular_error[active].max()) if active.any() else float('inf')
+            tracking_passed=(position_rms<=args.tracking_rms_tolerance and position_max<=args.tracking_max_tolerance
+                             and rotation_rms<=.15 and rotation_max<=.3)
             report.update(reference=str(args.reference.resolve()),
                 reference_type='aligned successful SAPG segment; body tracking only, neutral fingers and no objects',
                 recorded_wrist_error_rms_m=float(np.sqrt(np.mean(wrist_error**2))),
                 recorded_wrist_error_max_m=float(wrist_error.max()),
+                tracking_error_after_settle=dict(position_rms_m=position_rms,position_max_m=position_max,
+                    orientation_rms_rad=rotation_rms,orientation_max_rad=rotation_max),
+                tracking_tolerances=dict(position_rms_m=args.tracking_rms_tolerance,
+                    position_max_m=args.tracking_max_tolerance,orientation_rms_rad=.15,orientation_max_rad=.3),
+                reference_tracking_passed=tracking_passed,
                 grasping_validated=False)
         (args.output/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
         print(json.dumps(report,indent=2),flush=True)
-        if not standing or not coupling_passed or hands_moved is False:
-            raise RuntimeError(f'Probe failed: standing={standing}, coupling={coupling_passed}, fingers_moved={hands_moved}. Do not launch manipulation training.')
+        if not standing or not coupling_passed or hands_moved is False or tracking_passed is False:
+            raise RuntimeError(f'Probe failed: standing={standing}, coupling={coupling_passed}, fingers_moved={hands_moved}, tracking={tracking_passed}. Do not launch manipulation training.')
     except Exception as error:
         # Kit's fast shutdown can exit(0) before a pending exception is printed.
         # Persist the original error FIRST and return a failure to Slurm.
