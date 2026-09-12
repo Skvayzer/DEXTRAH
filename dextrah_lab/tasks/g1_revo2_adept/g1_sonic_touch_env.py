@@ -120,12 +120,15 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
 
     def _get_dones(self):
         task_terminated, truncated = super()._get_dones()
+        speed = self.robot.data.joint_vel.abs().amax()
+        if not torch.isfinite(speed) or speed > 1000:
+            raise RuntimeError(f'Numerically invalid articulation: maximum joint speed {float(speed)} rad/s')
         height = self.robot.data.root_pos_w[:, 2]-self.scene.env_origins[:, 2]
         upright = -self.robot.data.projected_gravity_b[:, 2]
         self._body_fallen = ((height < self.cfg.sonic_body.minimum_pelvis_height) |
                             (upright < self.cfg.sonic_body.minimum_upright_cosine))
         # A robot fall is NOT the source task's object-fall metric.
-        return task_terminated | self._body_fallen, truncated
+        return task_terminated | self._body_fallen, truncated & ~self._body_fallen
 
     def _get_rewards(self):
         reward = super()._get_rewards()  # exact original manipulation reward

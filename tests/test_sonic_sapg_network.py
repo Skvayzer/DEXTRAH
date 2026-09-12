@@ -56,7 +56,7 @@ def test_all_six_source_groups_fingers_and_recurrent_states(sources, models, wit
     state = tuple(torch.randn(1, 6, 1024) for _ in range(2))
     common = dict(is_train=True, rnn_states=state, seq_length=4)
     if with_dones:
-        common['dones'] = torch.tensor([False, True, False, False]*6)
+        common['dones'] = torch.tensor([0., 1., 0., 0.]*6)
     with torch.no_grad():
         expected = source(dict(obs=task.clone(), prev_actions=torch.zeros(24, 13), **common))
         actual = model(dict(obs=whole.clone(), prev_actions=torch.zeros(24, 35), **common))
