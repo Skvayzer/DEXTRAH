@@ -51,11 +51,11 @@ def main():
         raise ValueError('Reference capture requires selected recording environments')
     args.headless=True
     app=AppLauncher(args).app
-    # We are a standalone headless process, not an interactive Kit extension.
-    # In this workstation's IsaacLab that distinction disables the STOP-event
-    # callback which otherwise waits forever for a UI "play" command.
-    import builtins
-    builtins.ISAAC_LAUNCHED_FROM_TERMINAL=True
+    # Disable ONLY the interactive STOP-event wait in this headless process.
+    # Do not change ISAAC_LAUNCHED_FROM_TERMINAL: despite its name, this fork
+    # also uses it to decide whether DirectRLEnv initializes physics at all.
+    from isaaclab.sim import SimulationContext
+    SimulationContext._app_control_on_stop_handle_fn=lambda self,event: None
     args.output.mkdir(parents=True)
     stack_log=(args.output/'stacks.log').open('w')
     faulthandler.enable(file=stack_log)
