@@ -22,6 +22,9 @@ nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
 extra_args=()
 if [[ "${CONTINUOUS:-0}" == 1 ]]; then extra_args+=(--continuous); fi
 if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then extra_args+=(--resume "$RESUME_CHECKPOINT"); fi
+if [[ -n "${DIAGNOSTIC_CAPTURE_SECONDS:-}" ]]; then
+    extra_args+=(--diagnostic-capture-seconds "$DIAGNOSTIC_CAPTURE_SECONDS")
+fi
 # Forward the advance time-limit notification to Python for an atomic save at
 # an optimizer boundary. The actual Slurm limit remains authoritative.
 training_pid=''

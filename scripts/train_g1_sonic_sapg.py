@@ -28,6 +28,8 @@ def main():
     p.add_argument('--continuous', action='store_true')
     p.add_argument('--resume', type=Path)
     p.add_argument('--wandb', choices=['online', 'disabled'], default='online')
+    p.add_argument('--diagnostic-capture-seconds', type=float, default=0.,
+                   help='Opt-in physics-state ring buffer for reproducing a numerical failure')
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     if args.num_envs < 6 or args.num_envs % 6 or not args.output.name.startswith('0_'):
@@ -39,7 +41,7 @@ def main():
     args.output.mkdir(parents=True)
     args.headless = True
     app = AppLauncher(args).app
-    env, algo = None, None
+    env, algo, diagnostic = None, None, None
     stack_log = (args.output/'stacks.log').open('w')
     faulthandler.enable(file=stack_log)
     faulthandler.dump_traceback_later(60, repeat=True, file=stack_log)
@@ -94,6 +96,10 @@ def main():
                 or bootstrap_config.get('policy_hz') != 60):
             raise ValueError('Require the completed touch teacher distilled on the 60 Hz task clock')
         env = G1SonicTouchEnv(cfg, sonic=sonic)
+        if args.diagnostic_capture_seconds > 0:
+            from dextrah_lab.wholebody.failure_recording import FailureRecorder
+            diagnostic = FailureRecorder(env, args.output/'failure_clip', args.diagnostic_capture_seconds,
+                                         epoch=lambda: 0 if algo is None else int(algo.epoch_num))
         register_sonic_models(actor, critic, sonic, env._body_lower[0], env._body_upper[0], student)
         params = agent['params']
         params['model']['name'] = 'sonic_sapg_logstd'
@@ -150,6 +156,8 @@ def main():
         print('SONIC_SAPG_TRAINING_START '+json.dumps(dict(envs=args.num_envs, groups=6,
             actions=35, task_reward='unchanged', touch_hz=70, body_decoder_trainable=True)), flush=True)
         algo.train()
+        if diagnostic is not None:
+            report['diagnostic_capture'] = diagnostic.save()
         torch.cuda.synchronize()
         checkpoint = args.output/'nn'/f'complete_{algo.frame}'
         algo.save(str(checkpoint))
@@ -169,6 +177,11 @@ def main():
             wandb.finish(exit_code=0)
     except BaseException as error:
         report.update(error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
+        if diagnostic is not None:
+            try:
+                report['diagnostic_capture'] = diagnostic.save(error)
+            except Exception as capture_error:
+                report['capture_error'] = f'{type(capture_error).__name__}: {capture_error}'
         import wandb
         if wandb.run:
             wandb.run.summary.update(dict(experiment_status='failed', error=report['error']))
@@ -180,6 +193,12 @@ def main():
         if env is not None:
             env.close()
         app.close()
+        # Kit's shutdown can replace Python's pending exception/exit status.
+        # A failed diagnostic must not appear as a successful Slurm completion.
+        if not report['completed']:
+            import sys
+            sys.stdout.flush(); sys.stderr.flush()
+            os._exit(1)
 
 
 if __name__ == '__main__':
