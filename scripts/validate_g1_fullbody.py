@@ -38,6 +38,8 @@ def main():
     p.add_argument('--position-iterations',type=int,default=8)
     p.add_argument('--velocity-iterations',type=int,default=4)
     p.add_argument('--physics-hz',type=int,choices=[200,400,800,1000],default=200)
+    p.add_argument('--abort-joint-speed',type=float,default=1000.,
+        help='Abort/save each physics substep above this catastrophic speed (rad/s); never clamp the physical state')
     p.add_argument('--bound-distal-speed',action='store_true',help='Restore importer-ignored passive URDF limits and compatible motor speeds')
     p.add_argument('--hand-armature',type=float,default=0.,help='DIAGNOSTIC reflected motor inertia kg m^2, not measured hardware data')
     p.add_argument('--diagnose-contacts',action='store_true',help='Identify thumb/index self-contact partners in a small probe')
@@ -61,6 +63,8 @@ def main():
     args.output=args.output.resolve()
     if args.num_envs < 1 or args.seconds < 2 or args.record_envs<1:
         raise ValueError('Invalid probe size/duration')
+    if not 0 < args.abort_joint_speed < float('inf'):
+        raise ValueError('Abort speed must be finite and positive')
     if args.full_hand_range and not args.exercise_hands:
         raise ValueError('--full-hand-range requires --exercise-hands')
     if args.student_checkpoint and (args.reference or args.controller!='sonic'):
@@ -343,10 +347,30 @@ def main():
                 frequency=.15 if args.full_hand_range else .3
                 target[:,hand_ids]+=hand_amplitude*.5*(1-np.cos(2*np.pi*frequency*step*CONTROL_DT))
             robot.set_joint_position_target(target)
-            for _ in range(round(CONTROL_DT/physics_dt)):
+            for substep in range(round(CONTROL_DT/physics_dt)):
                 scene.write_data_to_sim()
                 sim.step(render=False)
                 scene.update(physics_dt)
+                # A bad passive-constraint solve can explode within a single
+                # control interval, before the next policy invocation. Stop
+                # at that physical state, rather than feeding it into SONIC
+                # and blaming the resulting action on normal policy behavior.
+                # This diagnostic abort is NOT a velocity limiter or a fix.
+                physical=(robot.data.joint_pos,robot.data.joint_vel,robot.data.root_state_w)
+                speed=float(physical[1].abs().max())
+                if not all(torch.isfinite(v).all() for v in physical) or speed>args.abort_joint_speed:
+                    np.savez_compressed(args.output/'rejected_physics.npz',
+                        step=np.asarray(step),substep=np.asarray(substep),
+                        simulated_s=np.asarray(step*CONTROL_DT+(substep+1)*physics_dt),
+                        joint_names=np.asarray(robot.joint_names),
+                        joint_pos=physical[0].detach().cpu().numpy(),
+                        joint_vel=physical[1].detach().cpu().numpy(),
+                        root_state=physical[2].detach().cpu().numpy(),
+                        targets=target.detach().cpu().numpy(),
+                        normalized_body_action=last.detach().cpu().numpy())
+                    raise ValueError(f'Catastrophic physical state at control step {step}, '
+                        f'substep {substep}: max joint speed {speed} rad/s. '
+                        'Saved rejected_physics.npz; no state clamping or training.')
                 for item in contact_diagnostics.values():
                     forces=item['sensor'].data.force_matrix_w.norm(dim=-1).amax(dim=(0,1))
                     item['peak']=forces if item['peak'] is None else torch.maximum(item['peak'],forces)
@@ -412,6 +436,7 @@ def main():
             and (ratio>.5).all() and (ratio<1.5).all())
         report=dict(code_provenance=provenance,controller=args.controller,reference='constant nominal pose, fixed world yaw; interface probe only',
             num_envs=args.num_envs,physics_hz=args.physics_hz,controller_hz=50,
+            catastrophic_speed_abort_rad_s=args.abort_joint_speed,
             duration_simulated_s=len(z)*CONTROL_DT,rollout_wall_s=elapsed,
             env_steps_per_second=len(z)*args.num_envs/elapsed,total_wall_s=time.monotonic()-begin,
             fixed_base=robot.is_fixed_base,total_mass_kg_min=float(mass.min()),total_mass_kg_max=float(mass.max()),
