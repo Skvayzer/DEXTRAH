@@ -261,6 +261,16 @@ def main():
             refq[:,:,BODY_JOINTS.index('left_shoulder_roll_joint')]=live_task.left_clearance_roll
         refqd=torch.zeros_like(refq)
         scales=torch.tensor([m.action_scale for m in body_motors().values()],device=args.device)
+        if live_task is not None:
+            # The reset actually wrote a non-nominal arm/rest target. SONIC's
+            # previous-action history must represent that executed command,
+            # not zeros (which would mean a nominal-pose target).
+            last=(live_task.previous[:,body_ids]-q0[:,body_ids])/scales
+            np.savez_compressed(args.output/'initial_task_state.npz',
+                task_observation=live_task.observation().detach().cpu().numpy(),
+                joint_pos=robot.data.joint_pos.detach().cpu().numpy(),
+                targets=live_task.previous.detach().cpu().numpy(),
+                previous_body_action=last.detach().cpu().numpy())
         records={k:[] for k in ('root_state','joint_pos','joint_vel','targets','foot_force','normalized_action')}
         if live_task is not None:
             records.update({k:[] for k in ('object_pose','object_force','task_goal_error')})
