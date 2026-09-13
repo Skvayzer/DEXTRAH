@@ -1,6 +1,17 @@
 # Whole-body SAPG implementation — 2026-09-12
 
-## Latest update: memory-fit continuation, September 13
+## Latest update: native-crash restart, September 13 evening
+
+**547** is the user-requested restart from 528's epoch-490 / 78.54M-step
+best checkpoint, retaining both optimizers. Same 9,216 environments and
+source BPS-128 + touch task, one Ada 6000 (physical GPU 3), online W&B, no
+periodic evaluations. Run 528 segfaulted after 270 new updates, using 27.61
+GiB with no OOMs. Its timed stack dump ended at `File ???`; periodic stack
+walking is now disabled during training as a diagnostic-only mitigation.
+The actual native cause is not proven. Four preflight tests passed for 547.
+See the [failure evidence and restart](g1_sonic_memory_20260913.md).
+
+## September 13 morning memory-fit continuation (historical)
 
 **Job 528 is training** with 9,216 full-body environments on one Ada 6000,
 online W&B, and no periodic evaluations or epoch/frame cap. It resumes both

@@ -2,6 +2,22 @@
 
 ## Later failure and user-requested restart
 
+**Current continuation: job 547**, code snapshot `8a5c1b5`, 9,216 environments,
+one Slurm-allocated RTX 6000 Ada on physical GPU 3 (UUID
+`GPU-c63ea343-1372-efd3-3e38-ee16ce33185e`), 48-hour allocation, online
+[W&B 547](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_547),
+no periodic evaluations. Four preflight tests passed, including CUDA Adam
+resume parity and the diagnostic-watchdog regression check.
+
+Startup completed: scene creation 245.51 s, physics start 26.50 s. At the
+first live check, **13 new updates** reached epoch **503 / 80,461,824**
+transitions, with 25.99 GiB device usage. The log confirms
+`STARTUP_STACK_WATCHDOG_DISABLED_FOR_TRAINING`; the resume report confirms
+epoch 490 / 78,544,896 and both optimizers restored. Checkpoint SHA-256:
+`a427ba8e8503bbe39ecf83449dd4d66109709dcea2922094575b47a8ed9532d1`.
+The saved task contracts differ only in source commit and the new diagnostic
+flag. This is a live restart, **not proof that the native crash is fixed**.
+
 **528 is no longer running.** It exited with signal 11 / shell status 139
 at September 13, 05:06:55 Dubai time, after 26:12 allocated wall time.
 It completed 270 new updates, reaching epoch **490 / 78,544,896** cumulative
