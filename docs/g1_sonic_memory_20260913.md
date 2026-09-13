@@ -1,5 +1,48 @@
 # Whole-body SAPG memory investigation — 2026-09-13
 
+## Later failure and user-requested restart
+
+**528 is no longer running.** It exited with signal 11 / shell status 139
+at September 13, 05:06:55 Dubai time, after 26:12 allocated wall time.
+It completed 270 new updates, reaching epoch **490 / 78,544,896** cumulative
+transitions. The best-return checkpoint saved that exact completed update:
+`outputs/0_sonic_sapg_touch_528/nn/g1_sonic_sapg_bps128_touch.pth`.
+ZIP CRC checks pass, and metadata contains both actor `optimizer` and
+`continuation_critic_optimizer`. The periodic `latest.pth` is older: epoch
+448 / 72,351,744. Resume the best checkpoint, not the older periodic latest.
+
+There is **no evidence of another CUDA OOM**: last total device usage was
+27.614 GiB with 19.758 GiB free, zero allocation retries and zero OOM count.
+The last completed actor/critic losses were finite. Leader training return
+rose from about 34 to 142.72. The last uploaded training episode lifting-rate
+metric was 0.3697; reposing goal-success rate was still zero. This is training
+telemetry, not held-out evaluation. W&B's run state is `crashed`; its custom
+`experiment_status=training` is stale because the native signal bypassed
+Python cleanup.
+
+The memory trace places the failure after entering `play_steps` for update
+491, but **does not identify physics as the failing native component**.
+Further inspection found `stacks.log` ending midway through its **26th
+60-second timed dump**, at an incomplete `File ???` line, timestamp 05:06:53.
+There is no fatal-signal traceback or available native core/backtrace proving
+the cause. This makes asynchronous diagnostic frame walking a plausible
+trigger. Related upstream evidence: [CPython #116008, a Python 3.11 crash
+partway through thread stack dumping](https://github.com/python/cpython/issues/116008).
+Our runtime is Python 3.11.15; the report is related evidence, **not proof
+that this exact upstream defect caused this run's crash**. Rare finite
+articulation-speed outliers also remain unresolved and must not be described
+as fixed.
+
+The requested restart makes a diagnostic-only mitigation: cancel the
+startup stack-dump watchdog immediately before `algo.train()`, retaining
+fatal-signal handling, startup stack dumps, memory telemetry and online W&B.
+The change does not alter physics, source rewards, touch, observations,
+SAPG settings, checkpoint selection, or the 9,216-environment count. A static
+regression test checks unconditional cancellation before training and keeps
+the fatal handler enabled; it does not prove native crash resolution.
+
+## Earlier investigation and launch checks (historical)
+
 ## Evidence and changes
 
 - **517 failed**, not completed training: CUDA OOM at epoch 152 after the

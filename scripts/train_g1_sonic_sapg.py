@@ -89,6 +89,7 @@ def main():
         contract['memory_trace'] = args.memory_trace
         contract['memory_gc_probe_epoch'] = args.memory_gc_probe_epoch
         contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
+        contract['periodic_stack_dumps_during_training'] = False
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
             wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',
@@ -171,6 +172,13 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         print('SONIC_SAPG_TRAINING_START '+json.dumps(dict(envs=args.num_envs, groups=6,
             actions=35, task_reward='unchanged', touch_hz=70, body_decoder_trainable=True)), flush=True)
+        # 528 died midway through its 26th watchdog traceback ("File ???").
+        # Background frame walking is a suspected trigger, not a proven cause.
+        # Keep startup diagnostics and fatal-signal reporting, but do not walk
+        # all live Python stacks asynchronously during the hot training loop.
+        # This changes diagnostics only, not task/optimizer/checkpoint behavior.
+        faulthandler.cancel_dump_traceback_later()
+        print('STARTUP_STACK_WATCHDOG_DISABLED_FOR_TRAINING', flush=True)
         algo.train()
         if diagnostic is not None:
             report['diagnostic_capture'] = diagnostic.save()
