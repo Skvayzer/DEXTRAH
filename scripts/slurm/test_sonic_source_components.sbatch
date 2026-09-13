@@ -15,4 +15,4 @@ export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 PYTHONUNBUFFERED=1
 cd "$source_snapshot"
 python -m pytest -q tests/test_wholebody_timed_history.py tests/test_sonic_source_contract.py \
     tests/test_sonic_sapg_network.py tests/test_sonic_source_actions.py tests/test_sonic_bootstrap.py tests/test_sapg_features.py \
-    tests/test_body_termination.py tests/test_failure_recording.py
+    tests/test_body_termination.py tests/test_failure_recording.py tests/test_sapg_memory_trace.py
