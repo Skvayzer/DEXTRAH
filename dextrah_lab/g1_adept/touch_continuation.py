@@ -78,20 +78,46 @@ def inherit_resume_artifacts(output, checkpoint, control=False):
                 checkpoint_sha256=digest, normalization='inherited from checkpoint; not recalibrated')
 
 
+def optimizer_step_devices(optimizer):
+    """Keep non-capturable Adam scalar counters on CPU, as at initialization.
+
+    Loading every checkpoint tensor onto CUDA moves these counters too.
+    PyTorch deliberately leaves their device unchanged for ordinary Adam,
+    then calls .item() on each counter during bias correction. Correcting
+    placement avoids per-parameter GPU synchronizations without changing
+    counter values or the device/dtype of momentum buffers.
+    """
+    counts = {}
+    for group in optimizer.param_groups:
+        on_device = group.get('capturable', False) or group.get('fused', False)
+        for param in group['params']:
+            state = optimizer.state.get(param, {})
+            if isinstance(state.get('step'), torch.Tensor):
+                state['step'] = state['step'].to(param.device if on_device else 'cpu')
+                device = str(state['step'].device)
+                counts[device] = counts.get(device, 0)+1
+    return counts
+
+
 def resume_at_episode_boundary(algo, checkpoint):
     """Retain learning state, never replay observations from absent physics."""
-    payload = torch.load(checkpoint, map_location=algo.ppo_device, weights_only=False)
+    # load_state_dict moves model/momentum tensors to their parameter devices.
+    # Discarded old rollout tensors should never consume new GPU capacity.
+    payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
     state = payload[0] if 0 in payload else payload
     if 'continuation_critic_optimizer' not in state:
         raise ValueError('Resume needs a complete continuation checkpoint')
     algo.set_full_state_weights(state)
     algo.central_value_net.optimizer.load_state_dict(state['continuation_critic_optimizer'])
     algo.central_value_net.epoch_num = state['continuation_critic_epoch']
+    actor_steps = optimizer_step_devices(algo.optimizer)
+    critic_steps = optimizer_step_devices(algo.central_value_net.optimizer)
     for key in ('obs', 'rnn_states', 'current_rewards', 'current_shaped_rewards', 'current_lengths'):
         setattr(algo, key, None)
     return dict(frame=int(algo.frame), epoch=int(algo.epoch_num), fresh_episodes=True,
                 actor_optimizer_restored=bool(algo.optimizer.state),
-                critic_optimizer_restored=bool(algo.central_value_net.optimizer.state))
+                critic_optimizer_restored=bool(algo.central_value_net.optimizer.state),
+                checkpoint_loaded_on='cpu', actor_step_devices=actor_steps, critic_step_devices=critic_steps)
 
 
 def load_yaml(path):
