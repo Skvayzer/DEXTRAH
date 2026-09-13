@@ -79,7 +79,7 @@ def main():
         contract.update(bootstrap=str(args.bootstrap), bootstrap_sha256=bootstrap_sha,
             action_units='29 body joint-limit-normalized absolute targets + 6 original absolute finger commands',
             original_task_observation_clip=10., sonic_body_observation_clip=None,
-            new_body_exploration_std_rad=.025, fresh_optimizers_for_architecture_migration=True,
+            new_body_exploration_std_rad=.025, fresh_optimizers_for_architecture_migration=not bool(args.resume),
             continuous=args.continuous, periodic_evaluation=False,
             source_training_transitions=17364025344, source_commit=report['source_commit'])
         contract['body_termination'] = cfg.sonic_body.to_dict()

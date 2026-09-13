@@ -115,6 +115,7 @@ def resume_at_episode_boundary(algo, checkpoint):
     for key in ('obs', 'rnn_states', 'current_rewards', 'current_shaped_rewards', 'current_lengths'):
         setattr(algo, key, None)
     return dict(frame=int(algo.frame), epoch=int(algo.epoch_num), fresh_episodes=True,
+                checkpoint=str(Path(checkpoint).resolve()), checkpoint_sha256=sha256_file(checkpoint),
                 actor_optimizer_restored=bool(algo.optimizer.state),
                 critic_optimizer_restored=bool(algo.central_value_net.optimizer.state),
                 checkpoint_loaded_on='cpu', actor_step_devices=actor_steps, critic_step_devices=critic_steps)
