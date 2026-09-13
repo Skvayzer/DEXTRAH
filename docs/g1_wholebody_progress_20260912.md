@@ -1,6 +1,19 @@
 # Whole-body SAPG implementation — 2026-09-12
 
-## Latest update: continuous training launch
+## Latest update: memory-fit continuation, September 13
+
+**Job 528 is training** with 9,216 full-body environments on one Ada 6000,
+online W&B, and no periodic evaluations or epoch/frame cap. It resumes both
+optimizers and weights from run 520 at 38.73M transitions, not from scratch.
+Run 517 later ran out of memory at 12,288 environments; initial updates were
+not sufficient evidence of fit. Run 520 completed 92 smaller-batch updates
+with about 27.43 GiB device usage and was checkpoint-stopped for a separate
+resume-counter efficiency fix. Run 527 stalled during native simulator
+startup and was canceled; 528 passed startup. See the
+[memory investigation](g1_sonic_memory_20260913.md) for measured evidence and
+validation limits. No successful whole-body manipulation is claimed.
+
+## September 12 launch history (superseded by the continuation above)
 
 User reviewed the failure recording and authorized training. **Job 517**
 continues 513 with 12,288 full-body environments, one Ada 6000, online W&B and

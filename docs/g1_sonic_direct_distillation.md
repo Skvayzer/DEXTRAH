@@ -7,13 +7,19 @@ are not prerequisites for the new route.
 ## Current training configuration (supersedes historical development details below)
 
 On September 12, after viewing the recorded attempt, the user authorized
-continuous full-body SAPG training. Slurm **517** continues **513**, with
-**12,288 environments**, six groups of 2,048, one RTX 6000 Ada and a 48-hour
-allocation. Job 513 demonstrated real optimizer updates at approximately
-44,000 transitions/s and 34 GiB total device memory. It stopped at 3,342,336
-transitions on a missing-ground tactile contact check, not an optimizer failure.
-Job 517 resumes its saved best checkpoint at **1,966,080 transitions / epoch
-10**, with both actor and critic optimizers restored and fresh physics episodes.
+continuous full-body SAPG training. Current Slurm **528** uses **9,216
+environments**, six groups of 1,536, one RTX 6000 Ada (physical GPU 2) and a
+48-hour allocation. It has passed startup and is performing optimizer updates.
+It resumes **520's complete checkpoint at 38,731,776 transitions / epoch 220**,
+restoring both actor and critic optimizers, with fresh physics episodes.
+
+Earlier 513 stopped on a missing-ground tactile contact check; that is fixed.
+Continuation 517 ran out of GPU memory at 12,288 environments, after update
+151. Run 520 completed 92 updates at 9,216 environments and was deliberately
+checkpoint-stopped to fix a separate Adam-resume counter placement inefficiency.
+Run 527 stalled in native simulator startup and was canceled; retry 528 passed
+that stage. See [memory evidence and validation](g1_sonic_memory_20260913.md).
+No assertion that the original 12,288-environment run fit long term remains.
 
 - The teacher is now the **completed BPS-128 + 70 Hz touch run 383**, checkpoint
   `complete_17364025344.pth`, SHA-256
@@ -27,7 +33,8 @@ Job 517 resumes its saved best checkpoint at **1,966,080 transitions / epoch
 - Copy the source LSTM, MLP, all six exploration embeddings and six finger
   output rows. The SONIC body decoder, task projection and copied task/finger
   modules all fine-tune. The SONIC reference encoder remains frozen. Fresh
-  actor/critic optimizers are necessary for the 13-to-35-action migration.
+  actor/critic optimizers were necessary for the original 13-to-35-action
+  migration, but are restored, not reset, on compatible whole-body resumes.
 - **Use the actual original Play2Perfect task**, inherited through BPS/touch,
   not the earlier `LiveClipTask`. Original rewards, goal/keypoint logic,
   tolerance, reset noise, delay/DR, 1,200-object bank and finger EMA/PD targets
@@ -75,9 +82,9 @@ must be checked in `training_result.json`/W&B: 513's Kit shutdown still exited
 with code zero despite failure. The restart code exits with failure status
 before entering that problematic shutdown path.
 
-Output: `outputs/0_sonic_sapg_touch_517` on the workstation.
-[Online W&B continuation](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_517).
-Parent artifacts remain in `outputs/0_sonic_sapg_touch_513`.
+Output: `outputs/0_sonic_sapg_touch_528` on the workstation.
+[Online W&B continuation](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_528).
+Parent artifacts remain in runs 513, 517 and 520; checkpoints are preserved.
 
 The sections below describe the original route-2 design and earlier experiments;
 their 50/200 Hz clocks, BPS-only teacher and native-coupling assumptions are

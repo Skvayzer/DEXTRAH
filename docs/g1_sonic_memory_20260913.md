@@ -57,18 +57,51 @@
 
 - CPU **519**: 47 tests passed (memory tracing included).
 - CPU **524**: 49 passed, one CUDA case skipped in the CPU allocation.
-- GPU preflight in **527**: all three optimizer-placement tests passed,
+- GPU preflight in **527 and 528**: all three optimizer-placement tests passed,
   including exact next-update parameter equality on CUDA.
 - Commits: `b83064d`, `bfbbaf2` (telemetry/tests), `69d640b` (resume counter
   placement), `2b88332` (exact provenance). External pinned Play2Perfect code
   and original teacher checkpoints remain unchanged.
-- **527** resumes the complete 520 checkpoint with 9,216 environments,
-  source snapshot `2b88332`, one RTX 6000 Ada, 48-hour allocation, online
+- **527** did not reach checkpoint loading or training. It stalled inside
+  Isaac's native simulation `play/reset` during scene initialization and was
+  canceled after ten minutes. The corresponding stage took about 24 seconds
+  in 520. Its native startup cause is not established; there was no model or
+  optimizer update to lose. It must not be described as an active trainer.
+- **528** is the bounded retry, resuming the complete 520 checkpoint with
+  9,216 environments, source snapshot `321032e`, one RTX 6000 Ada (physical
+  GPU 2, UUID `GPU-4a10e4cf-0808-67e3-468e-3e883b4f7ca1`), 48-hour allocation, online
   W&B, no epoch/frame cap or periodic evaluations. Atomic latest saves and
   source best-return selection remain enabled. The one-off GC experiment is
   disabled in this continuation; memory telemetry stays enabled.
 
-[W&B continuation 527](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_527).
-Runtime evidence: `outputs/0_sonic_sapg_touch_527/{progress.json,memory_trace.jsonl,warmstart_validation.json}`.
-Sustained validation is still in progress; startup or a low-memory first
-update is not sufficient evidence of long-run fit or manipulation success.
+- **528 has passed startup and is making real updates.** At the first live
+  check it reached epoch 234 / 40,796,160 cumulative transitions. Online W&B
+  reports `experiment_status=training`, finite actor/critic losses, and both
+  best and latest checkpoints exist. The resume report confirms epoch 220 /
+  38,731,776 transitions, both optimizers restored, 35 actor and 11 critic
+  step counters on CPU. Full checkpoint SHA-256:
+  `866e5e43125005385090b9b871464324aa901d608f2263db6ccc2b6d66ebda4a`.
+  Initial total device usage is 26.80 GiB; this is not a claim of long-run
+  maximum usage. Weight-change measurements continue changing across updates,
+  rather than merely differing from the pre-resume initialization.
+
+[W&B continuation 528](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_528).
+Runtime evidence: `outputs/0_sonic_sapg_touch_528/{progress.json,memory_trace.jsonl,warmstart_validation.json}`.
+Handoff check: **epoch 266 / 45,514,752 cumulative transitions**, 46 new
+updates since this process resumed. Device usage remained **26.80 GiB**,
+PyTorch reserved 14.03 GiB, peak live tensors 11.61 GiB, with **zero allocator
+retries and zero OOMs**. The periodic latest checkpoint refreshed at epoch
+256 and best-return saving also refreshed. W&B is online, with a small
+ingestion delay relative to the local progress file. The measured interval
+is about **31k transitions/s end to end** versus about 40k/s in the printed
+rollout-plus-update timer. No demonstrated speedup from the optimizer-counter
+fix or continuous GPU saturation is claimed.
+
+Training is left running, not stopped for an evaluation. This is an early
+observed interval, not proof of multi-hour memory stability: 528 has not yet
+completed as many fresh updates as the 141-update 517 continuation. Reposing
+successes were zero in the checked W&B summaries. Ordinary falls and rare
+finite-speed outlier resets remain present (23 numerical resets in 6.78M
+new transitions at the handoff check); the numerical cause is not resolved.
+Optimizer updates and a rising training return are not evidence of learned
+whole-body manipulation success.
