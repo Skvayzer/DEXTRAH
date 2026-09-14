@@ -116,3 +116,26 @@ CPU threads (Kit/TBB pools 8), and a 48-hour Slurm allocation. Frame/epoch caps
 are disabled; no periodic evaluations. Preserve the 70-action actor and both
 optimizer states; initialize fresh physics episodes when changing batch size.
 Live full-size results follow once optimizer updates are verified.
+
+### Full-size 558 and per-update garbage collection
+
+558 restored both optimizers from 557 and completed through epoch 300 /
+41,908,224 transitions. All 55 SONIC tensors still matched the original;
+adaptor weight-change L2 reached 1.31349. There were 93 robot-fall events and
+29 finite numerical-failure resets (0.6925 per million new transitions), not
+a demonstration of grasping success. The final instantaneous mean pelvis
+height was 0.75621 m and touch publication rate 69.9956 Hz.
+
+It failed with CUDA OOM during SAPG's observation-batch concatenation at
+epoch 301. Live PyTorch memory had risen to 32.18 GiB; device memory was
+46.99 GiB. The every-16-update full GC had reclaimed 103.07 GiB cumulatively,
+including 15.48 GiB at epoch 273 and 5.04 GiB at epoch 289, returning live
+allocation to about 3.70 GiB. The interval allowed garbage to accumulate
+again before the next collection. This is evidence of collectible tensor
+retention; the precise upstream cycle owner has not been isolated.
+
+Resume the rolling complete checkpoint from 558 with
+`BOUNDARY_GC_INTERVAL=1`: collect only between complete optimizer updates,
+never empty the CUDA cache, change batches, reset training environments, or
+detach live tensors. Keep 9,216 environments and all learning settings. This
+adds CPU GC overhead in exchange for bounding between-update accumulation.
