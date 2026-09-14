@@ -20,7 +20,7 @@ unset DISPLAY
 cd "$source_snapshot"
 recording="$project/outputs/sonic_checkpoint_video_${SLURM_JOB_ID}"
 python scripts/record_g1_sonic_checkpoint.py --headless --device cuda:0 \
-    --kit_args "--/plugins/carb.tasking.plugin/threadCount=8" \
+    --kit_args="--/plugins/carb.tasking.plugin/threadCount=8 --/plugins/omni.tbb.globalcontrol/maxThreadCount=8" \
     --checkpoint "${RECORD_CHECKPOINT:?Set RECORD_CHECKPOINT}" --output "$recording" \
     --num-envs "${NUM_ENVS:-1200}" --seconds "${RECORD_SECONDS:-60}"
 export PATH="/data1/users/konstantin.smirnov/miniconda3/envs/adept_dextrah/bin:$PATH"

@@ -35,6 +35,12 @@ def main():
     args.output.mkdir(parents=True)
     args.headless = True
     app = AppLauncher(args).app
+    import carb
+    settings = carb.settings.get_settings()
+    launch_settings = {key: settings.get(key) for key in (
+        '/plugins/carb.tasking.plugin/threadCount', '/plugins/omni.tbb.globalcontrol/maxThreadCount',
+        '/app/asyncRendering', '/app/asyncRenderingLowLatency')}
+    print('RECORDING_LAUNCH_SETTINGS '+json.dumps(launch_settings), flush=True)
     env = None
     report = dict(completed=False, optimizer_updates=0)
     stack_log = (args.output/'stacks.log').open('w')
@@ -92,7 +98,8 @@ def main():
             split='Training objects; diagnostic recording, not a generalization benchmark',
             source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), robot_urdf=str(env.g1_urdf),
             cpu_launch=dict(slurm_cpus=os.environ.get('SLURM_CPUS_PER_TASK'),
-                pxr_worker_limit=os.environ.get('PXR_WORK_THREAD_LIMIT'), kit_args=args.kit_args),
+                pxr_worker_limit=os.environ.get('PXR_WORK_THREAD_LIMIT'),
+                kit_args=getattr(args, 'kit_args', None), actual_settings=launch_settings),
             body_names=env.robot.body_names, joint_names=env.robot.joint_names,
             self_collision=cfg.assets.robot_self_collision, fabrics=False, pca=False,
             body_poses='Measured PhysX link poses; no FK substitution or pose interpolation',
