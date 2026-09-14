@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--fps', type=int, default=30)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--families', nargs='+', default=['hammer', 'brush', 'spatula'])
+    parser.add_argument('--torch-memory-limit-gib', type=float, default=4.)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     if args.output.exists() or not args.checkpoint.is_file():
@@ -52,7 +53,9 @@ def main():
         import yourdfpy
         from rl_games.algos_torch import model_builder
         from dextrah_lab.g1_adept.touch_continuation import load_yaml
-        from dextrah_lab.wholebody.sonic import FrozenSonic
+        from dextrah_lab.wholebody.sonic import FrozenSonic, WEIGHTS_SHA256
+        from dextrah_lab.wholebody.frozen_sapg import FrozenControllerAudit
+        from dextrah_lab.wholebody.recording_contract import action_layout, execution_means
         from dextrah_lab.wholebody.source_config import source_task_config
         from dextrah_lab.wholebody.sapg_network import load_touch_sources, register_sonic_models
         from dextrah_lab.tasks.g1_revo2_adept.g1_sonic_touch_env import G1SonicTouchEnv
@@ -61,25 +64,34 @@ def main():
         from isaacsimenvs.tasks.play.utils.obs_utils import _keypoints_world
         torch.set_num_threads(4)
         torch.manual_seed(args.seed)
+        if args.torch_memory_limit_gib <= 0:
+            raise ValueError('A positive recorder-only PyTorch memory budget is required')
+        total = torch.cuda.get_device_properties(args.device).total_memory
+        torch.cuda.set_per_process_memory_fraction(min(1., args.torch_memory_limit_gib*2**30/total), args.device)
         workspace = Path('/data1/users/konstantin.smirnov')
         run = args.checkpoint.parent.parent
         previous = json.loads((run/'task_contract.json').read_text())
+        frozen, action_dim = action_layout(previous)
+        if previous.get('pretrained_sonic_sha256', WEIGHTS_SHA256) != WEIGHTS_SHA256:
+            raise ValueError('Checkpoint pins different pretrained SONIC weights')
         cfg, contract = source_task_config(args.output, args.num_envs, args.device)
         cfg.seed = args.seed
-        cfg.sonic_body.numerical_failure_mode = previous['body_termination']['numerical_failure_mode']
+        cfg.sonic_body.from_dict(previous['body_termination'])
+        cfg.sonic_body.controller_mode = previous.get('controller_mode', 'trainable_decoder')
         for key in ('source_sha256', 'bank_sha256', 'physics_hz', 'policy_hz', 'tactile_hz', 'self_collision'):
             if contract[key] != previous[key]:
                 raise ValueError(f'Checkpoint task contract mismatch: {key}')
         sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
+        controller_audit = FrozenControllerAudit(sonic) if frozen else None
         env = G1SonicTouchEnv(cfg, sonic=sonic)
         stride = round(1/(args.fps*env.step_dt))
         if stride < 1 or not np.isclose(stride*args.fps*env.step_dt, 1):
             raise ValueError('FPS must divide policy frequency')
         source, critic = load_touch_sources(args.device)
-        register_sonic_models(source, critic, sonic, env._body_lower[0], env._body_upper[0])
+        register_sonic_models(source, critic, sonic, env._body_lower[0], env._body_upper[0], frozen=frozen)
         params = load_yaml(run/'params/agent.yaml')['params']
         model = model_builder.ModelBuilder().load(params).build(dict(
-            actions_num=35, input_shape=(1243+32,), num_seqs=args.num_envs, value_size=1,
+            actions_num=action_dim, input_shape=(1243+32,), num_seqs=args.num_envs, value_size=1,
             normalize_value=True, normalize_input=True, type='extra_param',
             coef_ids=source.a2c_network.param_ids, coef_id_idx=1243)).to(args.device)
         checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
@@ -102,8 +114,11 @@ def main():
                 kit_args=getattr(args, 'kit_args', None), actual_settings=launch_settings),
             body_names=env.robot.body_names, joint_names=env.robot.joint_names,
             self_collision=cfg.assets.robot_self_collision, fabrics=False, pca=False,
+            controller_mode=cfg.sonic_body.controller_mode, action_dim=action_dim,
+            pretrained_sonic_sha256=WEIGHTS_SHA256, latent_clipping=False if frozen else None,
+            torch_memory_limit_gib=args.torch_memory_limit_gib,
             body_poses='Measured PhysX link poses; no FK substitution or pose interpolation',
-            task_contract=contract)
+            task_contract=previous, recording_task_contract=contract)
         del checkpoint
         assignment = env._object_asset_index_per_env.cpu().numpy()
         selected = select_family_envs(env._object_urdf_paths, assignment, args.families)
@@ -150,7 +165,8 @@ def main():
                         lifted=array(env._lifted_object[ids]), touch=array(env.touch_raw[ids])))
                 wrapped_obs = torch.cat((obs['policy'], obs['policy'].new_zeros(env.num_envs, 1)), -1)
                 output = model(dict(obs=wrapped_obs, is_train=False, prev_actions=None, rnn_states=states))
-                action, states = output['mus'].clamp(-1, 1), output['rnn_states']
+                action = execution_means(output['mus'], frozen=frozen)
+                states = output['rnn_states']
                 if not torch.isfinite(action).all():
                     raise RuntimeError('Nonfinite checkpoint action')
                 obs, reward, terminated, truncated, info = env.step(action)
@@ -187,6 +203,8 @@ def main():
         report.update(completed=True, checkpoint_sha256=checkpoint_sha, metrics=stats.report(),
             robot_falls=int(robot_falls.sum()), numerical_failures=int(numerical.sum()),
             selected=selected, wall_seconds=time.monotonic()-start)
+        if controller_audit is not None:
+            report.update(controller_audit.check())
         print('WHOLEBODY_RECORDING_COMPLETE '+json.dumps(report), flush=True)
     except BaseException as error:
         report.update(error=str(error), traceback=traceback.format_exc())

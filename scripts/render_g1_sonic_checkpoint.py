@@ -122,7 +122,8 @@ def main():
                 rgb, _ = renderer.render(scene)
                 image.paste(Image.fromarray(rgb), (0 if k == 0 else widths[0], 96))
             draw = ImageDraw.Draw(image)
-            draw.text((22, 12), f"G1 + Revo2 | SONIC + SAPG | {meta['object_family'].capitalize()}", font=title, fill=(22, 35, 48))
+            controller = 'Frozen SONIC' if meta.get('controller_mode') == 'frozen_pretrained_latent' else 'SONIC'
+            draw.text((22, 12), f"G1 + Revo2 | {controller} + SAPG | {meta['object_family'].capitalize()}", font=title, fill=(22, 35, 48))
             draw.text((22, 54), f"Checkpoint epoch {meta['checkpoint_epoch']} | deterministic leader | uncut {meta['seconds']:g}-second rollout", font=text, fill=(62, 77, 92))
             draw.text((22, 108), 'Full-body physics', font=text, fill=(24, 39, 54))
             draw.text((882, 108), 'Hand close-up (table translucent for visibility)', font=small, fill=(24, 39, 54))
