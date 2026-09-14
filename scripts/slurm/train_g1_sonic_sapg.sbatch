@@ -19,9 +19,12 @@ export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y WANDB_MODE=online
 unset DISPLAY
 cd "$source_snapshot"
 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
-python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py
+python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py tests/test_sapg_boundary_gc.py
 extra_args=()
 if [[ "${MEMORY_TRACE:-0}" == 1 ]]; then extra_args+=(--memory-trace); fi
+if [[ -n "${BOUNDARY_GC_INTERVAL:-}" ]]; then
+    extra_args+=(--boundary-gc-interval "$BOUNDARY_GC_INTERVAL")
+fi
 if [[ -n "${MEMORY_GC_PROBE_EPOCH:-}" ]]; then
     extra_args+=(--memory-gc-probe-epoch "$MEMORY_GC_PROBE_EPOCH")
 fi

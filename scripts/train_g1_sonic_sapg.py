@@ -28,6 +28,8 @@ def main():
     p.add_argument('--continuous', action='store_true')
     p.add_argument('--resume', type=Path)
     p.add_argument('--memory-trace', action='store_true')
+    p.add_argument('--boundary-gc-interval', type=int, default=0,
+                   help='Full cyclic GC between completed updates; zero disables; never flushes CUDA cache')
     p.add_argument('--memory-gc-probe-epoch', type=int, default=0,
                    help='One diagnostic garbage collection after this absolute epoch; zero disables')
     p.add_argument('--wandb', choices=['online', 'disabled'], default='online')
@@ -88,6 +90,7 @@ def main():
         contract['touch_global_partners'] = 'enabled static collision shapes under /World/ground'
         contract['memory_trace'] = args.memory_trace
         contract['memory_gc_probe_epoch'] = args.memory_gc_probe_epoch
+        contract['boundary_gc_interval'] = args.boundary_gc_interval
         contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
         contract['periodic_stack_dumps_during_training'] = False
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
@@ -161,6 +164,9 @@ def main():
         if args.memory_trace:
             from dextrah_lab.wholebody.memory_diagnostics import install_memory_trace
             install_memory_trace(algo, args.output, args.memory_gc_probe_epoch)
+        if args.boundary_gc_interval:
+            from dextrah_lab.wholebody.memory_cleanup import install_boundary_gc
+            install_boundary_gc(algo, args.output, args.boundary_gc_interval)
         def request_stop(signum, frame):
             observer.stop_requested = signal.Signals(signum).name
             print('CHECKPOINTED_STOP_REQUESTED '+observer.stop_requested, flush=True)
