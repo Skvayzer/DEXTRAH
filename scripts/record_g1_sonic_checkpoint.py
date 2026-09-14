@@ -91,6 +91,8 @@ def main():
             reset_semantics='Unchanged source task plus robot-fall/numerical termination; all resets retained',
             split='Training objects; diagnostic recording, not a generalization benchmark',
             source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), robot_urdf=str(env.g1_urdf),
+            cpu_launch=dict(slurm_cpus=os.environ.get('SLURM_CPUS_PER_TASK'),
+                pxr_worker_limit=os.environ.get('PXR_WORK_THREAD_LIMIT'), kit_args=args.kit_args),
             body_names=env.robot.body_names, joint_names=env.robot.joint_names,
             self_collision=cfg.assets.robot_self_collision, fabrics=False, pca=False,
             body_poses='Measured PhysX link poses; no FK substitution or pose interpolation',
