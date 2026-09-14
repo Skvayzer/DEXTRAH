@@ -93,6 +93,11 @@ def main():
         contract['boundary_gc_interval'] = args.boundary_gc_interval
         contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
         contract['periodic_stack_dumps_during_training'] = False
+        import carb
+        settings = carb.settings.get_settings()
+        contract['runtime_worker_settings'] = {key: settings.get(key) for key in (
+            '/plugins/carb.tasking.plugin/threadCount', '/plugins/omni.tbb.globalcontrol/maxThreadCount',
+            '/app/asyncRendering', '/app/asyncRenderingLowLatency')}
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
             wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',

@@ -21,6 +21,13 @@ cd "$source_snapshot"
 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
 python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py tests/test_sapg_boundary_gc.py
 extra_args=()
+if [[ -n "${SIM_WORKER_THREADS:-}" ]]; then
+    if [[ ! "$SIM_WORKER_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "SIM_WORKER_THREADS must be a positive integer" >&2
+        exit 2
+    fi
+    extra_args+=("--kit_args=--/plugins/carb.tasking.plugin/threadCount=$SIM_WORKER_THREADS --/plugins/omni.tbb.globalcontrol/maxThreadCount=$SIM_WORKER_THREADS")
+fi
 if [[ "${MEMORY_TRACE:-0}" == 1 ]]; then extra_args+=(--memory-trace); fi
 if [[ -n "${BOUNDARY_GC_INTERVAL:-}" ]]; then
     extra_args+=(--boundary-gc-interval "$BOUNDARY_GC_INTERVAL")
