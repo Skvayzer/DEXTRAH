@@ -53,7 +53,32 @@ def main():
         raise ValueError('Direct decoder training requires a valid --bootstrap')
     args.output.mkdir(parents=True)
     args.headless = True
-    app = AppLauncher(args).app
+    # Kit monkey-patches asyncio.run globally. W&B must start its background
+    # asyncio thread BEFORE that patch, or it can stop Kit's loop from another
+    # thread while a local USD availability check is running (smoke 556).
+    import wandb
+    if args.wandb == 'online':
+        wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',
+            name=args.output.name, id='unique_id_'+args.output.name, resume='allow',
+            dir=str(args.output), sync_tensorboard=True, mode='online',
+            config=dict(source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), num_envs=args.num_envs),
+            tags=['sapg', 'sonic', 'g1', 'revo2', 'bps128', 'touch70', 'floating-body',
+                  'frozen-pretrained-sonic' if args.frozen_pretrained_sonic else 'trainable-sonic-decoder',
+                  'continuous' if args.continuous else 'training-smoke'])
+        if wandb.run is None or wandb.run.settings.mode != 'online':
+            raise RuntimeError('Requested online logging did not initialize')
+        wandb.run.summary.update(dict(experiment_status='initializing_simulation', optimizer_updates_started=False))
+        (args.output/'wandb.json').write_text(json.dumps(dict(id=wandb.run.id, url=wandb.run.url), indent=2))
+        print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url, flush=True)
+    try:
+        app = AppLauncher(args).app
+    except BaseException as error:
+        failure = dict(completed=False, experiment_status='failed', error=f'{type(error).__name__}: {error}')
+        (args.output/'training_result.json').write_text(json.dumps(failure, indent=2))
+        if wandb.run:
+            wandb.run.summary.update(failure)
+            wandb.finish(exit_code=1)
+        raise
     env, algo, diagnostic = None, None, None
     stack_log = (args.output/'stacks.log').open('w')
     faulthandler.enable(file=stack_log)
@@ -123,6 +148,7 @@ def main():
         contract['boundary_gc_interval'] = args.boundary_gc_interval
         contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
         contract['periodic_stack_dumps_during_training'] = False
+        contract['wandb_initialization'] = 'before_Isaac_Kit_asyncio_patch'
         import carb
         settings = carb.settings.get_settings()
         contract['runtime_worker_settings'] = {key: settings.get(key) for key in (
@@ -130,17 +156,7 @@ def main():
             '/app/asyncRendering', '/app/asyncRenderingLowLatency')}
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
-            wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',
-                name=args.output.name, id='unique_id_'+args.output.name, resume='allow',
-                dir=str(args.output), sync_tensorboard=True, mode='online', config=contract,
-                tags=['sapg', 'sonic', 'g1', 'revo2', 'bps128', 'touch70', 'floating-body',
-                      'frozen-pretrained-sonic' if frozen else 'trainable-sonic-decoder',
-                      'continuous' if args.continuous else 'training-smoke'])
-            if wandb.run is None or wandb.run.settings.mode != 'online':
-                raise RuntimeError('Requested online logging did not initialize')
-            wandb.run.summary.update(dict(experiment_status='initializing_simulation', optimizer_updates_started=False))
-            (args.output/'wandb.json').write_text(json.dumps(dict(id=wandb.run.id, url=wandb.run.url), indent=2))
-            print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url, flush=True)
+            wandb.config.update(contract, allow_val_change=True)
         sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
         actor, critic = load_touch_sources(args.device)
         student, bootstrap_report = None, None

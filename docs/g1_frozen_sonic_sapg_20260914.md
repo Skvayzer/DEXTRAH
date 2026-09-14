@@ -81,3 +81,15 @@ resumes require the same architecture, SONIC hash, teacher, object bank and
 action contract. Live validation and launch results will be added below.
 
 Reference: [GRAIL §3.3 / Appendix B.1](https://arxiv.org/html/2606.05160v1).
+
+### First preflight and startup correction
+
+Job 556 passed all 20 initial tests, including real CUDA SONIC inference and
+gradient/finger parity, but stopped before optimizer updates: Isaac's USD
+availability check raised `Cannot run the event loop while another loop is
+running`. Its captured W&B background stack entered Kit's globally patched
+`asyncio.run`, which calls `asyncio._ov_loop.stop_if_running()` even from the
+background thread. Start W&B before AppLauncher patches asyncio, then attach
+the resolved task configuration later. Logging remains online throughout.
+An ordering regression test guards this startup change. No physics/controller
+settings or source asset checks were bypassed.
