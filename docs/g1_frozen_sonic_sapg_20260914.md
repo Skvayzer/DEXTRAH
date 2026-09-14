@@ -93,3 +93,26 @@ background thread. Start W&B before AppLauncher patches asyncio, then attach
 the resolved task configuration later. Logging remains online throughout.
 An ordering regression test guards this startup change. No physics/controller
 settings or source asset checks were bypassed.
+
+### Successful live smoke: 557
+
+Source `ad3bad7`; all 21 preflight tests passed. On one RTX 6000 Ada, the
+120-environment smoke completed 16 real SAPG updates / 30,720 transitions.
+All **55 pretrained SONIC state tensors remained bitwise identical** after
+every update; trainable SONIC parameter count was zero. Adaptor final-layer
+weight change L2 was 0.30513; finger-head change L2 was 0.00272. No robot falls
+or numerical-failure resets occurred. Mean pelvis height at the last update
+was 0.75877 m. Touch publication/acquisition averaged 69.84375 Hz over the short
+4.267-second simulation window (scheduled 70 Hz, finite-window rounding).
+
+This is a short startup/gradient/balance check, **not learned grasping or goal
+success**. The last instantaneous fingertip forces were zero. Maximum observed
+joint speed was 351.66 rad/s; this includes all joints and is not a claim of
+hardware-safe motion.
+
+Full continuation uses `outputs/0_frozen_sonic_smoke_557/nn/complete_30720.pth`
+with 9,216 environments / six groups of 1,536, one RTX 6000 Ada, 16 allocated
+CPU threads (Kit/TBB pools 8), and a 48-hour Slurm allocation. Frame/epoch caps
+are disabled; no periodic evaluations. Preserve the 70-action actor and both
+optimizer states; initialize fresh physics episodes when changing batch size.
+Live full-size results follow once optimizer updates are verified.
