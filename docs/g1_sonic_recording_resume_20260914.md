@@ -61,6 +61,25 @@ Recording uses 120 environments, while still constructing the original
 1,200-object descriptor bank. This does not reduce the training environment
 count or change the three-family, predeclared selection rule.
 
+Capture completed with zero optimizer updates: 3,774 completed episodes,
+3,503 ever lifted (92.82%), 2,609 robot-fall terminations (69.13%), and zero
+goal hits. Two finite numerical-outlier terminations were recorded. These
+120-environment diagnostic rates are distinct from the earlier 3,000-episode
+training window. Selected environment IDs are hammer 1, brush 0, spatula 6.
+The captured checkpoint SHA-256 is
+`0d7ac549857859bffaf4b7f1c8b11b3806f952b414ede4b961a7905af64bba69`.
+
+All three videos passed frame-count/duration validation (1,800 frames,
+30 fps, 60 seconds), and each laptop copy matches its workstation SHA-256:
+
+- Hammer: `034fdee2c155d37c76d32a59371afaa0ac19fdae138aabb98c2ea95608016a70`
+- Brush: `24db25adedaaaf69424414a980867a9a68100983914d81a23f65aa63b6ac946d`
+- Spatula: `808c700a786d49ff899369b4a081ed6a72d69c6b90ebf43889a2a3ad4a5d2188`
+
+Reviewed previews show both lifting attempts and loss of body balance. No
+physical visual links were omitted. Videos are published to
+`/Users/konstantinsmirnov/Desktop/research_recordings`.
+
 ## Memory mitigation before continuation
 
 Run 547 failed with CUDA OOM, not a normal training completion. Inspection of
@@ -87,8 +106,39 @@ arguments, recording the effective pool sizes in its task contract. This bounds
 host worker pools without changing the physics timestep, solver settings,
 reward, policy architecture or optimizer settings.
 
-The planned continuation preserves 9,216 environments / six SAPG groups and
+Continuation **555 is running**, after recording/render job 554 completed
+successfully (`afterok:554`). It preserves 9,216 environments / six SAPG groups and
 both optimizers from the newest saved `latest.pth` in run 547, epoch 8,256 /
 1,223,688,192 frames. It starts fresh physics episodes, not fresh weights.
 Online W&B, original best-return saving and atomic latest saves remain on;
 periodic evaluation and frame/epoch caps remain off.
+The Slurm allocation is 48 hours on one RTX 6000 Ada; the time-limit signal
+requests an atomic checkpoint at an optimizer boundary.
+
+## Verified live continuation
+
+At the 13:56 Dubai check, run 555 had reached epoch **8,718 /
+1,291,812,864 frames**, 462 new updates and 68,124,672 new transitions after
+resuming. Code snapshot: `fb4fd97d98c797ce1653a302e4671dc16eec728a`.
+Resume SHA-256: `9336d411526f7e36d2adecfbb88b8db848f83cac5623f2f6ea6ceee42222c17a`.
+Both optimizers were restored, with 35 actor and 11 critic Adam counters on
+CPU. All seven GPU preflight tests passed. Native physics startup took 24.33 s.
+
+The allocated device is physical GPU 0, RTX 6000 Ada UUID
+`GPU-449a592b-661e-ce1f-1602-bbcbd964661d`. Device use was **28.69 GiB**,
+live PyTorch tensors 3.74 GiB, reserved 15.89 GiB and peak live 12.10 GiB.
+One utilization sample was 99%; this is not a claim of sustained saturation.
+Twenty-nine boundary-GC calls took 8.03 s total and reclaimed about 0.55 GiB
+cumulatively. Most calls freed no CUDA bytes. Long-run OOM resolution is not
+proven by this initial interval.
+
+The [live W&B run](https://wandb.ai/skvayzer/adept/runs/unique_id_0_sonic_sapg_touch_555)
+was independently checked via its API: state `running`,
+`experiment_status=training`, optimizer updates enabled, and epoch 8,720 /
+1,292,107,776 frames uploaded. The checked return was 321.36; lifting 92%,
+robot falls 69.43%, reposing-goal success 0%. Actor/critic losses were finite.
+Both rolling latest and best-return checkpoint files had refreshed.
+
+The run remains active. Numerical outlier resets and poor balance/reposing
+performance remain unresolved; continuation is not a claim that the task has
+been learned or that physics is now fully stable.
