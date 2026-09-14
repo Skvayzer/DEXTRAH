@@ -42,3 +42,34 @@ latent commands and non-destructive checkpoint snapshots. Runtime validation
 additionally requires strict checkpoint loading, finite observations/actions,
 the controller audit and completed capture/encoding artifacts. Unit tests
 alone are not evidence that the policy grasps or stays balanced.
+
+## Captured checkpoint and observed rollouts
+
+The copied best-return checkpoint is epoch **4,059 / 596,195,328 frames**,
+SHA-256 `62e6903e73818f2103bd6a45a3a30c5028a399306ea8b5acf1a39a47c70b2f41`.
+Recorder source commit: `7566e1e1108f5e3209ecc1dd4fe6356155c8aecf`.
+Artifacts are under the workstation project's
+`outputs/sonic_video_560_20260914`; each family has its measured trajectory,
+metadata, event log, rendered video and encoding validation in `capture/`.
+
+All three predeclared rollouts completed 60 seconds:
+
+| Object | Reposing goals | Robot falls | Task resets |
+| --- | ---: | ---: | ---: |
+| Hammer (env 1) | 27 | 0 | 1 timeout |
+| Brush (env 0) | 21 | 0 | 0 |
+| Spatula (env 6) | 23 | 0 | 0 |
+
+The full 120-environment diagnostic produced 3,552 goals, six robot-fall
+terminations and zero numerical-failure resets. Of 158 completed episodes,
+122 reached at least one goal and 144 ever lifted the object. These counts
+exclude ongoing episodes; 2,084 goals belong to episodes still ongoing at the
+end of capture. They must not be presented as a held-out generalization rate.
+Each of the 120 assigned environments reached at least one goal during the
+minute. Pretrained SONIC's 55 state tensors remained bitwise unchanged, and
+the recorder performed zero optimizer updates.
+
+Capture took 515 seconds of wall time while training continued. Logged device
+headroom remained above 17,451 MiB during the measured rollout. Training
+advanced from 596,490,240 frames before recording to beyond 646 million while
+rendering; the final provenance file records the exact post-render counter.
