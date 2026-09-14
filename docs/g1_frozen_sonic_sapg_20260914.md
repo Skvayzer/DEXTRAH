@@ -139,3 +139,30 @@ Resume the rolling complete checkpoint from 558 with
 never empty the CUDA cache, change batches, reset training environments, or
 detach live tensors. Keep 9,216 environments and all learning settings. This
 adds CPU GC overhead in exchange for bounding between-update accumulation.
+
+### Running continuation: 560
+
+[W&B run](https://wandb.ai/skvayzer/adept/runs/unique_id_0_frozen_sonic_sapg_touch_560).
+Started 2026-09-14 16:05 Dubai, 48-hour allocation, physical GPU 0 / UUID
+`GPU-449a592b-661e-ce1f-1602-bbcbd964661d`. The simulator and 21 preflight tests
+started successfully. Restored the epoch-256 checkpoint from 558 with both
+optimizers, then initialized fresh 9,216-environment physics episodes.
+
+Verified through epoch 278 / 38,664,192 cumulative transitions: 22 new updates,
+3,244,032 new transitions, all 55 original SONIC tensors unchanged, zero
+trainable SONIC parameters. Adaptor last-layer weight-change L2 advanced from
+1.23273 at epoch 259 to 1.26740 at epoch 278. The copied finger head and critic
+also update; there is no independent trainable body decoder.
+
+Per-update GC returns live PyTorch memory to about 3.70 GiB. At epoch 278,
+total device usage was 28.02 GiB, free 19.34 GiB, peak live PyTorch allocation
+11.31 GiB; no allocator retries or OOMs. Individual GC calls took about 0.30 s.
+This is initial validation, not a guarantee of long-term memory stability.
+The rolling complete checkpoint exists; best-return saving remains enabled
+and the inherited previous best remains in run 558 until a new best is saved.
+
+There were 21 robot-fall events and two finite numerical-failure resets in
+these first 3.24M new transitions. Mean pelvis height was 0.75609 m. Do not
+interpret these counts as a held-out success evaluation or evidence that
+grasping is already solved. The configured tactile rate remains 70 Hz; its
+short-window measured average approaches that value as the run proceeds.
