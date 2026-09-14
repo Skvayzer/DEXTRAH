@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Continue the trained BPS+touch manipulation skill in a trainable SONIC body.
+"""Continue BPS+touch SAPG with a trainable or frozen-pretrained SONIC body.
 
 Original Play2Perfect task + original six-group SAPG Runner. No new manipulation
 reward, no physics freezing, no fabrics/PCA, no periodic evaluation orchestrator.
@@ -22,7 +22,10 @@ def main():
     from isaaclab.app import AppLauncher
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--bootstrap', type=Path, required=True)
+    p.add_argument('--bootstrap', type=Path)
+    p.add_argument('--frozen-pretrained-sonic', action='store_true',
+                   help='Original frozen encoder/FSQ/decoder; SAPG learns 64 latent + 6 finger meta-actions')
+    p.add_argument('--adapter-learning-rate', type=float, default=3e-4)
     p.add_argument('--num-envs', type=int, default=768)
     p.add_argument('--max-epochs', type=int, default=120, help='Development smoke limit; --continuous removes it')
     p.add_argument('--continuous', action='store_true')
@@ -43,8 +46,11 @@ def main():
         raise ValueError('Require six groups and a policy-index-prefixed output name')
     if args.output.exists():
         raise FileExistsError('Use a new output directory, including for a checkpointed continuation')
-    if not args.bootstrap.is_file():
-        raise FileNotFoundError(args.bootstrap)
+    if args.frozen_pretrained_sonic:
+        if args.bootstrap is not None:
+            raise ValueError('A fine-tuned decoder bootstrap is incompatible with frozen pretrained SONIC')
+    elif args.bootstrap is None or not args.bootstrap.is_file():
+        raise ValueError('Direct decoder training requires a valid --bootstrap')
     args.output.mkdir(parents=True)
     args.headless = True
     app = AppLauncher(args).app
@@ -61,7 +67,9 @@ def main():
         from rl_games.torch_runner import Runner
         from dextrah_lab.g1_adept.touch_continuation import (load_yaml, install_complete_checkpoint,
             install_atomic_checkpoint_saves, resume_at_episode_boundary)
-        from dextrah_lab.wholebody.sonic import FrozenSonic
+        from dextrah_lab.wholebody.sonic import FrozenSonic, WEIGHTS_SHA256
+        from dextrah_lab.wholebody.frozen_sapg import (FROZEN_ARCHITECTURE,
+            install_latent_action_bounds, install_latent_optimizer)
         from dextrah_lab.wholebody.student_checkpoint import load_student_checkpoint
         from dextrah_lab.wholebody.sapg_network import load_touch_sources, register_sonic_models
         from dextrah_lab.wholebody.source_config import source_task_config
@@ -75,15 +83,37 @@ def main():
             raise ValueError('Pinned Play2Perfect revision changed')
         cfg, contract = source_task_config(args.output, args.num_envs, args.device)
         cfg.sonic_body.numerical_failure_mode = args.numerical_failure_mode
+        frozen = args.frozen_pretrained_sonic
+        cfg.sonic_body.controller_mode = 'frozen_pretrained_latent' if frozen else 'trainable_decoder'
         agent = load_yaml(Path(TOUCH_RUN)/'params/agent.yaml')
-        with args.bootstrap.open('rb') as f:
-            bootstrap_sha = hashlib.file_digest(f, 'sha256').hexdigest()
-        contract.update(bootstrap=str(args.bootstrap), bootstrap_sha256=bootstrap_sha,
-            action_units='29 body joint-limit-normalized absolute targets + 6 original absolute finger commands',
+        bootstrap_sha = None
+        if args.bootstrap is not None:
+            with args.bootstrap.open('rb') as f:
+                bootstrap_sha = hashlib.file_digest(f, 'sha256').hexdigest()
+        contract.update(bootstrap=str(args.bootstrap) if args.bootstrap else None, bootstrap_sha256=bootstrap_sha,
+            action_units=('64 unbounded latent residuals scaled 0.1 before FSQ + 6 original absolute finger commands'
+                          if frozen else '29 body joint-limit-normalized absolute targets + 6 original absolute finger commands'),
             original_task_observation_clip=10., sonic_body_observation_clip=None,
-            new_body_exploration_std_rad=.025, fresh_optimizers_for_architecture_migration=not bool(args.resume),
+            fresh_optimizers_for_architecture_migration=not bool(args.resume),
             continuous=args.continuous, periodic_evaluation=False,
             source_training_transitions=17364025344, source_commit=report['source_commit'])
+        contract.update(controller_mode=cfg.sonic_body.controller_mode,
+            pretrained_sonic_sha256=WEIGHTS_SHA256, pretrained_sonic_frozen=frozen,
+            action_dim=70 if frozen else 35)
+        if frozen:
+            contract.update(architecture=FROZEN_ARCHITECTURE, latent_residual_scale=.1,
+                initial_latent_std_leader=1., adapter_learning_rate=args.adapter_learning_rate,
+                body_joint_exploration_noise=False, latent_clipping=False,
+                action_delay='source delay on latent/finger meta-actions; SONIC uses current body feedback',
+                initialization='completed touch-383 SAPG features/fingers/critic; zero-initialized new latent output',
+                old_arm_policy_exactly_preserved=False, pretrained_sonic_audit='all tensors bitwise after every update',
+                online_teacher_loss=False, new_balance_reward=False)
+            contract['intentional_changes'] = [x for x in contract['intentional_changes']
+                if x != '29_body_plus_6_right_finger_actions'] + [
+                '64_latent_plus_6_right_finger_meta_actions', 'frozen_pretrained_SONIC_in_environment',
+                'exploration_and_delay_before_body_decoding', 'latent_adapter_optimizer_group']
+        else:
+            contract['new_body_exploration_std_rad'] = .025
         contract['body_termination'] = cfg.sonic_body.to_dict()
         contract['nonfinite_state_handling'] = 'abort before rewards and terminal observations'
         contract['finite_numerical_failure_reward'] = 'unchanged source reward; separately logged true termination'
@@ -104,6 +134,7 @@ def main():
                 name=args.output.name, id='unique_id_'+args.output.name, resume='allow',
                 dir=str(args.output), sync_tensorboard=True, mode='online', config=contract,
                 tags=['sapg', 'sonic', 'g1', 'revo2', 'bps128', 'touch70', 'floating-body',
+                      'frozen-pretrained-sonic' if frozen else 'trainable-sonic-decoder',
                       'continuous' if args.continuous else 'training-smoke'])
             if wandb.run is None or wandb.run.settings.mode != 'online':
                 raise RuntimeError('Requested online logging did not initialize')
@@ -112,23 +143,26 @@ def main():
             print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url, flush=True)
         sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
         actor, critic = load_touch_sources(args.device)
-        student, bootstrap_report = load_student_checkpoint(args.bootstrap, sonic, args.device)
-        bootstrap_config = load_yaml(args.bootstrap.parent/'config.json')
-        if (bootstrap_report['source_sapg_sha256'] != TOUCH_SHA256 or student.task_dim != 249
-                or bootstrap_config.get('policy_hz') != 60):
-            raise ValueError('Require the completed touch teacher distilled on the 60 Hz task clock')
+        student, bootstrap_report = None, None
+        if not frozen:
+            student, bootstrap_report = load_student_checkpoint(args.bootstrap, sonic, args.device)
+            bootstrap_config = load_yaml(args.bootstrap.parent/'config.json')
+            if (bootstrap_report['source_sapg_sha256'] != TOUCH_SHA256 or student.task_dim != 249
+                    or bootstrap_config.get('policy_hz') != 60):
+                raise ValueError('Require the completed touch teacher distilled on the 60 Hz task clock')
         env = G1SonicTouchEnv(cfg, sonic=sonic)
         if args.diagnostic_capture_seconds > 0:
             from dextrah_lab.wholebody.failure_recording import FailureRecorder
             diagnostic = FailureRecorder(env, args.output/'failure_clip', args.diagnostic_capture_seconds,
                                          epoch=lambda: 0 if algo is None else int(algo.epoch_num))
-        register_sonic_models(actor, critic, sonic, env._body_lower[0], env._body_upper[0], student)
+        register_sonic_models(actor, critic, sonic, env._body_lower[0], env._body_upper[0], student, frozen=frozen)
         params = agent['params']
         params['model']['name'] = 'sonic_sapg_logstd'
         params['network']['name'] = 'sonic_sapg_actor'
         # Per-task clipping now occurs inside TaskBodyNormalizer, so body qd
         # and executed-action histories are not clipped to legacy +/-10.
         params['env']['clip_observations'] = float('inf')
+        params['env']['clip_actions'] = float('inf') if frozen else 1.
         params['load_checkpoint'], params['load_path'] = False, ''
         ac = params['config']
         ac.update(name='g1_sonic_sapg_bps128_touch', num_actors=args.num_envs,
@@ -137,6 +171,10 @@ def main():
             max_frames=-1, max_epochs=-1 if args.continuous else args.max_epochs,
             train_dir=str(args.output.parent), full_experiment_name=args.output.name)
         ac.pop('score_to_win', None)
+        if frozen:
+            ac['clip_actions'] = False
+            ac['name'] = 'g1_frozen_sonic_sapg_bps128_touch'
+            ac['adapter_learning_rate'] = args.adapter_learning_rate
         ac['central_value_config']['minibatch_size'] = 4*args.num_envs
         ac['central_value_config']['model'] = dict(name='sonic_sapg_value')
         ac['central_value_config']['network']['name'] = 'sonic_sapg_critic'
@@ -145,7 +183,8 @@ def main():
         agent['wandb_group'] = 'g1-sonic-bps128-touch'
         dump_yaml(str(args.output/'params/env_resolved.yaml'), cfg)
         dump_yaml(str(args.output/'params/agent.yaml'), agent)
-        wrapped = register_rlgames_env(env, rl_device=args.device, clip_obs=float('inf'), clip_actions=1.)
+        wrapped = register_rlgames_env(env, rl_device=args.device, clip_obs=float('inf'),
+                                      clip_actions=float('inf') if frozen else 1.)
         observer = SonicTransferObserver(env, args.output)
         observers = [EnvStatsAlgoObserver(), observer]
         if args.wandb == 'online':
@@ -158,6 +197,12 @@ def main():
         runner = Runner(MultiObserver(observers))
         runner.load(agent)
         algo = runner.algo_factory.create(runner.algo_name, base_name='run', params=runner.params)
+        if frozen:
+            if algo.bound_loss_type != 'bound':
+                raise ValueError('Expected the original finger bounds loss')
+            install_latent_action_bounds(algo)
+            install_latent_optimizer(algo, args.adapter_learning_rate)
+            report['frozen_controller_validation'] = observer.controller_audit.check(algo.optimizer)
         install_complete_checkpoint(algo)
         install_atomic_checkpoint_saves(algo)
         if args.resume:
@@ -165,6 +210,10 @@ def main():
             for key in ('source_sha256', 'bank_sha256', 'bootstrap_sha256', 'action_units'):
                 if previous[key] != contract[key]:
                     raise ValueError(f'Incompatible continuation contract: {key}')
+            if frozen:
+                for key in ('architecture', 'pretrained_sonic_sha256', 'controller_mode', 'adapter_learning_rate'):
+                    if previous.get(key) != contract[key]:
+                        raise ValueError(f'Incompatible frozen-controller continuation: {key}')
             report['resume'] = resume_at_episode_boundary(algo, args.resume)
         if args.memory_trace:
             from dextrah_lab.wholebody.memory_diagnostics import install_memory_trace
@@ -182,7 +231,8 @@ def main():
         start_frame, start_time = int(algo.frame), time.monotonic()
         torch.cuda.reset_peak_memory_stats()
         print('SONIC_SAPG_TRAINING_START '+json.dumps(dict(envs=args.num_envs, groups=6,
-            actions=35, task_reward='unchanged', touch_hz=70, body_decoder_trainable=True)), flush=True)
+            actions=70 if frozen else 35, task_reward='unchanged', touch_hz=70,
+            body_decoder_trainable=not frozen, pretrained_sonic_sha256=WEIGHTS_SHA256)), flush=True)
         # 528 died midway through its 26th watchdog traceback ("File ???").
         # Background frame walking is a suspected trigger, not a proven cause.
         # Keep startup diagnostics and fatal-signal reporting, but do not walk

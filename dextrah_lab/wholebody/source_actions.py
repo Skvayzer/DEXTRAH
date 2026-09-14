@@ -16,7 +16,7 @@ def delayed_actions(env, actions):
     return env._wholebody_action_queue[torch.arange(env.num_envs, device=env.device), indices]
 
 
-def apply_wholebody_action(env, actions, source_pipeline):
+def apply_wholebody_action(env, actions, source_pipeline, *, apply_delay=True):
     """Reuse the original finger/mimic math without a second arm controller.
 
     A lightweight proxy disables ONLY the already-applied delay for this call.
@@ -26,7 +26,8 @@ def apply_wholebody_action(env, actions, source_pipeline):
     if actions.shape != (env.num_envs, 35) or not torch.isfinite(actions).all():
         raise ValueError('Expected finite 29 absolute body + 6 finger actions')
     actions = actions.clamp(-1, 1)
-    actions = delayed_actions(env, actions)
+    if apply_delay:
+        actions = delayed_actions(env, actions)
     cfg = copy(env.cfg)
     cfg.domain_randomization = copy(cfg.domain_randomization)
     cfg.domain_randomization.use_action_delay = False
@@ -45,4 +46,24 @@ def apply_wholebody_action(env, actions, source_pipeline):
     # Historical source arm-delta entries no longer have a meaningful control
     # interpretation; explicitly zero them, keep real finger queue values.
     env._action_queue[:, :, :7] = 0
-    env._action_queue[:, :, 7:] = env._wholebody_action_queue[:, :, 29:]
+    env._action_queue[:, :, 7:] = env._wholebody_action_queue[:, :, -6:]
+
+
+def apply_frozen_latent_action(env, actions, source_pipeline):
+    """Delay meta-actions, then run frozen SONIC on CURRENT body feedback.
+
+    Delaying decoded body PD targets instead would put a stale command queue
+    inside SONIC's feedback loop. Finger delay/EMA remains source-identical.
+    """
+    if actions.shape != (env.num_envs, 70) or not torch.isfinite(actions).all():
+        raise ValueError('Expected finite 64 latent + 6 finger meta-actions')
+    actions = torch.cat((actions[:, :64], actions[:, 64:].clamp(-1, 1)), -1)
+    executed = delayed_actions(env, actions)
+    if env._body_extra is None:
+        raise RuntimeError('Obtain a reset observation before applying a latent action')
+    body = env._sonic_reference(env._body_extra[:, :930], env._reference_q,
+                               env._reference_qd, env._reference_ori6, executed[:, :64])
+    env._last_latent_action.copy_(executed[:, :64])
+    env._last_decoded_sonic_action.copy_(body)
+    whole = torch.cat((env.sonic_to_policy_body(body), executed[:, 64:]), -1)
+    apply_wholebody_action(env, whole, source_pipeline, apply_delay=False)

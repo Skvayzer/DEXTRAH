@@ -142,15 +142,17 @@ def expanded_critic(source, num_seqs):
     return network
 
 
-def register_sonic_models(source_actor, source_critic, sonic, lower, upper, student=None):
+def register_sonic_models(source_actor, source_critic, sonic, lower, upper, student=None, *, frozen=False):
     """Register builders for the unchanged rl_games/SAPG Runner, once per run."""
+    if frozen and student is not None:
+        raise ValueError('Never import a fine-tuned decoder bootstrap into frozen pretrained SONIC')
     def validate(config, task_dim):
         if config.get('coef_id_idx') != task_dim+BODY_EXTRA_DIM or config.get('type') != 'extra_param':
             raise ValueError('Require task+body observations and six mixed SAPG groups')
         torch.testing.assert_close(config['coef_ids'].to(source_actor.a2c_network.param_ids),
                                    source_actor.a2c_network.param_ids, rtol=0, atol=0)
-        if config['actions_num'] != 35:
-            raise ValueError('Require 29 body + 6 right finger actions')
+        if config['actions_num'] != (70 if frozen else 35):
+            raise ValueError('Action dimension differs from selected SONIC architecture')
 
     class ActorBuilder:
         def load(self, params):
@@ -158,6 +160,9 @@ def register_sonic_models(source_actor, source_critic, sonic, lower, upper, stud
 
         def build(self, name, **config):
             validate(config, TASK_ACTOR_DIM)
+            if frozen:
+                from .frozen_sapg import FrozenSonicSapgNetwork
+                return FrozenSonicSapgNetwork(source_actor, config['num_seqs'])
             return SonicSapgNetwork(source_actor, sonic, lower, upper, config['num_seqs'], student)
 
     class CriticBuilder(ActorBuilder):

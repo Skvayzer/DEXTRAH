@@ -21,6 +21,12 @@ cd "$source_snapshot"
 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
 python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py tests/test_sapg_boundary_gc.py
 extra_args=()
+if [[ "${FROZEN_PRETRAINED_SONIC:-0}" == 1 ]]; then
+    python -m pytest -q tests/test_frozen_sonic_sapg.py tests/test_sonic_source_actions.py
+    extra_args+=(--frozen-pretrained-sonic --adapter-learning-rate "${ADAPTER_LEARNING_RATE:-0.0003}")
+else
+    extra_args+=(--bootstrap "${STUDENT_CHECKPOINT:?Set STUDENT_CHECKPOINT to the validated touch-derived bootstrap}")
+fi
 if [[ -n "${SIM_WORKER_THREADS:-}" ]]; then
     if [[ ! "$SIM_WORKER_THREADS" =~ ^[1-9][0-9]*$ ]]; then
         echo "SIM_WORKER_THREADS must be a positive integer" >&2
@@ -48,8 +54,7 @@ fi
 training_pid=''
 trap 'if [[ -n "$training_pid" ]]; then kill -USR1 "$training_pid"; fi' USR1 TERM
 python scripts/train_g1_sonic_sapg.py --headless --device cuda:0 \
-    --output "$project/outputs/0_sonic_sapg_touch_${SLURM_JOB_ID}" \
-    --bootstrap "${STUDENT_CHECKPOINT:?Set STUDENT_CHECKPOINT to the validated touch-derived bootstrap}" \
+    --output "$project/outputs/${RUN_PREFIX:-0_sonic_sapg_touch}_${SLURM_JOB_ID}" \
     --num-envs "${NUM_ENVS:-768}" --max-epochs "${MAX_EPOCHS:-120}" "${extra_args[@]}" &
 training_pid=$!
 wait "$training_pid" || { result=$?; if kill -0 "$training_pid" 2>/dev/null; then wait "$training_pid"; else exit "$result"; fi; }

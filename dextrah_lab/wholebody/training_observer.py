@@ -15,11 +15,17 @@ class SonicTransferObserver(AlgoObserver):
     def after_init(self, algo):
         self.algo = algo
         network = algo.model.a2c_network
-        self.initial_decoder = network.decoder[0].weight.detach().clone()
+        self.frozen = self.env._frozen_latent
+        if self.frozen:
+            from .frozen_sapg import FrozenControllerAudit
+            self.controller_audit = FrozenControllerAudit(self.env._sonic_reference, algo.optimizer)
+            self.initial_adapter = network.latent_adapter[-1].weight.detach().clone()
+        else:
+            self.initial_decoder = network.decoder[0].weight.detach().clone()
         self.initial_fingers = network.source.mu.weight[7:13].detach().clone()
         if algo.optimizer.state or algo.central_value_net.optimizer.state:
             raise RuntimeError('Architecture migration must start with fresh optimizers')
-        if not all(p.requires_grad for p in network.decoder.parameters()):
+        if not self.frozen and not all(p.requires_grad for p in network.decoder.parameters()):
             raise RuntimeError('SONIC decoder was accidentally kept frozen')
 
     def after_print_stats(self, frame, epoch_num, total_time):
@@ -34,7 +40,6 @@ class SonicTransferObserver(AlgoObserver):
             torch_reserved_gib=torch.cuda.memory_reserved()/2**30,
             torch_peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
             torch_inactive_split_gib=torch.cuda.memory_stats().get('inactive_split_bytes.all.current', 0)/2**30,
-            decoder_weight_change_l2=float((network.decoder[0].weight-self.initial_decoder).detach().norm()),
             finger_weight_change_l2=float((network.source.mu.weight[7:13]-self.initial_fingers).detach().norm()),
             critic_body_weight_l2=float(algo.central_value_net.model.a2c_network.actor_mlp[0].weight[:, 271:1265].detach().norm()),
             tactile_acquisition_hz=env.touch_model.acquisition_count/elapsed,
@@ -48,6 +53,16 @@ class SonicTransferObserver(AlgoObserver):
             maximum_joint_speed_seen_rad_s=float(env._body_max_joint_speed),
             tolerance=env._current_success_tolerance,
             pelvis_height_mean_m=float((env.robot.data.root_pos_w[:, 2]-env.scene.env_origins[:, 2]).mean()))
+        if self.frozen:
+            data.update(self.controller_audit.check(algo.optimizer))
+            data.update(pretrained_sonic_audited_epoch=int(epoch_num),
+                latent_adapter_weight_change_l2=float((network.latent_adapter[-1].weight-self.initial_adapter).detach().norm()),
+                latent_action_abs_mean=float(env._last_latent_action.abs().mean()),
+                latent_action_abs_max=float(env._last_latent_action.abs().max()),
+                latent_exploration_std_mean=float(network.logstd[:, :64].exp().mean()),
+                latent_adapter_learning_rate=algo.optimizer.param_groups[-1]['lr'])
+        else:
+            data['decoder_weight_change_l2'] = float((network.decoder[0].weight-self.initial_decoder).detach().norm())
         for key, value in data.items():
             algo.writer.add_scalar('sonic_transfer/'+key, value, frame)
         (self.output/'progress.json').write_text(json.dumps(data, indent=2))

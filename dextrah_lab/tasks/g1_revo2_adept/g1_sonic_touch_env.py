@@ -11,7 +11,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_conjugate, quat_mul, yaw_
 from isaacsimenvs.tasks.play.utils.action_utils import apply_action_pipeline, apply_wrench_dr
 from dextrah_lab.wholebody.actuators import body_motors
 from dextrah_lab.wholebody.contract import BODY_JOINTS, nominal_body_pose, joint_indices
-from dextrah_lab.wholebody.source_actions import apply_wholebody_action
+from dextrah_lab.wholebody.source_actions import apply_wholebody_action, apply_frozen_latent_action
 from dextrah_lab.wholebody.body_termination import classify_body_state, combine_terminations
 from dextrah_lab.wholebody.source_scene import floating_sonic_robot_scene, ground_contact_partners
 from dextrah_lab.wholebody.timed_history import TimedSonicHistory
@@ -21,6 +21,7 @@ from .g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
 
 @configclass
 class SonicBodyCfg:
+    controller_mode: str = 'trainable_decoder'  # or frozen_pretrained_latent
     minimum_pelvis_height: float = .4
     minimum_upright_cosine: float = .5
     maximum_joint_speed: float = 1000.
@@ -46,6 +47,9 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
     def __init__(self, cfg, *, sonic, render_mode=None, **kwargs):
         self._wholebody_ready = False
         self._sonic_reference = sonic
+        if cfg.sonic_body.controller_mode not in ('trainable_decoder', 'frozen_pretrained_latent'):
+            raise ValueError('Unknown SONIC controller mode')
+        self._frozen_latent = cfg.sonic_body.controller_mode == 'frozen_pretrained_latent'
         # Parent deliberately allocates the unchanged 13-action task queues
         # and 249/271 task observations before appending the body interface.
         cfg.action_space = 13
@@ -70,7 +74,10 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._body_center = (self._body_lower+self._body_upper)/2
         self._body_half_range = (self._body_upper-self._body_lower)/2
         self._last_body_action = torch.zeros(self.num_envs, 29, device=self.device)
-        self._wholebody_action_queue = torch.zeros(self.num_envs, self._action_queue.shape[1], 35, device=self.device)
+        action_dim = 70 if self._frozen_latent else 35
+        self._wholebody_action_queue = torch.zeros(self.num_envs, self._action_queue.shape[1], action_dim, device=self.device)
+        self._last_latent_action = torch.zeros(self.num_envs, 64, device=self.device)
+        self._last_decoded_sonic_action = torch.zeros(self.num_envs, 29, device=self.device)
         self._body_history = TimedSonicHistory(self.num_envs, self.step_dt, self.device)
         self._body_extra_step = None
         self._body_extra = None
@@ -83,8 +90,13 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._reference_q = self.robot.data.default_joint_pos[:, self._body_ids, None].transpose(1, 2).expand(-1, 10, -1).clone()
         self._reference_qd = torch.zeros_like(self._reference_q)
         self._reference_heading = torch.tensor(cfg.assets.robot_init_rot, device=self.device).expand(self.num_envs, -1)
-        cfg.action_space = 35
-        self.single_action_space = gym.spaces.Box(-1., 1., shape=(35,), dtype=np.float32)
+        cfg.action_space = action_dim
+        if self._frozen_latent:
+            low = np.r_[np.full(64, -np.inf), np.full(6, -1.)].astype(np.float32)
+            high = np.r_[np.full(64, np.inf), np.full(6, 1.)].astype(np.float32)
+            self.single_action_space = gym.spaces.Box(low, high)
+        else:
+            self.single_action_space = gym.spaces.Box(-1., 1., shape=(35,), dtype=np.float32)
         self.action_space = gym.vector.utils.batch_space(self.single_action_space, self.num_envs)
         cfg.observation_space = TASK_ACTOR_DIM + BODY_EXTRA_DIM
         cfg.state_space = TASK_CRITIC_DIM + BODY_EXTRA_DIM
@@ -93,11 +105,15 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self.observation_space = gym.vector.utils.batch_space(self.single_observation_space['policy'], self.num_envs)
         self.state_space = gym.vector.utils.batch_space(self.single_observation_space['critic'], self.num_envs)
         self._wholebody_ready = True
-        print(f'SONIC_SOURCE_TASK_READY actor={cfg.observation_space} critic={cfg.state_space} actions=35 '
+        print(f'SONIC_SOURCE_TASK_READY actor={cfg.observation_space} critic={cfg.state_space} actions={action_dim} '
+              f'controller={cfg.sonic_body.controller_mode} '
               'body_joints=29 total_joints=51 task_hz=60 touch_hz=70 reward=unchanged', flush=True)
 
     def _pre_physics_step(self, actions):
-        apply_wholebody_action(self, actions, apply_action_pipeline)
+        if self._frozen_latent:
+            apply_frozen_latent_action(self, actions, apply_action_pipeline)
+        else:
+            apply_wholebody_action(self, actions, apply_action_pipeline)
         apply_wrench_dr(self)
 
     def sonic_to_policy_body(self, sonic_action):
@@ -120,6 +136,7 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
             proprio = self._body_history.value()
         heading_delta = quat_mul(quat_conjugate(yaw_quat(self.robot.data.root_quat_w)), self._reference_heading)
         ori6 = matrix_from_quat(heading_delta)[:, :, :2].reshape(self.num_envs, 1, 6).expand(-1, 10, -1)
+        self._reference_ori6 = ori6
         tokens = self._sonic_reference.reference_tokens(self._reference_q, self._reference_qd, ori6)
         self._body_extra = torch.cat((proprio, tokens), -1)
         self._body_extra_step = self._sim_step_counter
@@ -172,5 +189,7 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._body_history.reset(ids)
         self._last_body_action[ids] = (self._cur_targets[ids][:, self._body_ids]-self._body_nominal)/self._body_scales
         self._wholebody_action_queue[ids] = 0
+        self._last_latent_action[ids] = 0
+        self._last_decoded_sonic_action[ids] = 0
         self._body_fallen[ids] = False
         self._body_numerical_failure[ids] = False

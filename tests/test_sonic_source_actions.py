@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 import pytest
 import torch
-from dextrah_lab.wholebody.source_actions import apply_wholebody_action
+from dextrah_lab.wholebody.source_actions import apply_wholebody_action, apply_frozen_latent_action
 
 
 @pytest.fixture
@@ -76,3 +76,39 @@ def test_clipped_body_commands_and_invalid_input(source_pipeline):
     assert torch.all(env._last_body_action == 10.)
     with pytest.raises(ValueError, match='finite'):
         apply_wholebody_action(env, torch.full((3, 35), float('nan')), source_pipeline)
+
+
+@pytest.mark.parametrize('delay', [False, True])
+def test_latent_delay_preserves_fingers_and_decodes_current_body_feedback(source_pipeline, delay):
+    original, env = environment(delay), environment(delay)
+    env._wholebody_action_queue = torch.zeros(3, 4, 70)
+    env._last_latent_action = torch.zeros(3, 64)
+    env._last_decoded_sonic_action = torch.zeros(3, 29)
+    env._reference_q = torch.zeros(3, 10, 29)
+    env._reference_qd = torch.zeros_like(env._reference_q)
+    env._reference_ori6 = torch.zeros(3, 10, 6)
+    env._sonic_reference = lambda proprio, q, qd, ori, residual: proprio[:, :29]+.1*residual[:, :29]
+    env.sonic_to_policy_body = lambda x: x*.2/2.
+    for step in range(15):
+        torch.manual_seed(123+step)
+        teacher = torch.randn(3, 13).clamp(-1, 1)
+        action = torch.cat((torch.randn(3, 64)*4, teacher[:, 7:]), -1)
+        env._body_extra = torch.full((3, 994), .01*step)
+        if step == 6:
+            for e in (original, env):
+                e.episode_length_buf[1] = 0
+                e._successes[1] = 2
+        torch.manual_seed(step)
+        source_pipeline(original, teacher)
+        torch.manual_seed(step)
+        apply_frozen_latent_action(env, action, source_pipeline)
+        torch.testing.assert_close(env._cur_targets[:, 29:40], original._cur_targets[:, 29:40], rtol=0, atol=0)
+        torch.testing.assert_close(env._action_queue[:, :, 7:], original._action_queue[:, :, 7:], rtol=0, atol=0)
+        expected = env._body_extra[:, :29]+.1*env._last_latent_action[:, :29]
+        torch.testing.assert_close(env._last_decoded_sonic_action, expected, rtol=0, atol=0)
+        torch.testing.assert_close(env._last_body_action, expected)
+        assert env._last_latent_action.abs().max() > 1  # no old joint-action clipping
+        for e in (original, env):
+            e.episode_length_buf += 1
+    with pytest.raises(ValueError, match='finite'):
+        apply_frozen_latent_action(env, torch.full((3, 70), float('nan')), source_pipeline)
