@@ -44,3 +44,8 @@ class BrushTransferTests(unittest.TestCase):
         driver.reset([0, .1, 1, 1, 0, 0, 0], [-.625, 0, .65, 1, 0, 0, 0], [0, .42, .75])
         self.assertEqual(len(driver.report()['attempts']), 2)
         self.assertEqual(driver.report()['counts']['placed_released'], 0)
+
+    def test_contact_under_table_is_not_top_support(self):
+        driver = self.driver()
+        driver.update([-.625, 0, .49, 1, 0, 0, 0], np.zeros(6), [0, .42, .75], .8, .5, 0., 1/60)
+        self.assertFalse(driver.state['receiver_contact'])

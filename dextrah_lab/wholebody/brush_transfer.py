@@ -62,7 +62,7 @@ class BrushTransferDriver:
         top = self.receiver[2]+TABLE_SIZE[2]/2
         inside = bool(np.all(np.abs(points[:, :2]-self.receiver[:2]) <= np.asarray(TABLE_SIZE[:2])/2-.01))
         lowest = float(points[:, 2].min())
-        supported = inside and receiver_force > .05 and lowest < top+.025
+        supported = inside and receiver_force > .05 and top-.02 <= lowest < top+.025
         stable = np.linalg.norm(velocity[:3]) < .03 and np.linalg.norm(velocity[3:]) < .3
         released = supported and stable and robot_force < .02
         self.release_time = self.release_time+dt if released else 0.
