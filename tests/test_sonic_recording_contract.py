@@ -2,10 +2,30 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from dextrah_lab.wholebody.recording_contract import action_layout, execution_means, snapshot_checkpoint
+from dextrah_lab.wholebody.recording_contract import action_layout, execution_means, snapshot_checkpoint, goal_rule_caption
 
 
 class RecordingContractTests(unittest.TestCase):
+    def test_goal_caption_uses_actual_tolerance_and_accumulation(self):
+        cfg = dict(success_tolerance=.01, target_success_tolerance=.01,
+                   eval_success_tolerance=.01, success_steps=10,
+                   force_consecutive_near_goal_steps=False)
+        self.assertEqual(goal_rule_caption(cfg),
+                         'Goal requires 4-keypoint error < 1 cm for 10 accumulated steps.')
+        cfg.update(eval_success_tolerance=.015, force_consecutive_near_goal_steps=True)
+        self.assertEqual(goal_rule_caption(cfg),
+                         'Goal requires 4-keypoint error < 1.5 cm for 10 consecutive steps.')
+
+    def test_goal_caption_refuses_unknown_curriculum_or_invalid_values(self):
+        cfg = dict(success_tolerance=.03, target_success_tolerance=.01,
+                   eval_success_tolerance=None, success_steps=10,
+                   force_consecutive_near_goal_steps=False)
+        with self.assertRaises(ValueError):
+            goal_rule_caption(cfg)
+        for value in (0, -1, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                goal_rule_caption(dict(cfg, eval_success_tolerance=value))
+
     def frozen(self):
         return dict(controller_mode='frozen_pretrained_latent', action_dim=70,
                     architecture='frozen_pretrained_sonic_sapg_latent64_fingers6_v1',

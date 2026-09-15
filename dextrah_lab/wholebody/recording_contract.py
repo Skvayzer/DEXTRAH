@@ -1,8 +1,24 @@
 """Small, simulator-independent checks for checkpoint recordings."""
 import hashlib
+import math
 import os
 from pathlib import Path
 import shutil
+
+
+def goal_rule_caption(termination):
+    """Describe the saved task criterion without inventing a fixed tolerance."""
+    tolerance = termination.get('eval_success_tolerance')
+    if tolerance is None:
+        tolerance = termination['success_tolerance']
+        if termination.get('target_success_tolerance', tolerance) != tolerance:
+            raise ValueError('A changing tolerance requires per-frame recording; do not guess')
+    tolerance = float(tolerance)
+    steps = termination['success_steps']
+    if not math.isfinite(tolerance) or tolerance <= 0 or int(steps) != steps or steps <= 0:
+        raise ValueError('Invalid recorded goal criterion')
+    mode = 'consecutive' if termination['force_consecutive_near_goal_steps'] else 'accumulated'
+    return f'Goal requires 4-keypoint error < {100*tolerance:g} cm for {int(steps)} {mode} steps.'
 
 
 def action_layout(contract):

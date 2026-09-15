@@ -104,6 +104,7 @@ def main():
             checkpoint_epoch=int(checkpoint['epoch']), checkpoint_frame=int(checkpoint['frame']),
             num_envs=env.num_envs, seed=args.seed, fps=args.fps, seconds=args.seconds,
             physics_hz=1/cfg.sim.dt, policy_hz=1/env.step_dt, tactile_hz=cfg.touch.sensor_hz,
+            goal_termination_config=cfg.termination.to_dict(),
             optimizer_updates=0, policy='Deterministic zero-entropy leader; strict checkpoint load',
             selection='First assigned object per predeclared family, before rollout; no outcome filtering',
             reset_semantics='Unchanged source task plus robot-fall/numerical termination; all resets retained',

@@ -26,6 +26,17 @@ def main():
         raise RuntimeError(f'Expected one allocated NVIDIA EGL device: {devices}')
     os.environ['EGL_DEVICE_ID'] = str(devices[0])
     meta = json.loads((args.recording/'metadata.json').read_text())
+    from dextrah_lab.wholebody.recording_contract import goal_rule_caption
+    termination = meta.get('goal_termination_config')
+    criterion_source = 'capture metadata'
+    if termination is None:
+        # Legacy captures used this saved source config verbatim. Never use a
+        # hard-coded numeric caption, or the current training progress file.
+        from dextrah_lab.g1_adept.touch_continuation import load_yaml
+        source_cfg = Path(meta['task_contract']['source_run'])/'params/env_resolved.yaml'
+        termination = load_yaml(source_cfg)['termination']
+        criterion_source = str(source_cfg)
+    goal_caption = goal_rule_caption(termination)
     with np.load(args.recording/'trajectory.npz', allow_pickle=False) as data:
         trace = dict(data)
     if not meta['completed'] or meta['frames'] != len(trace['time_s']):
@@ -130,7 +141,7 @@ def main():
             line = (f"t={trace['time_s'][i]:05.2f}s | Goals: {int(trace['goals'][i])} | Resets: {int(trace['resets'][i])}"
                     f" | Robot falls: {int(trace['robot_falls'][i])} | Pose error: {100*trace['goal_error'][i]:.1f} cm")
             draw.text((22, 798), line, font=text, fill=(24, 39, 54))
-            draw.text((22, 835), 'Orange: object | Green: target pose | Goal requires 4-keypoint error < 1.5 cm for 10 accumulated steps.', font=small, fill=(62, 77, 92))
+            draw.text((22, 835), 'Orange: object | Green: target pose | '+goal_caption, font=small, fill=(62, 77, 92))
             draw.text((22, 866), 'Measured PhysX body poses; no interpolation. BPS-128 + touch 70 Hz. No training or outcome-based selection.', font=small, fill=(62, 77, 92))
             recent_fall = np.any((i-fall_events >= 0) & (i-fall_events < meta['fps']))
             recent_reset = np.any((i-reset_events >= 0) & (i-reset_events < meta['fps']))
@@ -154,6 +165,8 @@ def main():
         raise RuntimeError('Encoded dimensions/frame count mismatch')
     validation = dict(video=str(video), frames=meta['frames'], duration_s=float(probe['format']['duration']),
         measured_body_poses=True, frame_interpolation=False, all_resets_retained=True,
+        goal_caption=goal_caption, goal_termination_config=termination,
+        goal_criterion_source=criterion_source, renderer_source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'),
         omitted_nonphysical_visual_links=sorted(set(omitted)))
     (args.recording/'video_validation.json').write_text(json.dumps(validation, indent=2))
     print('WHOLEBODY_VIDEO_VALIDATED '+json.dumps(validation), flush=True)

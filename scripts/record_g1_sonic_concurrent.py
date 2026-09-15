@@ -23,12 +23,13 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--checkpoint-name', default='g1_frozen_sonic_sapg_bps128_touch.pth')
     parser.add_argument('--seconds', type=float, default=60.)
+    parser.add_argument('--render-only', action='store_true', help='Render a completed capture, without simulation')
     args = parser.parse_args()
     if not os.environ.get('SLURM_JOB_ID') or os.environ.get('SLURM_STEP_ID') in (None, 'batch', 'extern'):
         raise RuntimeError('Use a separate step inside the existing training allocation')
     device = os.environ.get('CUDA_VISIBLE_DEVICES', '')
-    if not device or ',' in device or args.output.exists():
-        raise ValueError('Require one allocated GPU and a fresh output path')
+    if not device or ',' in device or args.output.exists() != args.render_only:
+        raise ValueError('Require one allocated GPU and a fresh output (or existing --render-only capture)')
     if Path(args.checkpoint_name).name != args.checkpoint_name:
         raise ValueError('Checkpoint name must be a basename')
 
@@ -48,17 +49,29 @@ def main():
     initial_memory = memory()
     if initial_memory['free_mib'] < 12*1024:
         raise RuntimeError(f'Insufficient safe headroom; leave training alone: {initial_memory}')
-    args.output.mkdir(parents=True)
-    snapshot = args.output/'checkpoint_snapshot'
-    (snapshot/'nn').mkdir(parents=True)
-    (snapshot/'params').mkdir()
-    copied = snapshot/'nn'/args.checkpoint_name
-    provenance = snapshot_checkpoint(args.source_run/'nn'/args.checkpoint_name, copied)
-    for path in ('task_contract.json', 'params/agent.yaml'):
-        shutil.copyfile(args.source_run/path, snapshot/path)
-    provenance.update(training_before=progress(), gpu_before=initial_memory,
-        allocation=os.environ['SLURM_JOB_ID'], step=os.environ['SLURM_STEP_ID'],
-        source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), training_stopped=False)
+    if args.render_only:
+        provenance = json.loads((args.output/'provenance.json').read_text())
+        result = json.loads((args.output/'capture/recording_result.json').read_text())
+        if not result['completed'] or result['checkpoint_sha256'] != provenance['sha256']:
+            raise ValueError('Require a completed capture matching the saved checkpoint')
+        if Path(provenance['original_checkpoint']).parent.parent.resolve() != args.source_run.resolve():
+            raise ValueError('Render continuation must monitor the original source run')
+        provenance.setdefault('render_continuations', []).append(dict(
+            allocation=os.environ['SLURM_JOB_ID'], step=os.environ['SLURM_STEP_ID'],
+            source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'),
+            training_before=progress(), gpu_before=initial_memory))
+    else:
+        args.output.mkdir(parents=True)
+        snapshot = args.output/'checkpoint_snapshot'
+        (snapshot/'nn').mkdir(parents=True)
+        (snapshot/'params').mkdir()
+        copied = snapshot/'nn'/args.checkpoint_name
+        provenance = snapshot_checkpoint(args.source_run/'nn'/args.checkpoint_name, copied)
+        for path in ('task_contract.json', 'params/agent.yaml'):
+            shutil.copyfile(args.source_run/path, snapshot/path)
+        provenance.update(training_before=progress(), gpu_before=initial_memory,
+            allocation=os.environ['SLURM_JOB_ID'], step=os.environ['SLURM_STEP_ID'],
+            source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), training_stopped=False)
     (args.output/'provenance.json').write_text(json.dumps(provenance, indent=2))
     base = Path('/data1/users/konstantin.smirnov')
     sim_python = base/'venvs/g1_sonic/bin/python'
@@ -89,10 +102,11 @@ def main():
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
 
-    run([sim_python, 'scripts/record_g1_sonic_checkpoint.py', '--headless', '--device', 'cuda:0',
-         '--kit_args=--/plugins/carb.tasking.plugin/threadCount=4 --/plugins/omni.tbb.globalcontrol/maxThreadCount=4',
-         '--checkpoint', copied, '--output', capture, '--num-envs', '120', '--seconds', args.seconds,
-         '--torch-memory-limit-gib', '4'])
+    if not args.render_only:
+        run([sim_python, 'scripts/record_g1_sonic_checkpoint.py', '--headless', '--device', 'cuda:0',
+             '--kit_args=--/plugins/carb.tasking.plugin/threadCount=4 --/plugins/omni.tbb.globalcontrol/maxThreadCount=4',
+             '--checkpoint', copied, '--output', capture, '--num-envs', '120', '--seconds', args.seconds,
+             '--torch-memory-limit-gib', '4'])
     for family in ('hammer', 'brush', 'spatula'):
         run([render_python, 'scripts/render_g1_sonic_checkpoint.py', capture/family])
     provenance.update(training_after=progress(), gpu_after=memory(), completed=True)
