@@ -66,7 +66,8 @@ class BrushTransferEnv(G1SonicTouchEnv):
 
     def _local_pose(self, asset):
         index = self.transfer_index
-        pose = asset.data.root_state_w[index, :7].detach().cpu().numpy().copy()
+        # The source task uses a tensor-only goal marker, not a RigidObject.
+        pose = torch.cat((asset.data.root_pos_w[index], asset.data.root_quat_w[index])).detach().cpu().numpy().copy()
         pose[:3] -= self.scene.env_origins[index].detach().cpu().numpy()
         return pose
 
