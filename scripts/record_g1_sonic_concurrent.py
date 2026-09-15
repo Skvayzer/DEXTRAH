@@ -28,10 +28,13 @@ def main():
     parser.add_argument('--brush-transfer', action='store_true')
     parser.add_argument('--navigation-planner', type=Path)
     parser.add_argument('--navigation-only', action='store_true')
+    parser.add_argument('--navigation-native-timing', action='store_true')
     parser.add_argument('--capture-only', action='store_true')
     args = parser.parse_args()
     if (args.navigation_planner and not args.brush_transfer) or (args.navigation_only and not args.navigation_planner):
         raise ValueError('Navigation requires --brush-transfer and --navigation-planner')
+    if args.navigation_native_timing and not args.navigation_only:
+        raise ValueError('Native timing requires --navigation-only')
     if not os.environ.get('SLURM_JOB_ID') or os.environ.get('SLURM_STEP_ID') in (None, 'batch', 'extern'):
         raise RuntimeError('Use a separate step inside the existing training allocation')
     device = os.environ.get('CUDA_VISIBLE_DEVICES', '')
@@ -120,6 +123,8 @@ def main():
             extra += ['--navigation-planner', args.navigation_planner]
         if args.navigation_only:
             extra += ['--navigation-only']
+        if args.navigation_native_timing:
+            extra += ['--navigation-native-timing']
         run([sim_python, 'scripts/record_g1_sonic_checkpoint.py', '--headless', '--device', 'cuda:0',
              '--kit_args=--/plugins/carb.tasking.plugin/threadCount=4 --/plugins/omni.tbb.globalcontrol/maxThreadCount=4',
              '--checkpoint', copied, '--output', capture, '--num-envs', '6' if args.brush_transfer else '120', '--seconds', args.seconds,

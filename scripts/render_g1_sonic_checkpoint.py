@@ -148,7 +148,9 @@ def main():
                 label = 'Commanded walking diagnostic'
             policy_label = controller if navigation_only else f'{controller} + SAPG'
             draw.text((22, 12), f"G1 + Revo2 | {policy_label} | {label}", font=title, fill=(22, 35, 48))
-            draw.text((22, 54), f"Checkpoint epoch {meta['checkpoint_epoch']} | deterministic leader | uncut {meta['seconds']:g}-second rollout", font=text, fill=(62, 77, 92))
+            subtitle = (f"Zero manipulation residual | control {meta['policy_hz']:g} Hz / physics {meta['physics_hz']:g} Hz"
+                        if navigation_only else f"Checkpoint epoch {meta['checkpoint_epoch']} | deterministic leader")
+            draw.text((22, 54), f"{subtitle} | uncut {meta['seconds']:g}-second rollout", font=text, fill=(62, 77, 92))
             draw.text((22, 108), 'Full-body physics', font=text, fill=(24, 39, 54))
             draw.text((882, 108), 'Hand close-up (table translucent for visibility)', font=small, fill=(24, 39, 54))
             line = (f"t={trace['time_s'][i]:05.2f}s | Goals: {int(trace['goals'][i])} | Resets: {int(trace['resets'][i])}"

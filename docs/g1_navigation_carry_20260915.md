@@ -123,3 +123,19 @@ That check has been removed to match upstream's 1-second periodic walking
 replan; desired facing also no longer follows measured yaw drift at zero
 commanded yaw-rate. Regression tests cover both. Physical retesting is required
 before attributing the failure solely to these defects or claiming a fix.
+
+The corrected 14-second test (`brush_navigation_cadence_560_20260915`, source
+`4dfd280`, step 560.10) used 18 planner calls, not 86. It still did not track the
+sideways command: large backward displacement followed by stalling. No robot
+falls occurred; a hand-far-object reset happened at 5.7 s. It is therefore not
+a clean 2-second idle / 8-second walk / 4-second stop comparison: the episode
+clock restarted. Later empty-hand checks explicitly disable that one reset for
+the selected robot only, while retaining robot/object falls and numerical safety.
+
+`--navigation-native-timing` is an additional **empty-hand diagnostic only**:
+200 Hz physics / 50 Hz control / 25 fps capture, matching SONIC's pinned timing
+defaults instead of the manipulation task's 120/60/30. It cannot be enabled for
+combined SAPG carrying, and does not change training. Original checkpoint task
+contracts remain in metadata separately from the explicitly reported actual
+capture clocks. This isolates whether timing compatibility needs work; it is
+not a claim of successful navigation or a silent checkpoint migration.

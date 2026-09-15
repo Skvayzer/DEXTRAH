@@ -39,6 +39,18 @@ class NavigationBrushEnv(BrushTransferEnv):
         self.transfer.root_velocity = self.robot.data.root_vel_w[index].detach().cpu().numpy().copy()
         super()._update_transfer()
 
+    def _get_dones(self):
+        terminated, truncated = super()._get_dones()
+        if self.navigation_only and self.transfer_index is not None:
+            # An empty-hand walker must be able to leave an untouched object.
+            # Keep real robot/object falls, numerical failures and timeouts.
+            i = self.transfer_index
+            self._termination_reasons['hand_far'][i] = False
+            terminated[i] = (self._termination_reasons['fall'][i]
+                             | self._termination_reasons['max_successes'][i]
+                             | self._body_fallen[i] | self._body_numerical_failure[i])
+        return terminated, truncated
+
     @torch.no_grad()
     def _wholebody_observation(self):
         reference = None
@@ -89,4 +101,6 @@ class NavigationBrushEnv(BrushTransferEnv):
             navigation_planner=self.navigation.report(),
             action_override='Zero latent and fingers only for empty-hand locomotion diagnostic' if self.navigation_only else False,
             limitation='Scripted known-map waypoints, not autonomous perception; standing-trained adapter is unvalidated under walking references')
+        if self.navigation_only:
+            value['termination_change'] += '; selected empty-hand robot disables hand-far-object reset'
         return value

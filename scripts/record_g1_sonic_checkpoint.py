@@ -30,12 +30,16 @@ def main():
     parser.add_argument('--brush-transfer', action='store_true', help='Inference-only two-table brush probe')
     parser.add_argument('--navigation-planner', type=Path, help='Pinned SONIC planner; requires --brush-transfer')
     parser.add_argument('--navigation-only', action='store_true', help='Zero latent/finger means for a locomotion-only diagnostic')
+    parser.add_argument('--navigation-native-timing', action='store_true',
+                        help='Empty-hand diagnostic only: SONIC 50 Hz control / 200 Hz physics, video 25 fps')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     if args.brush_transfer and args.families != ['brush']:
         raise ValueError('The transfer probe records only --families brush')
     if (args.navigation_planner and not args.brush_transfer) or (args.navigation_only and not args.navigation_planner):
         raise ValueError('Navigation requires the brush probe and an explicit planner')
+    if args.navigation_native_timing and not args.navigation_only:
+        raise ValueError('Native timing is isolated to the empty-hand diagnostic')
     if args.output.exists() or not args.checkpoint.is_file():
         raise ValueError('Require an existing checkpoint and a fresh output path')
     if args.num_envs < 6 or args.num_envs % 6 or args.seconds <= 0 or args.fps <= 0:
@@ -104,6 +108,14 @@ def main():
             from dextrah_lab.wholebody.navigation_transfer_env import NavigationBrushEnv
             env_type = NavigationBrushEnv
             env_kwargs = dict(planner_path=args.navigation_planner, navigation_only=args.navigation_only)
+        if args.navigation_native_timing:
+            # A diagnostic comparison, never silently applied to the trained
+            # SAPG manipulation interface or to the live training environment.
+            cfg.sim.dt = .005
+            cfg.decimation = 4
+            cfg.sim.render_interval = 4
+            cfg.termination.episode_length = round(cfg.episode_length_s*50)
+            args.fps = 25
         env = env_type(cfg, sonic=sonic, **env_kwargs)
         stride = round(1/(args.fps*env.step_dt))
         if stride < 1 or not np.isclose(stride*args.fps*env.step_dt, 1):
@@ -142,6 +154,9 @@ def main():
             body_poses='Measured PhysX link poses; no FK substitution or pose interpolation',
             task_contract=previous, recording_task_contract=contract)
         if args.navigation_planner:
+            metadata['diagnostic_timing_override'] = args.navigation_native_timing
+            if args.navigation_only:
+                metadata['policy'] = 'Selected robot: zero latent/finger means, frozen SONIC only; other environments use checkpoint'
             target_ids = set(env._position_target_joint_ids_list)
             if not set(env._body_ids.tolist()).issubset(target_ids):
                 raise RuntimeError('Navigation body joints missing from the actual motor target writer')
