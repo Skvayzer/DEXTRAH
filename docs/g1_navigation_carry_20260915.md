@@ -139,3 +139,41 @@ combined SAPG carrying, and does not change training. Original checkpoint task
 contracts remain in metadata separately from the explicitly reported actual
 capture clocks. This isolates whether timing compatibility needs work; it is
 not a claim of successful navigation or a silent checkpoint migration.
+
+### Native-timing result: still NOT a successful walk
+
+`outputs/brush_navigation_native_560_20260915`, source `b1001e1`, step 560.11:
+14 seconds at 50 Hz control / 200 Hz physics / 25 fps, zero selected-robot
+manipulation residual and zero finger action means. There were **zero robot
+falls and zero numerical failures**. The brush fell and triggered an ordinary
+object-fall reset at 2.58 s; both attempts remain in the video. After that reset,
+the walker moved mainly backward in world +Y, reaching approximately
+(0.14, 2.03) from (0, 0.42), rather than walking sideways in world -X.
+During 7–12 s, mean measured body-frame lateral velocity was +0.0014 m/s
+versus the requested -0.12 m/s. There were 15 planner calls in total. These are
+tracking failures, not navigation successes, and no brush-carry trial followed.
+
+The video is an empty-hand controller diagnostic, **not a manipulation-policy
+evaluation**. Generic aggregate reposing metrics include the five other
+simulation environments and must not be interpreted as navigation performance.
+The selected robot's events, raw velocity traces and physical poses are saved
+alongside the video. Its zero finger action means are mid-range normalized
+commands, not a guarantee of physically open fingers or absence of table contact.
+
+### Remaining work
+
+The requested architecture and inference switches are implemented and pushed,
+but the current G1/Revo2 SONIC integration has not demonstrated commanded
+locomotion. This failure already occurs with SAPG's manipulation residual
+disabled, so it cannot be attributed to that residual fighting navigation.
+Fixing replanning cadence and matching native timing did not resolve it.
+
+Before changing learned weights, isolate the same planner reference on the
+released SONIC robot/environment and on this G1/Revo2 scene. Audit delivered
+reference features and the physical differences (robot/table contacts, collision
+geometry, inertia, solver settings and motor response); record planned root/foot
+paths alongside measured ones. This is the next comparison, **not completed
+evidence identifying a cause**. After base locomotion passes, enable the existing
+SAPG carry residual, measure grasp retention and waypoint arrival, and only then
+test lowering/release. Any later fine-tuning is a separate task; job 560 remains
+unchanged and no optimizer updates were made by these experiments.
