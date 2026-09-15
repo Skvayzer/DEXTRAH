@@ -27,8 +27,11 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--families', nargs='+', default=['hammer', 'brush', 'spatula'])
     parser.add_argument('--torch-memory-limit-gib', type=float, default=4.)
+    parser.add_argument('--brush-transfer', action='store_true', help='Inference-only two-table brush probe')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    if args.brush_transfer and args.families != ['brush']:
+        raise ValueError('The transfer probe records only --families brush')
     if args.output.exists() or not args.checkpoint.is_file():
         raise ValueError('Require an existing checkpoint and a fresh output path')
     if args.num_envs < 6 or args.num_envs % 6 or args.seconds <= 0 or args.fps <= 0:
@@ -83,7 +86,14 @@ def main():
                 raise ValueError(f'Checkpoint task contract mismatch: {key}')
         sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
         controller_audit = FrozenControllerAudit(sonic) if frozen else None
-        env = G1SonicTouchEnv(cfg, sonic=sonic)
+        env_type = G1SonicTouchEnv
+        if args.brush_transfer:
+            from dextrah_lab.wholebody.brush_transfer_env import BrushTransferEnv
+            env_type = BrushTransferEnv
+            cfg.episode_length_s = args.seconds+1.
+            cfg.termination.episode_length = round(cfg.episode_length_s*60)
+            cfg.termination.max_consecutive_successes = 0
+        env = env_type(cfg, sonic=sonic)
         stride = round(1/(args.fps*env.step_dt))
         if stride < 1 or not np.isclose(stride*args.fps*env.step_dt, 1):
             raise ValueError('FPS must divide policy frequency')
@@ -131,6 +141,17 @@ def main():
                 text, path = resolver(env, index)
                 yourdfpy.URDF.load(str(path)).scene.export(directory/f'{name}.glb')
                 (directory/f'{name}.urdf').write_text(text)
+            if args.brush_transfer:
+                import trimesh
+                from dextrah_lab.wholebody.brush_transfer import TABLE_SIZE
+                table_mesh = trimesh.load(directory/'table.glb', force='mesh')
+                if not np.allclose(table_mesh.extents, TABLE_SIZE, atol=1e-5):
+                    raise ValueError('Receiving-table dimensions must match the verified source table')
+                mesh = trimesh.load(directory/'object.glb', force='mesh')
+                env.configure_transfer(index, mesh.vertices)
+                trimesh.creation.box(TABLE_SIZE).export(directory/'receiving_table.glb')
+                metadata['experiment'] = env.transfer_contract()
+                metadata['reset_semantics'] = metadata['experiment']['termination_change']
             (directory/'metadata.json').write_text(json.dumps(dict(metadata,
                 object_family=family, env_id=index, asset_index=int(assignment[index])), indent=2))
         obs, _ = env.reset()
@@ -164,6 +185,10 @@ def main():
                         resets=stats.episodes[list(selected.values())].copy(),
                         robot_falls=robot_falls[list(selected.values())].copy(),
                         lifted=array(env._lifted_object[ids]), touch=array(env.touch_raw[ids])))
+                    if args.brush_transfer:
+                        frames[-1]['receiving_table'] = pose(env.receiving_table)
+                        frames[-1].update({'transfer_'+key: np.full(len(ids), value)
+                                           for key, value in env.transfer.telemetry.items()})
                 wrapped_obs = torch.cat((obs['policy'], obs['policy'].new_zeros(env.num_envs, 1)), -1)
                 output = model(dict(obs=wrapped_obs, is_train=False, prev_actions=None, rnn_states=states))
                 action = execution_means(output['mus'], frozen=frozen)
@@ -192,6 +217,9 @@ def main():
                         sim_s=(step+1)*env.step_dt, wall_s=time.monotonic()-start,
                         completed_episodes=int(stats.episodes.sum()), goal_hits=int(stats.hits.sum()),
                         robot_falls=int(robot_falls.sum()))), flush=True)
+                    if args.brush_transfer:
+                        print('BRUSH_TRANSFER_PROGRESS '+json.dumps(dict(sim_s=(step+1)*env.step_dt,
+                            **env.transfer.telemetry, counts=env.transfer.report()['counts'])), flush=True)
         stacked = {key: np.stack([frame[key] for frame in frames]) for key in frames[0]}
         for i, (family, index) in enumerate(selected.items()):
             directory = args.output/family
@@ -199,11 +227,15 @@ def main():
             meta = json.loads((directory/'metadata.json').read_text())
             meta.update(completed=True, frames=len(frames), metrics=stats.report([index]),
                         robot_falls=int(robot_falls[index]), numerical_failures=int(numerical[index]))
+            if args.brush_transfer:
+                meta['transfer_report'] = env.transfer.report()
             (directory/'metadata.json').write_text(json.dumps(meta, indent=2))
             (directory/'events.json').write_text(json.dumps(events[family], indent=2))
         report.update(completed=True, checkpoint_sha256=checkpoint_sha, metrics=stats.report(),
             robot_falls=int(robot_falls.sum()), numerical_failures=int(numerical.sum()),
             selected=selected, wall_seconds=time.monotonic()-start)
+        if args.brush_transfer:
+            report['transfer_report'] = env.transfer.report()
         if controller_audit is not None:
             report.update(controller_audit.check())
         print('WHOLEBODY_RECORDING_COMPLETE '+json.dumps(report), flush=True)

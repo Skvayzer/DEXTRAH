@@ -24,6 +24,8 @@ def main():
     parser.add_argument('--checkpoint-name', default='g1_frozen_sonic_sapg_bps128_touch.pth')
     parser.add_argument('--seconds', type=float, default=60.)
     parser.add_argument('--render-only', action='store_true', help='Render a completed capture, without simulation')
+    parser.add_argument('--checkpoint-run', type=Path, help='Optional immutable snapshot; --source-run still monitors training')
+    parser.add_argument('--brush-transfer', action='store_true')
     args = parser.parse_args()
     if not os.environ.get('SLURM_JOB_ID') or os.environ.get('SLURM_STEP_ID') in (None, 'batch', 'extern'):
         raise RuntimeError('Use a separate step inside the existing training allocation')
@@ -54,7 +56,8 @@ def main():
         result = json.loads((args.output/'capture/recording_result.json').read_text())
         if not result['completed'] or result['checkpoint_sha256'] != provenance['sha256']:
             raise ValueError('Require a completed capture matching the saved checkpoint')
-        if Path(provenance['original_checkpoint']).parent.parent.resolve() != args.source_run.resolve():
+        monitor = provenance.get('training_monitor_run', str(Path(provenance['original_checkpoint']).parent.parent))
+        if Path(monitor).resolve() != args.source_run.resolve():
             raise ValueError('Render continuation must monitor the original source run')
         provenance.setdefault('render_continuations', []).append(dict(
             allocation=os.environ['SLURM_JOB_ID'], step=os.environ['SLURM_STEP_ID'],
@@ -66,12 +69,15 @@ def main():
         (snapshot/'nn').mkdir(parents=True)
         (snapshot/'params').mkdir()
         copied = snapshot/'nn'/args.checkpoint_name
-        provenance = snapshot_checkpoint(args.source_run/'nn'/args.checkpoint_name, copied)
+        checkpoint_run = args.checkpoint_run or args.source_run
+        provenance = snapshot_checkpoint(checkpoint_run/'nn'/args.checkpoint_name, copied)
         for path in ('task_contract.json', 'params/agent.yaml'):
-            shutil.copyfile(args.source_run/path, snapshot/path)
+            shutil.copyfile(checkpoint_run/path, snapshot/path)
         provenance.update(training_before=progress(), gpu_before=initial_memory,
             allocation=os.environ['SLURM_JOB_ID'], step=os.environ['SLURM_STEP_ID'],
-            source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), training_stopped=False)
+            source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), training_stopped=False,
+            training_monitor_run=str(args.source_run),
+            experiment='brush_table_transfer' if args.brush_transfer else 'reposing')
     (args.output/'provenance.json').write_text(json.dumps(provenance, indent=2))
     base = Path('/data1/users/konstantin.smirnov')
     sim_python = base/'venvs/g1_sonic/bin/python'
@@ -103,11 +109,12 @@ def main():
                     child.wait()
 
     if not args.render_only:
+        extra = ['--families', 'brush', '--brush-transfer'] if args.brush_transfer else []
         run([sim_python, 'scripts/record_g1_sonic_checkpoint.py', '--headless', '--device', 'cuda:0',
              '--kit_args=--/plugins/carb.tasking.plugin/threadCount=4 --/plugins/omni.tbb.globalcontrol/maxThreadCount=4',
-             '--checkpoint', copied, '--output', capture, '--num-envs', '120', '--seconds', args.seconds,
-             '--torch-memory-limit-gib', '4'])
-    for family in ('hammer', 'brush', 'spatula'):
+             '--checkpoint', copied, '--output', capture, '--num-envs', '6' if args.brush_transfer else '120', '--seconds', args.seconds,
+             '--torch-memory-limit-gib', '4', *extra])
+    for family in (('brush',) if args.brush_transfer else ('hammer', 'brush', 'spatula')):
         run([render_python, 'scripts/render_g1_sonic_checkpoint.py', capture/family])
     provenance.update(training_after=progress(), gpu_after=memory(), completed=True)
     (args.output/'provenance.json').write_text(json.dumps(provenance, indent=2))

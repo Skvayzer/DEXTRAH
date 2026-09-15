@@ -26,6 +26,7 @@ def main():
         raise RuntimeError(f'Expected one allocated NVIDIA EGL device: {devices}')
     os.environ['EGL_DEVICE_ID'] = str(devices[0])
     meta = json.loads((args.recording/'metadata.json').read_text())
+    transfer = meta.get('experiment', {}).get('type') == 'brush_table_transfer'
     from dextrah_lab.wholebody.recording_contract import goal_rule_caption
     termination = meta.get('goal_termination_config')
     criterion_source = 'capture metadata'
@@ -44,6 +45,8 @@ def main():
     for key in ('body_pos', 'body_quat', 'object', 'goal', 'table'):
         if not np.isfinite(trace[key]).all():
             raise ValueError(f'Nonfinite captured geometry: {key}')
+    if transfer and not np.isfinite(trace['receiving_table']).all():
+        raise ValueError('Nonfinite receiving-table geometry')
     if not np.allclose(np.diff(trace['time_s']), 1/meta['fps'], atol=1e-6):
         raise ValueError('Nonuniform capture timestamps; do not invent frames')
 
@@ -88,14 +91,15 @@ def main():
         scene = pyrender.Scene(bg_color=[.94, .96, .98, 1.], ambient_light=[.43, .43, .43])
         robots = [(index, add(scene, mesh, color)) for index, mesh, color in geometry]
         assets = {}
-        for name in ('object', 'table', 'goal'):
+        for name in (('object', 'table', 'goal', 'receiving_table') if transfer else ('object', 'table', 'goal')):
             path = args.recording/('object.glb' if name == 'goal' else f'{name}.glb')
             color = dict(object=[1., .47, .06, 1.], table=[.50, .58, .64, .22 if close else 1.],
-                         goal=[.10, .82, .30, .20])[name]
+                         goal=[.10, .82, .30, .20], receiving_table=[.20, .48, .72, .25 if close else 1.])[name]
             assets[name] = add(scene, trimesh.load(path, force='mesh'), color)
         ground = trimesh.creation.box([4., 4., .01]); ground.apply_translation([0., 0., -.006])
         add(scene, ground, [.82, .86, .89, 1.])
-        camera_pose = look_at([1.65, -2., 1.6], [0., .25, .76])
+        camera_pose = (look_at([1.2, -2.1, 1.65], [-.25, .18, .76]) if transfer
+                       else look_at([1.65, -2., 1.6], [0., .25, .76]))
         camera = scene.add(pyrender.PerspectiveCamera(yfov=.66 if close else .70, znear=.005, zfar=30.), pose=camera_pose)
         light = scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.5), pose=camera_pose)
         scene.add(pyrender.PointLight(color=np.ones(3), intensity=5.), pose=look_at([-1., -.8, 2.], [0., 0., 1.]))
@@ -107,7 +111,8 @@ def main():
     renderer = pyrender.OffscreenRenderer(widths[0], view_height)
     font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
     title, text, small = [ImageFont.truetype(font_path, size) for size in (29, 22, 18)]
-    video = args.recording/f"g1-sonic-sapg-{meta['object_family']}.mp4"
+    suffix = '-table-transfer' if transfer else ''
+    video = args.recording/f"g1-sonic-sapg-{meta['object_family']}{suffix}.mp4"
     encoder = subprocess.Popen(['ffmpeg', '-nostdin', '-v', 'error', '-n', '-f', 'rawvideo',
         '-pixel_format', 'rgb24', '-video_size', f'{width}x{height}', '-framerate', str(meta['fps']),
         '-i', '-', '-an', '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-threads', '2',
@@ -134,15 +139,28 @@ def main():
                 image.paste(Image.fromarray(rgb), (0 if k == 0 else widths[0], 96))
             draw = ImageDraw.Draw(image)
             controller = 'Frozen SONIC' if meta.get('controller_mode') == 'frozen_pretrained_latent' else 'SONIC'
-            draw.text((22, 12), f"G1 + Revo2 | {controller} + SAPG | {meta['object_family'].capitalize()}", font=title, fill=(22, 35, 48))
+            label = 'Brush table transfer' if transfer else meta['object_family'].capitalize()
+            draw.text((22, 12), f"G1 + Revo2 | {controller} + SAPG | {label}", font=title, fill=(22, 35, 48))
             draw.text((22, 54), f"Checkpoint epoch {meta['checkpoint_epoch']} | deterministic leader | uncut {meta['seconds']:g}-second rollout", font=text, fill=(62, 77, 92))
             draw.text((22, 108), 'Full-body physics', font=text, fill=(24, 39, 54))
             draw.text((882, 108), 'Hand close-up (table translucent for visibility)', font=small, fill=(24, 39, 54))
             line = (f"t={trace['time_s'][i]:05.2f}s | Goals: {int(trace['goals'][i])} | Resets: {int(trace['resets'][i])}"
                     f" | Robot falls: {int(trace['robot_falls'][i])} | Pose error: {100*trace['goal_error'][i]:.1f} cm")
+            if transfer:
+                phase = meta['experiment']['phase_names'][int(trace['transfer_phase'][i])]
+                line = (f"t={trace['time_s'][i]:05.2f}s | Stage: {phase} | Carried over receiver: {int(trace['transfer_carried'][i])}"
+                        f" | Placed/released: {int(trace['transfer_placed'][i])} | Resets: {int(trace['resets'][i])}"
+                        f" | Robot falls: {int(trace['robot_falls'][i])}")
             draw.text((22, 798), line, font=text, fill=(24, 39, 54))
-            draw.text((22, 835), 'Orange: object | Green: target pose | '+goal_caption, font=small, fill=(62, 77, 92))
-            draw.text((22, 866), 'Measured PhysX body poses; no interpolation. BPS-128 + touch 70 Hz. No training or outcome-based selection.', font=small, fill=(62, 77, 92))
+            if transfer:
+                line = (f"Receiver contact: {trace['transfer_receiver_force_n'][i]:.2f} N | Robot-object contact: {trace['transfer_robot_object_force_n'][i]:.2f} N"
+                        f" | Pelvis XY displacement: {100*trace['transfer_root_displacement_m'][i]:.1f} cm")
+                footer = 'Orange: brush | Blue: receiver | Green: scripted OBJECT goal. No forced release, walking commands, or new training.'
+            else:
+                line = 'Orange: object | Green: target pose | '+goal_caption
+                footer = 'Measured PhysX body poses; no interpolation. BPS-128 + touch 70 Hz. No training or outcome-based selection.'
+            draw.text((22, 835), line, font=small, fill=(62, 77, 92))
+            draw.text((22, 866), footer, font=small, fill=(62, 77, 92))
             recent_fall = np.any((i-fall_events >= 0) & (i-fall_events < meta['fps']))
             recent_reset = np.any((i-reset_events >= 0) & (i-reset_events < meta['fps']))
             if recent_reset:
@@ -167,6 +185,7 @@ def main():
         measured_body_poses=True, frame_interpolation=False, all_resets_retained=True,
         goal_caption=goal_caption, goal_termination_config=termination,
         goal_criterion_source=criterion_source, renderer_source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'),
+        experiment=meta.get('experiment'),
         omitted_nonphysical_visual_links=sorted(set(omitted)))
     (args.recording/'video_validation.json').write_text(json.dumps(validation, indent=2))
     print('WHOLEBODY_VIDEO_VALIDATED '+json.dumps(validation), flush=True)
