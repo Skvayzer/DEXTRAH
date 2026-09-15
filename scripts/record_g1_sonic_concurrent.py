@@ -26,7 +26,12 @@ def main():
     parser.add_argument('--render-only', action='store_true', help='Render a completed capture, without simulation')
     parser.add_argument('--checkpoint-run', type=Path, help='Optional immutable snapshot; --source-run still monitors training')
     parser.add_argument('--brush-transfer', action='store_true')
+    parser.add_argument('--navigation-planner', type=Path)
+    parser.add_argument('--navigation-only', action='store_true')
+    parser.add_argument('--capture-only', action='store_true')
     args = parser.parse_args()
+    if (args.navigation_planner and not args.brush_transfer) or (args.navigation_only and not args.navigation_planner):
+        raise ValueError('Navigation requires --brush-transfer and --navigation-planner')
     if not os.environ.get('SLURM_JOB_ID') or os.environ.get('SLURM_STEP_ID') in (None, 'batch', 'extern'):
         raise RuntimeError('Use a separate step inside the existing training allocation')
     device = os.environ.get('CUDA_VISIBLE_DEVICES', '')
@@ -110,13 +115,18 @@ def main():
 
     if not args.render_only:
         extra = ['--families', 'brush', '--brush-transfer'] if args.brush_transfer else []
+        if args.navigation_planner:
+            extra += ['--navigation-planner', args.navigation_planner]
+        if args.navigation_only:
+            extra += ['--navigation-only']
         run([sim_python, 'scripts/record_g1_sonic_checkpoint.py', '--headless', '--device', 'cuda:0',
              '--kit_args=--/plugins/carb.tasking.plugin/threadCount=4 --/plugins/omni.tbb.globalcontrol/maxThreadCount=4',
              '--checkpoint', copied, '--output', capture, '--num-envs', '6' if args.brush_transfer else '120', '--seconds', args.seconds,
              '--torch-memory-limit-gib', '4', *extra])
-    for family in (('brush',) if args.brush_transfer else ('hammer', 'brush', 'spatula')):
+    for family in (() if args.capture_only else (('brush',) if args.brush_transfer else ('hammer', 'brush', 'spatula'))):
         run([render_python, 'scripts/render_g1_sonic_checkpoint.py', capture/family])
-    provenance.update(training_after=progress(), gpu_after=memory(), completed=True)
+    provenance.update(training_after=progress(), gpu_after=memory(), completed=True,
+                      video_rendered=not args.capture_only)
     (args.output/'provenance.json').write_text(json.dumps(provenance, indent=2))
     print('CONCURRENT_RECORDING_COMPLETE '+json.dumps(provenance), flush=True)
 

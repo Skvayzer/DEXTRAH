@@ -28,10 +28,14 @@ def main():
     parser.add_argument('--families', nargs='+', default=['hammer', 'brush', 'spatula'])
     parser.add_argument('--torch-memory-limit-gib', type=float, default=4.)
     parser.add_argument('--brush-transfer', action='store_true', help='Inference-only two-table brush probe')
+    parser.add_argument('--navigation-planner', type=Path, help='Pinned SONIC planner; requires --brush-transfer')
+    parser.add_argument('--navigation-only', action='store_true', help='Zero latent/finger means for a locomotion-only diagnostic')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     if args.brush_transfer and args.families != ['brush']:
         raise ValueError('The transfer probe records only --families brush')
+    if (args.navigation_planner and not args.brush_transfer) or (args.navigation_only and not args.navigation_planner):
+        raise ValueError('Navigation requires the brush probe and an explicit planner')
     if args.output.exists() or not args.checkpoint.is_file():
         raise ValueError('Require an existing checkpoint and a fresh output path')
     if args.num_envs < 6 or args.num_envs % 6 or args.seconds <= 0 or args.fps <= 0:
@@ -93,7 +97,14 @@ def main():
             cfg.episode_length_s = args.seconds+1.
             cfg.termination.episode_length = round(cfg.episode_length_s*60)
             cfg.termination.max_consecutive_successes = 0
-        env = env_type(cfg, sonic=sonic)
+        env_kwargs = {}
+        if args.navigation_planner:
+            if not frozen:
+                raise ValueError('Navigation requires the original frozen SONIC controller')
+            from dextrah_lab.wholebody.navigation_transfer_env import NavigationBrushEnv
+            env_type = NavigationBrushEnv
+            env_kwargs = dict(planner_path=args.navigation_planner, navigation_only=args.navigation_only)
+        env = env_type(cfg, sonic=sonic, **env_kwargs)
         stride = round(1/(args.fps*env.step_dt))
         if stride < 1 or not np.isclose(stride*args.fps*env.step_dt, 1):
             raise ValueError('FPS must divide policy frequency')
@@ -192,6 +203,8 @@ def main():
                 wrapped_obs = torch.cat((obs['policy'], obs['policy'].new_zeros(env.num_envs, 1)), -1)
                 output = model(dict(obs=wrapped_obs, is_train=False, prev_actions=None, rnn_states=states))
                 action = execution_means(output['mus'], frozen=frozen)
+                if args.navigation_only:
+                    action[ids] = 0.
                 states = output['rnn_states']
                 if not torch.isfinite(action).all():
                     raise RuntimeError('Nonfinite checkpoint action')
@@ -229,6 +242,8 @@ def main():
                         robot_falls=int(robot_falls[index]), numerical_failures=int(numerical[index]))
             if args.brush_transfer:
                 meta['transfer_report'] = env.transfer.report()
+            if args.navigation_planner:
+                meta['navigation_report'] = env.navigation.report()
             (directory/'metadata.json').write_text(json.dumps(meta, indent=2))
             (directory/'events.json').write_text(json.dumps(events[family], indent=2))
         report.update(completed=True, checkpoint_sha256=checkpoint_sha, metrics=stats.report(),
@@ -236,6 +251,8 @@ def main():
             selected=selected, wall_seconds=time.monotonic()-start)
         if args.brush_transfer:
             report['transfer_report'] = env.transfer.report()
+        if args.navigation_planner:
+            report['navigation_report'] = env.navigation.report()
         if controller_audit is not None:
             report.update(controller_audit.check())
         print('WHOLEBODY_RECORDING_COMPLETE '+json.dumps(report), flush=True)

@@ -26,7 +26,8 @@ def main():
         raise RuntimeError(f'Expected one allocated NVIDIA EGL device: {devices}')
     os.environ['EGL_DEVICE_ID'] = str(devices[0])
     meta = json.loads((args.recording/'metadata.json').read_text())
-    transfer = meta.get('experiment', {}).get('type') == 'brush_table_transfer'
+    navigation = meta.get('experiment', {}).get('type') == 'brush_navigation_transfer'
+    transfer = navigation or meta.get('experiment', {}).get('type') == 'brush_table_transfer'
     from dextrah_lab.wholebody.recording_contract import goal_rule_caption
     termination = meta.get('goal_termination_config')
     criterion_source = 'capture metadata'
@@ -112,6 +113,8 @@ def main():
     font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
     title, text, small = [ImageFont.truetype(font_path, size) for size in (29, 22, 18)]
     suffix = '-table-transfer' if transfer else ''
+    if navigation:
+        suffix = '-navigation-transfer'
     video = args.recording/f"g1-sonic-sapg-{meta['object_family']}{suffix}.mp4"
     encoder = subprocess.Popen(['ffmpeg', '-nostdin', '-v', 'error', '-n', '-f', 'rawvideo',
         '-pixel_format', 'rgb24', '-video_size', f'{width}x{height}', '-framerate', str(meta['fps']),
@@ -139,7 +142,7 @@ def main():
                 image.paste(Image.fromarray(rgb), (0 if k == 0 else widths[0], 96))
             draw = ImageDraw.Draw(image)
             controller = 'Frozen SONIC' if meta.get('controller_mode') == 'frozen_pretrained_latent' else 'SONIC'
-            label = 'Brush table transfer' if transfer else meta['object_family'].capitalize()
+            label = ('Brush transfer with navigation' if navigation else 'Brush table transfer') if transfer else meta['object_family'].capitalize()
             draw.text((22, 12), f"G1 + Revo2 | {controller} + SAPG | {label}", font=title, fill=(22, 35, 48))
             draw.text((22, 54), f"Checkpoint epoch {meta['checkpoint_epoch']} | deterministic leader | uncut {meta['seconds']:g}-second rollout", font=text, fill=(62, 77, 92))
             draw.text((22, 108), 'Full-body physics', font=text, fill=(24, 39, 54))
@@ -156,6 +159,11 @@ def main():
                 line = (f"Receiver contact: {trace['transfer_receiver_force_n'][i]:.2f} N | Robot-object contact: {trace['transfer_robot_object_force_n'][i]:.2f} N"
                         f" | Pelvis XY displacement: {100*trace['transfer_root_displacement_m'][i]:.1f} cm")
                 footer = 'Orange: brush | Blue: receiver | Green: scripted OBJECT goal. No forced release, walking commands, or new training.'
+                if navigation:
+                    line = (f"cmd_vel body: {trace['transfer_cmd_vx'][i]:+.2f}, {trace['transfer_cmd_vy'][i]:+.2f} m/s, {trace['transfer_cmd_wz'][i]:+.2f} rad/s"
+                            f" | Measured: {trace['transfer_measured_vx'][i]:+.2f}, {trace['transfer_measured_vy'][i]:+.2f} m/s"
+                            f" | Waypoint: {int(trace['transfer_waypoint'][i])+1} | Arrived: {int(trace['transfer_navigation_arrived'][i])}")
+                    footer = 'Velocity commands -> NVIDIA motion planner -> frozen SONIC + SAPG. Body-relative carry target; no new training or forced release.'
             else:
                 line = 'Orange: object | Green: target pose | '+goal_caption
                 footer = 'Measured PhysX body poses; no interpolation. BPS-128 + touch 70 Hz. No training or outcome-based selection.'

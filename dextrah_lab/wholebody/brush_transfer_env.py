@@ -89,17 +89,18 @@ class BrushTransferEnv(G1SonicTouchEnv):
         goal[:, :3] += self.scene.env_origins[self.transfer_ids]
         self.goal_viz.write_root_pose_to_sim(goal, env_ids=self.transfer_ids)
 
+    def _update_transfer(self):
+        index = self.transfer_index
+        forces = self.transfer_contact.data.force_matrix_w[index, 0]
+        self.transfer.update(self._local_pose(self.object),
+            self.object.data.root_vel_w[index].detach().cpu().numpy(),
+            self._local_pose(self.robot)[:3], self._local_pose(self.table)[2]+TABLE_SIZE[2]/2,
+            float(forces[0].norm()), float(forces[1:].norm(dim=-1).sum()), self.step_dt)
+
     def _get_dones(self):
         if self.transfer is not None and self.transfer.state is not None:
             if self._transfer_last_step != self._sim_step_counter:
-                index = self.transfer_index
-                forces = self.transfer_contact.data.force_matrix_w[index, 0]
-                receiver_force = float(forces[0].norm())
-                robot_force = float(forces[1:].norm(dim=-1).sum())
-                self.transfer.update(self._local_pose(self.object),
-                    self.object.data.root_vel_w[index].detach().cpu().numpy(),
-                    self._local_pose(self.robot)[:3], self._local_pose(self.table)[2]+TABLE_SIZE[2]/2,
-                    receiver_force, robot_force, self.step_dt)
+                self._update_transfer()
                 self._transfer_last_step = self._sim_step_counter
             self._write_transfer_goal()
         result = super()._get_dones()
