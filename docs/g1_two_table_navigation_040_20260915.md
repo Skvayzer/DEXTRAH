@@ -123,3 +123,19 @@ The selected-robot JSON summary and diagnostic PNG/PDF plots can be reproduced
 with `python scripts/analyze_g1_navigation_transfer.py outputs/brush_navigation040_560_20260915/capture/brush`.
 They include all recorded attempts, separate transfer checks from reposing hits,
 and do not smooth the measured velocity or join paths across resets.
+
+## Video and cleanup
+
+Rendered in Slurm step **560.21**, source `6938771`, with a moving wide camera,
+measured hand close-up, commanded/measured velocity overlays and a top-view
+route/pelvis trail. The original PhysX body poses and all resets are retained.
+Workstation ffprobe validation: **1600 x 900, 30 fps, 3,600 frames, 120 seconds**.
+
+Laptop copy (only the video is placed in the Desktop recordings directory):
+`/Users/konstantinsmirnov/Desktop/research_recordings/g1-two-table-navigation-040-brush-20260915.mp4`.
+It is 34,305,408 bytes; workstation/laptop SHA-256 match:
+`3a911c0de754f5629c2c0d268d5ca9da6720e5fa596b891d46d8cfc1940f7d7d`.
+
+Capture and rendering both exited normally. No capture, viewer or render step
+remains; only `560.batch` was present at the final check. Training reached epoch
+19,340 / 2,849,470,464 frames, with original SONIC still verified frozen.
