@@ -46,6 +46,7 @@ class NavigationTransferDriver(BrushTransferDriver):
         super().reset(goal_pose, receiver_pose, root_position)
         self.navigator = None
         self.mode = 0  # 0 grasp, 1 navigation, 2 reach/lower at stationary destination
+        self.state['navigation_arrived'] = False
         self.command = np.zeros(3)
         self.lost_contact_s = 0.
         self.root_pose = np.r_[root_position, 1., 0., 0., 0.]
@@ -84,6 +85,7 @@ class NavigationTransferDriver(BrushTransferDriver):
             self.goal[3:] = [c*w-s*z, c*x-s*y, c*y+s*x, c*z+s*w]
             if self.navigator.done:
                 self.mode = 2
+                self.state['navigation_arrived'] = True
                 self.command[:] = 0.
                 self.hover[:2] = self.receiver[:2]+[0., .04]
                 self.hover[2] = self.carry_z
@@ -104,4 +106,5 @@ class NavigationTransferDriver(BrushTransferDriver):
             release_override=False, navigation_speed_limit_m_s=.12,
             route=None if self.navigator is None else self.navigator.waypoints.tolist(),
             navigation_arrived=self.mode == 2)
+        value['counts']['navigation_arrived'] = sum(bool(a.get('navigation_arrived')) for a in value['attempts'])
         return value
