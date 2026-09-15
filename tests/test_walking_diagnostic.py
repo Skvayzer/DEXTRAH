@@ -6,7 +6,7 @@ from dextrah_lab.wholebody.walking_diagnostic import cases, command_at, metrics
 class WalkingDiagnosticTests(unittest.TestCase):
     def test_predeclared_independent_commands_and_stop(self):
         all_cases = cases()
-        self.assertEqual(len({c['name'] for c in all_cases}), 9)
+        self.assertEqual(len({c['name'] for c in all_cases}), 11)
         case = next(c for c in all_cases if c['name'] == 'right_040_yaw90')
         np.testing.assert_array_equal(command_at(case, 1.99), [0, 0, 0])
         np.testing.assert_array_equal(command_at(case, 2.), [0, -.4, 0])
