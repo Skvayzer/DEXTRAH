@@ -246,7 +246,7 @@ def main():
         for kind in robots:
             report['robots'][kind]['tests'] = {}
             for i, case in enumerate(tests):
-                folder = args.output/kind/case['name']; folder.mkdir(parents=True)
+                folder = args.output/kind/case['name']; folder.mkdir(parents=True, exist_ok=True)
                 trace = {k: np.stack([f[k] for f in traces[kind][i]]) for k in traces[kind][i][0]}
                 np.savez_compressed(folder/'trajectory.npz', **trace)
                 summary = metrics(trace, case)
