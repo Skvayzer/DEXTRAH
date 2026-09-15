@@ -61,7 +61,7 @@ class NavigationBrushEnv(BrushTransferEnv):
                 if not self.navigation_only:
                     # Preserve the trained arm-reference baseline, not physical arm
                     # joints. SONIC + SAPG still generate all body joint targets.
-                    q[:, self._arm_reference_ids] = self._standing_reference_q[index, :, self._arm_reference_ids].cpu().numpy()
+                    q[:, self._arm_reference_ids] = self._standing_reference_q[index][:, self._arm_reference_ids].cpu().numpy()
                     qd[:, self._arm_reference_ids] = 0.
                 self._reference_q[index] = torch.as_tensor(q, device=self.device)
                 self._reference_qd[index] = torch.as_tensor(qd, device=self.device)
