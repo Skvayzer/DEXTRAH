@@ -59,7 +59,18 @@ def main():
         torch.manual_seed(42)
         torch.cuda.set_per_process_memory_fraction(4*2**30/torch.cuda.get_device_properties(0).total_memory)
         sonic = FrozenSonic(args.workspace/'GRAIL', args.workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
-        from gear_sonic.envs.manager_env.robots.g1 import G1_CYLINDER_MODEL_12_DEX_CFG
+        # Load the real upstream config files without importing the unrelated
+        # motion-dataset/training package initializer and its optional deps.
+        import importlib.util
+        import runpy
+        import sys
+        upstream = args.workspace/'GRAIL/imports/SONIC/gear_sonic/envs/manager_env'
+        module_name = 'gear_sonic.envs.manager_env.mdp.actuators'
+        spec = importlib.util.spec_from_file_location(module_name, upstream/'mdp/actuators.py')
+        actuator_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = actuator_module
+        spec.loader.exec_module(actuator_module)
+        G1_CYLINDER_MODEL_12_DEX_CFG = runpy.run_path(str(upstream/'robots/g1.py'))['G1_CYLINDER_MODEL_12_DEX_CFG']
         tests = [c for c in cases() if args.case is None or c['name'] in args.case]
         if not tests or (args.case and set(args.case) != {c['name'] for c in tests}):
             raise ValueError('Unknown or empty test selection')
