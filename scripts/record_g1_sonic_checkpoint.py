@@ -141,6 +141,11 @@ def main():
             torch_memory_limit_gib=args.torch_memory_limit_gib,
             body_poses='Measured PhysX link poses; no FK substitution or pose interpolation',
             task_contract=previous, recording_task_contract=contract)
+        if args.navigation_planner:
+            target_ids = set(env._position_target_joint_ids_list)
+            if not set(env._body_ids.tolist()).issubset(target_ids):
+                raise RuntimeError('Navigation body joints missing from the actual motor target writer')
+            metadata['position_target_joint_ids'] = sorted(target_ids)
         del checkpoint
         assignment = env._object_asset_index_per_env.cpu().numpy()
         selected = select_family_envs(env._object_urdf_paths, assignment, args.families)
@@ -200,6 +205,15 @@ def main():
                         frames[-1]['receiving_table'] = pose(env.receiving_table)
                         frames[-1].update({'transfer_'+key: np.full(len(ids), value)
                                            for key, value in env.transfer.telemetry.items()})
+                    if args.navigation_planner:
+                        frames[-1].update(
+                            navigation_reference_q=array(env._reference_q[ids]),
+                            navigation_reference_qd=array(env._reference_qd[ids]),
+                            navigation_joint_q=array(env.robot.data.joint_pos[ids][:, env._body_ids]),
+                            navigation_joint_qd=array(env.robot.data.joint_vel[ids][:, env._body_ids]),
+                            navigation_decoded_action=array(env._last_decoded_sonic_action[ids]),
+                            navigation_motor_target=array(env.robot.data.joint_pos_target[ids][:, env._body_ids]),
+                            navigation_target_buffer=array(env._cur_targets[ids][:, env._body_ids]))
                 wrapped_obs = torch.cat((obs['policy'], obs['policy'].new_zeros(env.num_envs, 1)), -1)
                 output = model(dict(obs=wrapped_obs, is_train=False, prev_actions=None, rnn_states=states))
                 action = execution_means(output['mus'], frozen=frozen)
