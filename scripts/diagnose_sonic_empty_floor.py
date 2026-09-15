@@ -92,7 +92,25 @@ def main():
                 cfg.spawn.usd_dir = str(args.output/'upstream_usd')
                 cfg.spawn.usd_file_name = 'robot.usd'
                 cfg.spawn.force_usd_conversion = True
-                urdf = cfg.spawn.asset_path
+                # Isaac's importer does not resolve this release's ROS package
+                # URI here. Stage an exact copy changing mesh paths ONLY.
+                import xml.etree.ElementTree as ET
+                source_urdf = Path(cfg.spawn.asset_path).resolve()
+                tree = ET.parse(source_urdf)
+                asset_root = source_urdf.parent.parent.parent
+                for mesh in tree.getroot().findall('.//mesh'):
+                    uri = mesh.get('filename')
+                    prefix = 'package://robot_description/'
+                    if not uri.startswith(prefix):
+                        raise ValueError(f'Unexpected upstream mesh URI: {uri}')
+                    path = asset_root/uri[len(prefix):]
+                    with path.open('rb') as stream:
+                        if stream.read(80).startswith(b'version https://git-lfs'):
+                            raise RuntimeError(f'Fetch original Git LFS mesh first: {path}')
+                    mesh.set('filename', str(path))
+                urdf = args.output/'upstream_resolved.urdf'
+                tree.write(urdf, encoding='utf-8', xml_declaration=True)
+                cfg.spawn.asset_path = str(urdf)
             else:
                 # Reuse the source importer/baker and actual trained actuator
                 # configuration, not the older native-mimic Revo2 prototype.
