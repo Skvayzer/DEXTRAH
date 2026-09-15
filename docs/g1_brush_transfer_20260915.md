@@ -98,3 +98,19 @@ The last attempt is still lowering at the cutoff, so a longer unchanged probe
 would separate lack of time from a true terminal placement/release limitation.
 Any subsequent training for reliable transfer should be a separately authorized
 experiment, not an unannounced change to job 560.
+
+## Delivered video
+
+The laptop copy is
+`/Users/konstantinsmirnov/Desktop/research_recordings/g1-frozen-sonic-sapg-brush-table-transfer-60s-20260915.mp4`.
+It passed 1,800-frame / 60-second / 1600x900 export validation. Initial,
+pre-fall and final previews were visually inspected; no physical-link visuals
+were omitted. The complete uncut clip retains both resets.
+
+Workstation and laptop SHA-256 match:
+`d65f514e09b13ca302acb5b9d78eb9620f5213ce51b689aaace568e2db415051`.
+The completed recording provenance shows training advancing from
+2,432,612,352 to 2,470,508,544 transitions, with pretrained SONIC unchanged.
+The post-transfer scheduler check confirmed job 560 still RUNNING and only
+its batch step remaining; no recorder, renderer or viewer was left active
+by this experiment.
