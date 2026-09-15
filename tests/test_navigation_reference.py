@@ -65,6 +65,16 @@ class NavigationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             velocity_inputs([1, 0, 0], 0, np.zeros((4, 36)))
 
+    def test_documented_lateral_speed_requires_explicit_opt_in(self):
+        context = np.tile(np.r_[0, 0, .75, 1, np.zeros(32)], (4, 1))
+        with self.assertRaises(ValueError):
+            velocity_inputs([0, -.4, 0], 0, context)
+        value = velocity_inputs([0, -.4, 0], 0, context, speed_limit=.4)
+        self.assertAlmostEqual(float(value['target_vel'][0]), .4)
+        for limit in (float('nan'), -.1, .81):
+            with self.assertRaises(ValueError):
+                NavigationReference('fake', session=FakePlanner(), speed_limit=limit)
+
     def test_short_plan_does_not_restart_crossfade_at_ten_hz(self):
         class ShortPlanner(FakePlanner):
             def run(self, _, feeds):

@@ -47,7 +47,7 @@ def sample_motion(frames, times):
     return result
 
 
-def velocity_inputs(command_body, heading, context, seed=1234, *, facing_heading=None):
+def velocity_inputs(command_body, heading, context, seed=1234, *, facing_heading=None, speed_limit=.3):
     """ROS-style (vx, vy, yaw_rate) to planner speed/world directions.
 
     Important: target_vel=0 means DEFAULT SPEED upstream, not stop. Select
@@ -59,7 +59,9 @@ def velocity_inputs(command_body, heading, context, seed=1234, *, facing_heading
     if command.shape != (3,) or context.shape != (4, 36) or not np.isfinite(np.r_[command, context.ravel(), heading]).all():
         raise ValueError('Invalid navigation command/context')
     speed = float(np.linalg.norm(command[:2]))
-    if speed > .3 or abs(command[2]) > .3:
+    if not np.isfinite(speed_limit) or not 0 < speed_limit <= .8:
+        raise ValueError('Invalid diagnostic speed limit')
+    if speed > speed_limit+1e-7 or abs(command[2]) > .3:
         raise ValueError('Diagnostic command exceeds conservative speed limits')
     c, s = np.cos(heading), np.sin(heading)
     world = np.array([c*command[0]-s*command[1], s*command[0]+c*command[1], 0.])
@@ -85,8 +87,11 @@ class NavigationReference:
     is checked at 10 Hz, from the previous planned trajectory (not invented
     measurements), with 40 ms lookahead and a 160 ms crossfade.
     """
-    def __init__(self, path, *, session=None):
+    def __init__(self, path, *, session=None, speed_limit=.3):
         self.path = str(path)
+        if not np.isfinite(speed_limit) or not 0 < speed_limit <= .8:
+            raise ValueError('Invalid diagnostic speed limit')
+        self.speed_limit = speed_limit
         if session is None:
             with Path(path).open('rb') as stream:
                 if hashlib.file_digest(stream, 'sha256').hexdigest() != PLANNER_SHA256:
@@ -103,7 +108,8 @@ class NavigationReference:
         self.wall_seconds = 0.
 
     def _infer(self, context, command, heading, facing_heading=None):
-        feeds = velocity_inputs(command, heading, context, facing_heading=facing_heading)
+        feeds = velocity_inputs(command, heading, context, facing_heading=facing_heading,
+                                speed_limit=self.speed_limit)
         types = {'tensor(float)': np.float32, 'tensor(int64)': np.int64,
                  'tensor(int32)': np.int32}
         actual = {}
@@ -153,7 +159,7 @@ class NavigationReference:
         command = np.asarray(command, float)
         if command.shape != (3,) or not np.isfinite(np.r_[command, heading, now]).all():
             raise ValueError('Invalid navigation command/time')
-        if np.linalg.norm(command[:2]) > .3 or abs(command[2]) > .3:
+        if np.linalg.norm(command[:2]) > self.speed_limit+1e-7 or abs(command[2]) > .3:
             raise ValueError('Diagnostic command exceeds conservative speed limits')
         self.desired_heading += command[2]*(now-self.last_call)
         self.last_call = now
@@ -197,6 +203,7 @@ class NavigationReference:
                     inference_wall_seconds=self.wall_seconds, reference_hz=50,
                     future_frames=10, future_spacing_s=.1, command_check_hz=10,
                     walking_periodic_replan_s=1.,
+                    speed_limit_m_s=self.speed_limit,
                     facing='integrated commanded yaw-rate, initialized at measured yaw',
                     context='previous planned reference, initialized from measured robot',
                     robot_state_writes=False)
