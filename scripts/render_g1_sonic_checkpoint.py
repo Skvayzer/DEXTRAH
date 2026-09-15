@@ -108,6 +108,7 @@ def main():
         return scene, robots, assets, camera, light
 
     views = [make_scene(False), make_scene(True)]
+    navigation_camera_focus = np.array([-.25, .18, .76])
     width, height, view_height = 1600, 900, 690
     widths = [860, 740]
     renderer = pyrender.OffscreenRenderer(widths[0], view_height)
@@ -174,6 +175,16 @@ def main():
                 if k:
                     focus = trace['body_pos'][i, wrist]
                     camera_pose = look_at(focus+[.43, -.54, .28], focus)
+                    scene.set_pose(camera, camera_pose); scene.set_pose(light, camera_pose)
+                elif navigation and not navigation_only:
+                    # Keep both tables and a drifting/falling robot visible;
+                    # camera motion never changes the recorded physical poses.
+                    xy = np.stack([trace[name][i, :2] for name in ('robot', 'table', 'receiving_table')])
+                    desired = np.r_[(xy.min(axis=0)+xy.max(axis=0))/2, .76]
+                    navigation_camera_focus += .08*(desired-navigation_camera_focus)
+                    span = max(1., float(np.ptp(xy, axis=0).max()))
+                    offset = np.array([1.9, -3., 1.35])*max(1., span/1.8)
+                    camera_pose = look_at(navigation_camera_focus+offset, navigation_camera_focus)
                     scene.set_pose(camera, camera_pose); scene.set_pose(light, camera_pose)
                 renderer.viewport_width = widths[k]
                 rgb, _ = renderer.render(scene)
