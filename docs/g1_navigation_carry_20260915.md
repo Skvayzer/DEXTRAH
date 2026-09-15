@@ -12,6 +12,11 @@ combined SAPG carrying integration. Native 50/200 Hz timing was used, and
 standing manipulation training was not changed. Detailed historical failures
 below are retained rather than relabeled as successes.
 
+The subsequent [0.4 m/s two-table brush test](g1_two_table_navigation_040_20260915.md)
+completed 120 seconds with 13 contact-confirmed lifts but **zero navigation
+arrivals/transfers**, seven robot falls and eight object-drop resets. Bare
+walking success has not yet carried over to the combined manipulation setup.
+
 ## Intent
 
 The preceding transfer probe moved only the object goal, leaving SONIC's
