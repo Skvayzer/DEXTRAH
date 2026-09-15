@@ -1,5 +1,17 @@
 # Navigation-commanded brush carrying — 2026-09-15
 
+## Latest result: empty-floor walking works at 0.4 m/s
+
+The later [controlled empty-floor comparison](g1_empty_floor_walking_20260915.md)
+reproduces the 0.12 m/s stall on both original G1 and Revo2 assets, while the
+same frozen controller walks in the correct direction at 0.4 m/s. Revo2 mean
+lateral speed was 0.388 m/s, forward 0.310 m/s and backward 0.251 m/s for
+0.4 m/s commands. All 22 trials completed without falls. This supersedes the
+earlier lack of a demonstrated empty-floor gait, **not** the still-unvalidated
+combined SAPG carrying integration. Native 50/200 Hz timing was used, and
+standing manipulation training was not changed. Detailed historical failures
+below are retained rather than relabeled as successes.
+
 ## Intent
 
 The preceding transfer probe moved only the object goal, leaving SONIC's
