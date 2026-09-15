@@ -90,3 +90,21 @@ zero residual/finger means for a short locomotion-only diagnostic, before
 testing the original learned residual and fingers together. Neither diagnostic
 does optimizer updates. A reliable navigation-plus-grasp controller may need
 later fine-tuning across walking references; that is not silently included here.
+
+### First physics check: locomotion tracking NOT passed
+
+`outputs/brush_navigation_walkcheck_560_20260915`, source `7e87c37`, Slurm
+step 560.8: 14 seconds, zero manipulation residual/finger means for the selected
+robot, 2 seconds idle, 8 seconds local rightward velocity -0.12 m/s, then idle.
+There were zero robot falls, zero resets and zero numerical failures, but this
+is **not a successful commanded-walk test**. The root ended at approximately
+(-0.174, 1.079, 0.788) from (0, 0.420, 0.750): most displacement was backward
+in world +Y rather than commanded world -X. Mean measured body lateral speed
+over 3–9 s was -0.043 m/s, and it largely stopped moving during the latter part
+of the walking command. Mean speed after 12 s was 0.017 m/s.
+
+The raw first check is preserved, including all body-pose trajectories. A
+repeat adds reference joint positions/velocities, actual joint state, decoded
+SONIC action and delivered motor targets to isolate the failure. Combining
+this with grasping before validating locomotion would confound the diagnosis.
+No training restart or reward change was made.
