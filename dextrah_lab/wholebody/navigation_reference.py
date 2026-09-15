@@ -47,11 +47,12 @@ def sample_motion(frames, times):
     return result
 
 
-def velocity_inputs(command_body, heading, context, seed=1234):
+def velocity_inputs(command_body, heading, context, seed=1234, *, facing_heading=None):
     """ROS-style (vx, vy, yaw_rate) to planner speed/world directions.
 
     Important: target_vel=0 means DEFAULT SPEED upstream, not stop. Select
-    IDLE explicitly for zero translation; heading integrates yaw-rate at 10 Hz.
+    IDLE explicitly for zero translation. The bridge integrates commanded
+    yaw-rate separately: measured heading rotates velocity, not desired facing.
     """
     command = np.asarray(command_body, float)
     context = np.asarray(context, np.float32)
@@ -62,7 +63,9 @@ def velocity_inputs(command_body, heading, context, seed=1234):
         raise ValueError('Diagnostic command exceeds conservative speed limits')
     c, s = np.cos(heading), np.sin(heading)
     world = np.array([c*command[0]-s*command[1], s*command[0]+c*command[1], 0.])
-    facing = heading+command[2]*.1
+    facing = heading if facing_heading is None else float(facing_heading)
+    if not np.isfinite(facing):
+        raise ValueError('Invalid desired facing heading')
     return dict(context_mujoco_qpos=context[None],
         target_vel=np.array([speed if speed > 1e-4 else -1.], np.float32),
         mode=np.array([1 if speed > 1e-4 else 0], np.int64),
@@ -99,8 +102,8 @@ class NavigationReference:
         self.inferences = 0
         self.wall_seconds = 0.
 
-    def _infer(self, context, command, heading):
-        feeds = velocity_inputs(command, heading, context)
+    def _infer(self, context, command, heading, facing_heading=None):
+        feeds = velocity_inputs(command, heading, context, facing_heading=facing_heading)
         types = {'tensor(float)': np.float32, 'tensor(int64)': np.int64,
                  'tensor(int32)': np.int32}
         actual = {}
@@ -136,27 +139,40 @@ class NavigationReference:
         pose[7+ISAAC_FROM_MUJOCO] = body_q
         self.frames = self._infer(np.repeat(pose[None], 4, axis=0), np.zeros(3), yaw_of(root_pose[3:]))
         self.origin = self.last_plan = self.last_tick = now
+        self.last_call = now
         self.command = np.zeros(3)
         self.heading = yaw_of(root_pose[3:])
+        self.desired_heading = self.heading
+        self.world_velocity = np.zeros(2)
 
     def reference(self, now, command, heading):
         if self.frames is None:
             raise RuntimeError('Initialize navigation reference first')
-        if now < self.origin-1e-6:
+        if now < self.last_call-1e-6:
             raise ValueError('Navigation clock moved backwards')
         command = np.asarray(command, float)
+        if command.shape != (3,) or not np.isfinite(np.r_[command, heading, now]).all():
+            raise ValueError('Invalid navigation command/time')
+        if np.linalg.norm(command[:2]) > .3 or abs(command[2]) > .3:
+            raise ValueError('Diagnostic command exceeds conservative speed limits')
+        self.desired_heading += command[2]*(now-self.last_call)
+        self.last_call = now
         if now-self.last_tick >= .1-1e-6:
             self.last_tick = now
             moving = np.linalg.norm(command[:2]) > 1e-4
             old_moving = np.linalg.norm(self.command[:2]) > 1e-4
-            changed = moving != old_moving or np.linalg.norm(command-self.command) > .015
-            # Keep enough horizon for the ten future frames even for short sampled plans.
-            near_end = now-self.origin+.94 >= (len(self.frames)-1)/50
-            turn = abs(np.arctan2(np.sin(heading-self.heading), np.cos(heading-self.heading))) > .04
-            if changed or turn or (moving and (now-self.last_plan >= 1. or near_end)):
+            c, s = np.cos(heading), np.sin(heading)
+            world_velocity = np.array([c*command[0]-s*command[1], s*command[0]+c*command[1]])
+            changed = moving != old_moving or np.linalg.norm(world_velocity-self.world_velocity) > .015
+            turn = abs(np.arctan2(np.sin(self.desired_heading-self.heading),
+                                  np.cos(self.desired_heading-self.heading))) > .04
+            # Upstream checks commands at 10 Hz but replans walking at 1 Hz.
+            # Short horizons are endpoint-padded, not replanned every check:
+            # repeatedly restarting a 160 ms crossfade at 100 ms stalls gait.
+            if changed or turn or (moving and now-self.last_plan >= 1.-1e-6):
                 old_times = now-self.origin + np.arange(4)/30 + .04
                 context = sample_motion(self.frames, old_times)
-                new = self._infer(context, command, heading)
+                new = self._infer(context, command, heading, self.desired_heading)
                 # Retain old reference through the 40 ms lead, then 160 ms blend.
                 times = np.arange(len(new)+2)/50
                 old = sample_motion(self.frames, now-self.origin+times)
@@ -166,7 +182,8 @@ class NavigationReference:
                 blended[:, 3:7] = slerp(old[:, 3:7], fresh[:, 3:7], weight)
                 self.frames = blended
                 self.origin = self.last_plan = now
-                self.command = command.copy(); self.heading = heading
+                self.command = command.copy(); self.heading = self.desired_heading
+                self.world_velocity = world_velocity
         query = now-self.origin+np.arange(10)*.1
         reference = sample_motion(self.frames, query)
         forward = sample_motion(self.frames, query+.02)
@@ -179,5 +196,7 @@ class NavigationReference:
                     inference_backend='ONNX Runtime CPU', inferences=self.inferences,
                     inference_wall_seconds=self.wall_seconds, reference_hz=50,
                     future_frames=10, future_spacing_s=.1, command_check_hz=10,
+                    walking_periodic_replan_s=1.,
+                    facing='integrated commanded yaw-rate, initialized at measured yaw',
                     context='previous planned reference, initialized from measured robot',
                     robot_state_writes=False)

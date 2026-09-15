@@ -27,6 +27,7 @@ def main():
     os.environ['EGL_DEVICE_ID'] = str(devices[0])
     meta = json.loads((args.recording/'metadata.json').read_text())
     navigation = meta.get('experiment', {}).get('type') == 'brush_navigation_transfer'
+    navigation_only = navigation and meta['experiment'].get('navigation_only', False)
     transfer = navigation or meta.get('experiment', {}).get('type') == 'brush_table_transfer'
     from dextrah_lab.wholebody.recording_contract import goal_rule_caption
     termination = meta.get('goal_termination_config')
@@ -143,7 +144,10 @@ def main():
             draw = ImageDraw.Draw(image)
             controller = 'Frozen SONIC' if meta.get('controller_mode') == 'frozen_pretrained_latent' else 'SONIC'
             label = ('Brush transfer with navigation' if navigation else 'Brush table transfer') if transfer else meta['object_family'].capitalize()
-            draw.text((22, 12), f"G1 + Revo2 | {controller} + SAPG | {label}", font=title, fill=(22, 35, 48))
+            if navigation_only:
+                label = 'Commanded walking diagnostic'
+            policy_label = controller if navigation_only else f'{controller} + SAPG'
+            draw.text((22, 12), f"G1 + Revo2 | {policy_label} | {label}", font=title, fill=(22, 35, 48))
             draw.text((22, 54), f"Checkpoint epoch {meta['checkpoint_epoch']} | deterministic leader | uncut {meta['seconds']:g}-second rollout", font=text, fill=(62, 77, 92))
             draw.text((22, 108), 'Full-body physics', font=text, fill=(24, 39, 54))
             draw.text((882, 108), 'Hand close-up (table translucent for visibility)', font=small, fill=(24, 39, 54))
@@ -164,6 +168,8 @@ def main():
                             f" | Measured: {trace['transfer_measured_vx'][i]:+.2f}, {trace['transfer_measured_vy'][i]:+.2f} m/s"
                             f" | Waypoint: {int(trace['transfer_waypoint'][i])+1} | Arrived: {int(trace['transfer_navigation_arrived'][i])}")
                     footer = 'Velocity commands -> NVIDIA motion planner -> frozen SONIC + SAPG. Body-relative carry target; no new training or forced release.'
+                    if navigation_only:
+                        footer = 'Velocity commands -> NVIDIA motion planner -> frozen SONIC. Zero manipulation residual; no grasp or training in this diagnostic.'
             else:
                 line = 'Orange: object | Green: target pose | '+goal_caption
                 footer = 'Measured PhysX body poses; no interpolation. BPS-128 + touch 70 Hz. No training or outcome-based selection.'

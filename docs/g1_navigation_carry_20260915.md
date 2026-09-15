@@ -50,7 +50,10 @@ directory, outside the running training environment's installed packages.
   future reference frames are sampled at 100 ms spacing; the existing policy
   and tactile clocks stay at 60 Hz and 70 Hz.
 - Replanning is checked at 10 Hz using previous planned motion, 40 ms lookahead
-  and a 160 ms reference crossfade. Joint order is explicitly converted from
+  and a 160 ms reference crossfade. Constant walking commands replan at 1 Hz,
+  as in native deployment, rather than restarting the blend at every check.
+  Desired facing integrates commanded yaw-rate separately from measured yaw.
+  Joint order is explicitly converted from
   MuJoCo to the pinned IsaacLab order.
 - During carrying, arm reference positions retain their trained standing
   baseline while legs/waist receive the planner reference. **Physical arms are
@@ -77,7 +80,7 @@ waypoint index and arrival, alongside the original reset/fall/transfer counters.
 
 ## Validation status and limitations
 
-Nine pure navigation tests and six existing transfer tests pass. Tests cover
+Thirteen pure navigation tests and six existing transfer tests pass. Tests cover
 frames/signs, stopping, joint order, quaternion interpolation, planned reference
 dimensions, speed limits, waypoint arrival, non-mutating commands and the
 body-relative carry target. An actual ONNX test generated rightward movement
@@ -108,3 +111,15 @@ repeat adds reference joint positions/velocities, actual joint state, decoded
 SONIC action and delivered motor targets to isolate the failure. Combining
 this with grasping before validating locomotion would confound the diagnosis.
 No training restart or reward change was made.
+
+The instrumented 8-second repeat (`brush_navigation_trace_560_20260915`, source
+`e7a7d61`, step 560.9) reproduced the failure without falls. Delivered motor
+targets matched the intended target buffer exactly, and all 29 body joints were
+included in the writer: legs were not frozen or omitted. The reference instead
+drifted into crouching with 63 planner calls in 8 seconds. The bridge's
+short-horizon check forced replanning every 100 ms, repeatedly interrupting a
+160 ms blend. This is a bridge defect, not evidence that SONIC cannot walk.
+That check has been removed to match upstream's 1-second periodic walking
+replan; desired facing also no longer follows measured yaw drift at zero
+commanded yaw-rate. Regression tests cover both. Physical retesting is required
+before attributing the failure solely to these defects or claiming a fix.

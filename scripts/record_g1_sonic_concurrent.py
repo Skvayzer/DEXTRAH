@@ -82,7 +82,8 @@ def main():
             allocation=os.environ['SLURM_JOB_ID'], step=os.environ['SLURM_STEP_ID'],
             source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), training_stopped=False,
             training_monitor_run=str(args.source_run),
-            experiment='brush_table_transfer' if args.brush_transfer else 'reposing')
+            experiment=('brush_navigation_walkcheck' if args.navigation_only else 'brush_navigation_transfer')
+                       if args.navigation_planner else ('brush_table_transfer' if args.brush_transfer else 'reposing'))
     (args.output/'provenance.json').write_text(json.dumps(provenance, indent=2))
     base = Path('/data1/users/konstantin.smirnov')
     sim_python = base/'venvs/g1_sonic/bin/python'

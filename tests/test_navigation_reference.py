@@ -16,6 +16,7 @@ class FakePlanner:
         return [SimpleNamespace(name='mujoco_qpos'), SimpleNamespace(name='num_pred_frames')]
 
     def run(self, _, feeds):
+        self.last_feeds = feeds
         output = np.repeat(feeds['context_mujoco_qpos'][:, :1], 64, axis=1)
         output[0, :, 0] += np.arange(64)/30*.12 if feeds['mode'][0] else 0
         return output, np.array([64], np.int32)
@@ -63,6 +64,42 @@ class NavigationTests(unittest.TestCase):
     def test_speed_limit_rejected(self):
         with self.assertRaises(ValueError):
             velocity_inputs([1, 0, 0], 0, np.zeros((4, 36)))
+
+    def test_short_plan_does_not_restart_crossfade_at_ten_hz(self):
+        class ShortPlanner(FakePlanner):
+            def run(self, _, feeds):
+                output, _ = super().run(_, feeds)
+                return output, np.array([24], np.int32)
+
+        planner = NavigationReference('fake', session=ShortPlanner())
+        planner.reset([0, 0, .75, 1, 0, 0, 0], np.zeros(29), 0.)
+        for step in range(1, 121):
+            planner.reference(step/60, [.12, 0, 0], 0.)
+        self.assertEqual(planner.inferences, 3)  # init, start .1, periodic 1.1
+
+    def test_zero_yaw_rate_holds_desired_heading_despite_measured_drift(self):
+        session = FakePlanner()
+        planner = NavigationReference('fake', session=session)
+        planner.reset([0, 0, .75, 1, 0, 0, 0], np.zeros(29), 0.)
+        planner.reference(.1, [.12, 0, 0], 0.)
+        for step in range(7, 121):
+            planner.reference(step/60, [.12, 0, 0], .08)
+        np.testing.assert_allclose(session.last_feeds['facing_direction'], [[1, 0, 0]])
+        self.assertEqual(planner.inferences, 3)
+
+    def test_commanded_yaw_rate_is_integrated_over_elapsed_time(self):
+        planner = NavigationReference('fake', session=FakePlanner())
+        planner.reset([0, 0, .75, 1, 0, 0, 0], np.zeros(29), 0.)
+        for step in range(1, 61):
+            planner.reference(step/60, [0, 0, .2], -.4)
+        self.assertAlmostEqual(planner.desired_heading, .2)
+        self.assertGreater(planner.heading, .15)
+
+    def test_invalid_command_rejected_between_planner_ticks(self):
+        planner = NavigationReference('fake', session=FakePlanner())
+        planner.reset([0, 0, .75, 1, 0, 0, 0], np.zeros(29), 0.)
+        with self.assertRaises(ValueError):
+            planner.reference(.01, [1, 0, 0], 0.)
 
     def test_waypoint_command_does_not_move_robot_state(self):
         nav = WaypointVelocity([[-.6, .42]], -np.pi/2)
