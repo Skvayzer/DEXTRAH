@@ -123,6 +123,43 @@ def main():
         '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(video)], stdin=subprocess.PIPE)
     reset_events = np.flatnonzero(np.diff(trace['resets'], prepend=0) > 0)
     fall_events = np.flatnonzero(np.diff(trace['robot_falls'], prepend=0) > 0)
+    map_attempts = meta.get('transfer_report', {}).get('attempts', [])
+    if navigation and not navigation_only:
+        map_points = [trace['robot'][:, :2], trace['table'][:, :2], trace['receiving_table'][:, :2]]
+        map_points += [np.asarray(a['navigation_route_m']) for a in map_attempts if a.get('navigation_route_m')]
+        map_points = np.concatenate(map_points)
+        map_center = (map_points.min(axis=0)+map_points.max(axis=0))/2
+        map_span = max(1.5, float(np.ptp(map_points, axis=0).max())+.55)
+
+        def map_pixel(xy):
+            uv = (np.asarray(xy)-map_center)/map_span
+            return tuple(np.rint([714+210*uv[0], 280-210*uv[1]]).astype(int))
+
+        def draw_navigation_map(draw, frame):
+            draw.rounded_rectangle((588, 143, 842, 423), radius=8, fill=(238, 244, 249), outline=(140, 155, 170))
+            draw.text((598, 152), 'Navigation: top view', font=small, fill=(24, 39, 54))
+            size = np.asarray(meta['experiment']['table_size_m'])[:2]
+            for name, color in (('table', (125, 143, 155)), ('receiving_table', (70, 128, 180))):
+                xy = trace[name][frame, :2]
+                corners = [map_pixel(xy+size*sign/2) for sign in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+                draw.polygon(corners, fill=color)
+            attempt = int(trace['resets'][frame])
+            active = bool(trace['transfer_navigation_active'][frame] or trace['transfer_navigation_arrived'][frame])
+            route = map_attempts[attempt].get('navigation_route_m') if attempt < len(map_attempts) else None
+            if active and route:
+                points = [map_pixel(xy) for xy in route]
+                draw.line(points, fill=(32, 119, 207), width=2)
+                for n, (x, y) in enumerate(points):
+                    draw.ellipse((x-4, y-4, x+4, y+4), fill=(240, 177, 45) if n == int(trace['transfer_waypoint'][frame]) else (32, 119, 207))
+            start = int(reset_events[np.searchsorted(reset_events, frame, side='right')-1]) if np.any(reset_events <= frame) else 0
+            trail = [map_pixel(xy) for xy in trace['robot'][start:frame+1:3, :2]]
+            if len(trail) > 1:
+                draw.line(trail, fill=(36, 45, 54), width=2)
+            for name, color, radius in (('robot', (20, 30, 40), 4), ('object', (242, 116, 20), 3)):
+                x, y = map_pixel(trace[name][frame, :2])
+                draw.ellipse((x-radius, y-radius, x+radius, y+radius), fill=color)
+            draw.text((598, 375), 'Blue route / black robot', font=small, fill=(40, 60, 80))
+            draw.text((598, 397), 'Orange brush', font=small, fill=(190, 85, 10))
     previews = {0, 30*meta['fps'], meta['frames']-1}
     if len(fall_events):
         previews.add(max(0, int(fall_events[0])-2))
@@ -153,6 +190,8 @@ def main():
             draw.text((22, 54), f"{subtitle} | uncut {meta['seconds']:g}-second rollout", font=text, fill=(62, 77, 92))
             draw.text((22, 108), 'Full-body physics', font=text, fill=(24, 39, 54))
             draw.text((882, 108), 'Hand close-up (table translucent for visibility)', font=small, fill=(24, 39, 54))
+            if navigation and not navigation_only:
+                draw_navigation_map(draw, i)
             line = (f"t={trace['time_s'][i]:05.2f}s | Goals: {int(trace['goals'][i])} | Resets: {int(trace['resets'][i])}"
                     f" | Robot falls: {int(trace['robot_falls'][i])} | Pose error: {100*trace['goal_error'][i]:.1f} cm")
             if transfer:
