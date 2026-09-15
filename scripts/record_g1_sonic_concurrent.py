@@ -7,6 +7,7 @@ pressure terminates ONLY our own child process group, never the training job.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -27,10 +28,13 @@ def main():
     parser.add_argument('--checkpoint-run', type=Path, help='Optional immutable snapshot; --source-run still monitors training')
     parser.add_argument('--brush-transfer', action='store_true')
     parser.add_argument('--navigation-planner', type=Path)
+    parser.add_argument('--navigation-speed', type=float, default=.12)
     parser.add_argument('--navigation-only', action='store_true')
     parser.add_argument('--navigation-native-timing', action='store_true')
     parser.add_argument('--capture-only', action='store_true')
     args = parser.parse_args()
+    if not math.isfinite(args.navigation_speed) or not 0 < args.navigation_speed <= .8:
+        raise ValueError('Navigation speed must be finite and in (0, 0.8] m/s')
     if (args.navigation_planner and not args.brush_transfer) or (args.navigation_only and not args.navigation_planner):
         raise ValueError('Navigation requires --brush-transfer and --navigation-planner')
     if args.navigation_native_timing and not args.navigation_only:
@@ -120,7 +124,7 @@ def main():
     if not args.render_only:
         extra = ['--families', 'brush', '--brush-transfer'] if args.brush_transfer else []
         if args.navigation_planner:
-            extra += ['--navigation-planner', args.navigation_planner]
+            extra += ['--navigation-planner', args.navigation_planner, '--navigation-speed', args.navigation_speed]
         if args.navigation_only:
             extra += ['--navigation-only']
         if args.navigation_native_timing:

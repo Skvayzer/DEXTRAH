@@ -131,6 +131,47 @@ class NavigationTests(unittest.TestCase):
             nav.update(root, np.zeros(6), 1/60)
         self.assertTrue(nav.done)
 
+    def test_requested_cruise_does_not_taper_into_slow_gait(self):
+        nav = WaypointVelocity([[0., 0.]], 0., speed=.4)
+        command = nav.update([-.14, 0, .75, 1, 0, 0, 0], np.zeros(6), 1/60)
+        np.testing.assert_allclose(command, [.4, 0, 0])
+
+    def test_predictive_stop_waits_for_actual_stop_and_retries_overshoot(self):
+        nav = WaypointVelocity([[0., 0.]], 0., speed=.4)
+        root = np.array([-.15, 0, .75, 1, 0, 0, 0.])
+        np.testing.assert_allclose(nav.update(root, [.35, 0, 0, 0, 0, 0], 1/60), 0.)
+        self.assertTrue(nav.stopping)
+        root[0] = .2
+        for _ in range(61):
+            nav.update(root, np.zeros(6), 1/60)
+        self.assertFalse(nav.done)
+        np.testing.assert_allclose(nav.update(root, np.zeros(6), 1/60), [-.4, 0, 0])
+
+    def test_contact_hold_cannot_complete_arrival(self):
+        nav = WaypointVelocity([[0, 0]], 0., speed=.4)
+        for _ in range(120):
+            nav.update([0, 0, .75, 1, 0, 0, 0], np.zeros(6), 1/60, hold=True)
+        self.assertFalse(nav.done)
+
+    def test_waypoints_reached_with_lagged_velocity_feedback(self):
+        # Kinematic unit fixture only, not evidence of physical SONIC walking.
+        nav = WaypointVelocity([[0, .66], [-.625, .66], [-.625, .46]], 0., speed=.4)
+        root = np.array([0, .42, .75, 1, 0, 0, 0.])
+        velocity = np.zeros(6)
+        for _ in range(2400):
+            command = nav.update(root, velocity, 1/60)
+            velocity[:2] += (command[:2]*.85-velocity[:2])/(60*.25)
+            root[:2] += velocity[:2]/60
+            if nav.done:
+                break
+        self.assertTrue(nav.done)
+        self.assertLess(np.linalg.norm(root[:2]-[-.625, .46]), .12)
+
+    def test_invalid_routes_and_speeds(self):
+        for route, speed in (([], .4), ([[0, 0]], 0), ([[0, 0]], float('nan')), ([[0, 0]], .81)):
+            with self.assertRaises(ValueError):
+                WaypointVelocity(route, 0., speed=speed)
+
     def test_carry_target_moves_with_base_not_remote_receiver(self):
         driver = NavigationTransferDriver([[-.02, -.01, -.01], [.02, .01, .01]])
         driver.reset([0, .1, 1, 1, 0, 0, 0], [-.625, 0, .65, 1, 0, 0, 0], [0, .42, .75])
@@ -142,6 +183,15 @@ class NavigationTests(unittest.TestCase):
         driver.update([.1, .1, 1, 1, 0, 0, 0], np.zeros(6), driver.root_pose[:3], .8, 0, 1, 1/60)
         np.testing.assert_allclose(driver.goal[:3]-first[:3], [.1, 0, 0], atol=1e-9)
         self.assertFalse(driver.navigator.done)
+
+    def test_transfer_uses_requested_speed_and_retains_route(self):
+        driver = NavigationTransferDriver([[-.02, -.01, -.01], [.02, .01, .01]], navigation_speed=.4)
+        driver.reset([0, .1, 1, 1, 0, 0, 0], [-.625, 0, .65, 1, 0, 0, 0], [0, .42, .75])
+        for _ in range(40):
+            driver.update([0, .1, 1, 1, 0, 0, 0], np.zeros(6), driver.root_pose[:3], .8, 0, 1, 1/60)
+        self.assertAlmostEqual(np.linalg.norm(driver.command[:2]), .4)
+        self.assertEqual(driver.report()['navigation_speed_limit_m_s'], .4)
+        self.assertEqual(len(driver.state['navigation_route_m']), 3)
 
 
 if __name__ == '__main__':

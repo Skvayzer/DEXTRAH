@@ -8,6 +8,7 @@ import argparse
 import faulthandler
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -29,11 +30,14 @@ def main():
     parser.add_argument('--torch-memory-limit-gib', type=float, default=4.)
     parser.add_argument('--brush-transfer', action='store_true', help='Inference-only two-table brush probe')
     parser.add_argument('--navigation-planner', type=Path, help='Pinned SONIC planner; requires --brush-transfer')
+    parser.add_argument('--navigation-speed', type=float, default=.12, help='Explicit waypoint cruise speed in m/s')
     parser.add_argument('--navigation-only', action='store_true', help='Zero latent/finger means for a locomotion-only diagnostic')
     parser.add_argument('--navigation-native-timing', action='store_true',
                         help='Empty-hand diagnostic only: SONIC 50 Hz control / 200 Hz physics, video 25 fps')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    if not math.isfinite(args.navigation_speed) or not 0 < args.navigation_speed <= .8:
+        raise ValueError('Navigation speed must be finite and in (0, 0.8] m/s')
     if args.brush_transfer and args.families != ['brush']:
         raise ValueError('The transfer probe records only --families brush')
     if (args.navigation_planner and not args.brush_transfer) or (args.navigation_only and not args.navigation_planner):
@@ -107,7 +111,8 @@ def main():
                 raise ValueError('Navigation requires the original frozen SONIC controller')
             from dextrah_lab.wholebody.navigation_transfer_env import NavigationBrushEnv
             env_type = NavigationBrushEnv
-            env_kwargs = dict(planner_path=args.navigation_planner, navigation_only=args.navigation_only)
+            env_kwargs = dict(planner_path=args.navigation_planner, navigation_only=args.navigation_only,
+                              navigation_speed=args.navigation_speed)
         if args.navigation_native_timing:
             # A diagnostic comparison, never silently applied to the trained
             # SAPG manipulation interface or to the live training environment.

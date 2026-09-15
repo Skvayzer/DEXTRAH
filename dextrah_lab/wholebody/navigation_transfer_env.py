@@ -9,19 +9,20 @@ from .contract import BODY_JOINTS
 
 
 class NavigationBrushEnv(BrushTransferEnv):
-    def __init__(self, cfg, *, planner_path, navigation_only=False, **kwargs):
+    def __init__(self, cfg, *, planner_path, navigation_only=False, navigation_speed=.12, **kwargs):
         self.navigation = None
         self.navigation_only = navigation_only
+        self.navigation_speed = navigation_speed
         self._navigation_observation_step = None
         super().__init__(cfg, **kwargs)
-        self.navigation = NavigationReference(planner_path)
+        self.navigation = NavigationReference(planner_path, speed_limit=max(.3, navigation_speed))
         self._standing_reference_q = self._reference_q.clone()
         self._arm_reference_ids = [i for i, name in enumerate(BODY_JOINTS)
                                    if any(part in name for part in ('shoulder', 'elbow', 'wrist'))]
 
     def configure_transfer(self, index, vertices):
         super().configure_transfer(index, vertices)
-        self.transfer = NavigationTransferDriver(vertices)
+        self.transfer = NavigationTransferDriver(vertices, navigation_speed=self.navigation_speed)
 
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
@@ -67,7 +68,7 @@ class NavigationBrushEnv(BrushTransferEnv):
                 if self.navigation_only:
                     # Empty-hand locomotion check: settle, strafe right, stop.
                     elapsed = float(self.episode_length_buf[index])*self.step_dt
-                    command = np.array([0., -.12 if 2. <= elapsed < 10. else 0., 0.])
+                    command = np.array([0., -self.navigation_speed if 2. <= elapsed < 10. else 0., 0.])
                     self.transfer.telemetry.update(cmd_vx=0., cmd_vy=float(command[1]), cmd_wz=0., navigation_active=int(command[1] != 0))
                 q, qd, root_ref = self.navigation.reference(now, command, yaw_of(root[3:]))
                 if not self.navigation_only:
@@ -96,6 +97,7 @@ class NavigationBrushEnv(BrushTransferEnv):
     def transfer_contract(self):
         value = super().transfer_contract()
         value.update(type='brush_navigation_transfer', navigation_only=self.navigation_only,
+            navigation_speed_m_s=self.navigation_speed,
             robot_reference_change='NVIDIA planner from body-frame cmd_vel; preserves trained arm-reference baseline during carrying',
             goal_change='Body-relative carry target while navigating; receiver target only after arrival',
             navigation_planner=self.navigation.report(),
