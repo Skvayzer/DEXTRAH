@@ -176,6 +176,19 @@ def main():
         # Save resolved configurations before rollout, preserving the exact differences.
         (args.output/'configurations.json').write_text(json.dumps(configurations, indent=2, default=str))
         (args.output/'metadata.json').write_text(json.dumps(report, indent=2))
+        # Kit can crash while a watchdog dumps native callback stacks. Keep
+        # the startup watchdog only, as in the existing recording launcher.
+        faulthandler.cancel_dump_traceback_later()
+
+        def save_traces():
+            for kind in robots:
+                for i, case in enumerate(tests):
+                    folder = args.output/kind/case['name']; folder.mkdir(parents=True, exist_ok=True)
+                    values = {k: np.stack([f[k] for f in traces[kind][i]]) for k in traces[kind][i][0]}
+                    pending = folder/'trajectory.pending.npz'
+                    np.savez_compressed(pending, **values)
+                    pending.replace(folder/'trajectory.npz')
+
         start = time.monotonic()
         with torch.inference_mode():
             for step in range(700):
@@ -222,8 +235,12 @@ def main():
                     sim.step(render=False)
                     for robot in robots.values(): robot.update(.005)
                 if step % 50 == 0:
+                    save_traces()
                     free = torch.cuda.mem_get_info()[0]/2**30
-                    print('EMPTY_FLOOR_PROGRESS '+json.dumps(dict(sim_s=now, wall_s=time.monotonic()-start, free_gib=free)), flush=True)
+                    state = {kind: dict(min_height=float((r.data.root_pos_w-offsets[kind])[:, 2].min()),
+                        max_joint_speed=float(r.data.joint_vel.abs().max())) for kind, r in robots.items()}
+                    print('EMPTY_FLOOR_PROGRESS '+json.dumps(dict(sim_s=now, wall_s=time.monotonic()-start,
+                                                                  free_gib=free, state=state)), flush=True)
                     if free < 6.:
                         raise RuntimeError('Stopping diagnostic to preserve training memory headroom')
         for kind in robots:
