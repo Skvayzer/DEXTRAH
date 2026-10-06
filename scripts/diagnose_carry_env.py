@@ -65,7 +65,8 @@ def main():
         model.eval().requires_grad_(False)
         n = env.num_envs
         steps = round(args.seconds/env.step_dt)
-        results = {}
+        results, dumps = {}, {}
+        torch.inference_mode().__enter__()  # env.reset after rollouts must not mix inference tensors
         for park in (True, False):
             for latent in ('expert', 'zero'):
                 name = f"{'parked' if park else 'table'}_{latent}_latent"
@@ -76,7 +77,8 @@ def main():
                 dropped = torch.zeros_like(fell)
                 first_fall = torch.full((n,), float('nan'), device=env.device)
                 timeline = []
-                with torch.inference_mode():
+                exploded, normal = [], []
+                if True:
                     for step in range(steps):
                         wrapped = torch.cat((obs['policy'], obs['policy'].new_zeros(n, 1)), -1)
                         out = model(dict(obs=wrapped, is_train=False, prev_actions=None, rnn_states=states))
@@ -86,11 +88,24 @@ def main():
                         if latent == 'zero':
                             action[:, :64] = 0
                         body_extra = obs['policy'][:, 249:]
-                        obs, _, terminated, truncated, _ = env.step(action)
-                        newly = env._body_fallen & ~fell
+                        big = mu[:, :64].abs().amax(-1)
+                        if len(exploded) < 64 and (big > 1000).any():
+                            ids = torch.nonzero(big > 1000).flatten()[:8]
+                            exploded += [dict(step=step, env=int(i), obs=obs['policy'][i].cpu(), mu=mu[i].cpu(),
+                                              episode_step=int(env.episode_length_buf[i])) for i in ids]
+                        if len(normal) < 64 and (big < 20).any():
+                            ids = torch.nonzero(big < 20).flatten()[:8]
+                            normal += [dict(step=step, env=int(i), obs=obs['policy'][i].cpu(), mu=mu[i].cpu(),
+                                            episode_step=int(env.episode_length_buf[i])) for i in ids]
+                        obs, _, terminated, truncated, info = env.step(action)
+                        # Auto-reset clears env flags; use terminal episode_final values.
+                        final = info['episode_final']
+                        fallen_now = (terminated | truncated) & final['robot_fall'].bool()
+                        dropped_now = (terminated | truncated) & final['carry_drop'].bool()
+                        newly = fallen_now & ~fell
                         first_fall[newly] = (step+1)*env.step_dt
-                        fell |= env._body_fallen
-                        dropped |= env._carry_dropped
+                        fell |= fallen_now
+                        dropped |= dropped_now
                         done = terminated | truncated
                         for s in states:
                             s[:, done, :] = 0
@@ -104,6 +119,7 @@ def main():
                                 expert_latent_abs_max=float(mu[:, :64].abs().max()),
                                 body_input_abs_max=float(body_extra.abs().max()),
                                 body_history_qd_abs_max=float(body_extra[:, 3*10+29*10:3*10+29*20].abs().max())))
+                dumps[name] = dict(exploded=exploded, normal=normal)
                 ff = first_fall[~first_fall.isnan()]
                 results[name] = dict(ever_fell=float(fell.float().mean()), ever_dropped=float(dropped.float().mean()),
                     first_fall_s_median=float(ff.median()) if ff.numel() else None,
@@ -111,6 +127,7 @@ def main():
                 print('CARRY_DIAG '+name+' '+json.dumps({k: v for k, v in results[name].items() if k != 'timeline'}), flush=True)
                 for row in timeline[:6]+timeline[-2:]:
                     print('CARRY_DIAG_T '+name+' '+json.dumps(row), flush=True)
+        torch.save(dumps, args.output/'input_dumps.pt')
         report.update(completed=True, conditions=results)
     except BaseException as error:
         report.update(error=str(error), traceback=traceback.format_exc())
