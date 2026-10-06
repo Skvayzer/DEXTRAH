@@ -34,8 +34,12 @@ def main():
     parser.add_argument('--navigation-only', action='store_true', help='Zero latent/finger means for a locomotion-only diagnostic')
     parser.add_argument('--navigation-native-timing', action='store_true',
                         help='Empty-hand diagnostic only: SONIC 50 Hz control / 200 Hz physics, video 25 fps')
+    parser.add_argument('--carry-clips', type=Path, help='Carry-expert start: walking clips (.npz); requires --grasp-bank')
+    parser.add_argument('--grasp-bank', type=Path, help='Carry-expert start: restored grasp snapshots')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    if bool(args.carry_clips) != bool(args.grasp_bank) or (args.carry_clips and args.brush_transfer):
+        raise ValueError('Carry recording needs both --carry-clips and --grasp-bank and excludes the brush probe')
     if not math.isfinite(args.navigation_speed) or not 0 < args.navigation_speed <= .8:
         raise ValueError('Navigation speed must be finite and in (0, 0.8] m/s')
     if args.brush_transfer and args.families != ['brush']:
@@ -106,6 +110,13 @@ def main():
             cfg.termination.episode_length = round(cfg.episode_length_s*60)
             cfg.termination.max_consecutive_successes = 0
         env_kwargs = {}
+        if args.carry_clips:
+            from dextrah_lab.wholebody.carry_env import G1CarryEnv
+            env_type = G1CarryEnv
+            cfg.episode_length_s = 20.
+            cfg.termination.episode_length = 1200
+            cfg.termination.max_consecutive_successes = 0
+            env_kwargs = dict(clips_path=args.carry_clips, grasp_bank_path=args.grasp_bank)
         if args.navigation_planner:
             if not frozen:
                 raise ValueError('Navigation requires the original frozen SONIC controller')
@@ -188,6 +199,9 @@ def main():
                 trimesh.creation.box(TABLE_SIZE).export(directory/'receiving_table.glb')
                 metadata['experiment'] = env.transfer_contract()
                 metadata['reset_semantics'] = metadata['experiment']['termination_change']
+            if args.carry_clips:
+                metadata['experiment'] = dict(env.carry_contract(), type='carry_expert_start')
+                metadata['reset_semantics'] = 'Restored grasp, table parked below floor, 1 s settle, then walking clips; all resets retained'
             (directory/'metadata.json').write_text(json.dumps(dict(metadata,
                 object_family=family, env_id=index, asset_index=int(assignment[index])), indent=2))
         obs, _ = env.reset()

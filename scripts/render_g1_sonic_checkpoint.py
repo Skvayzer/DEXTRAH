@@ -192,6 +192,8 @@ def main():
             draw = ImageDraw.Draw(image)
             controller = 'Frozen SONIC' if meta.get('controller_mode') == 'frozen_pretrained_latent' else 'SONIC'
             label = ('Brush transfer with navigation' if navigation else 'Brush table transfer') if transfer else meta['object_family'].capitalize()
+            if meta.get('experiment', {}).get('type') == 'carry_expert_start':
+                label = f"Carry start (no object goal): {meta['object_family']}" 
             if navigation_only:
                 label = 'Commanded walking diagnostic'
             policy_label = controller if navigation_only else f'{controller} + SAPG'
