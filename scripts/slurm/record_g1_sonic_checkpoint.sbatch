@@ -21,6 +21,7 @@ cd "$source_snapshot"
 recording="$project/outputs/sonic_checkpoint_video_${SLURM_JOB_ID}"
 extra=()
 if [[ -n "${GRASP_BANK:-}" ]]; then extra+=(--grasp-bank "$GRASP_BANK" --carry-clips "${CARRY_CLIPS:?Set CARRY_CLIPS}"); fi
+if [[ "${NO_TABLE_BODY_SUPPORT:-0}" == 1 ]]; then extra+=(--no-table-body-support); fi
 if [[ -n "${TORCH_MEMORY_LIMIT_GIB:-}" ]]; then extra+=(--torch-memory-limit-gib "$TORCH_MEMORY_LIMIT_GIB"); fi
 python scripts/record_g1_sonic_checkpoint.py --headless --device cuda:0 \
     --kit_args="--/plugins/carb.tasking.plugin/threadCount=8 --/plugins/omni.tbb.globalcontrol/maxThreadCount=8" \

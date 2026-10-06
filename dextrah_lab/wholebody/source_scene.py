@@ -25,6 +25,36 @@ def ground_contact_partners(stage):
     return paths
 
 
+TABLE_CONTACT_RIGHT_ARM = ('right_elbow_link', 'right_wrist_roll_link', 'right_wrist_pitch_link',
+                           'right_wrist_yaw_link', 'right_base_link', 'right_base2_link')
+
+
+def table_filtered_links(link_names):
+    """Robot links that must not collide with the table (no body support).
+
+    The right forearm, wrist, hand base and fingers keep table contact so
+    grasping from and placing on the table are physically unchanged.
+    """
+    keep = set(TABLE_CONTACT_RIGHT_ARM)
+    fingers = ('right_index', 'right_middle', 'right_ring', 'right_pinky', 'right_thumb')
+    return [n for n in link_names if n not in keep and not n.startswith(fingers)]
+
+
+def filter_table_body_contacts(stage, env_path='/World/envs/env_0'):
+    """Author PhysX filtered pairs on the source env's table before cloning."""
+    from pxr import Usd, UsdPhysics
+    tables = [p for p in Usd.PrimRange(stage.GetPrimAtPath(env_path+'/Table')) if p.HasAPI(UsdPhysics.RigidBodyAPI)]
+    links = {p.GetName(): p for p in Usd.PrimRange(stage.GetPrimAtPath(env_path+'/Robot'))
+             if p.HasAPI(UsdPhysics.RigidBodyAPI)}
+    if len(tables) != 1 or not links:
+        raise RuntimeError(f'Expected one table rigid body and robot links, found {len(tables)} / {len(links)}')
+    names = table_filtered_links(sorted(links))
+    rel = UsdPhysics.FilteredPairsAPI.Apply(tables[0]).CreateFilteredPairsRel()
+    for name in names:
+        rel.AddTarget(links[name].GetPath())
+    return str(tables[0].GetPath()), names, sorted(set(links)-set(names))
+
+
 def standing_reset_pose():
     pose = dict(zip(BODY_JOINTS, map(float, nominal_body_pose())))
     pose.update(dict.fromkeys(RIGHT_ARM, 0.))  # original manipulation reset

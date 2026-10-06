@@ -26,6 +26,9 @@ class SonicBodyCfg:
     minimum_upright_cosine: float = .5
     maximum_joint_speed: float = 1000.
     numerical_failure_mode: str = 'abort'  # diagnostic default; trainer selects reset explicitly
+    # False: the table no longer collides with legs/pelvis/torso/left arm, so it
+    # cannot support the body; right forearm/hand/fingers still touch it.
+    table_supports_body: bool = True
 
 
 @configclass
@@ -41,8 +44,31 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         return paths
 
     def _setup_scene(self):
-        with floating_sonic_robot_scene():
-            super()._setup_scene()
+        clone = self.scene.clone_environments
+        def clone_with_table_filter(*args, **kwargs):
+            if not self.cfg.sonic_body.table_supports_body:
+                import isaaclab.sim as sim_utils
+                from dextrah_lab.wholebody.source_scene import filter_table_body_contacts
+                table, filtered, kept = filter_table_body_contacts(sim_utils.get_current_stage())
+                self.table_filter_report = dict(table=table, filtered_links=filtered, table_contact_links=kept)
+                print(f'TABLE_BODY_FILTER before_clone filtered={len(filtered)} kept={kept}', flush=True)
+            return clone(*args, **kwargs)
+        self.scene.clone_environments = clone_with_table_filter
+        try:
+            with floating_sonic_robot_scene():
+                super()._setup_scene()
+        finally:
+            self.scene.clone_environments = clone
+        if not self.cfg.sonic_body.table_supports_body and self.num_envs > 1:
+            import isaaclab.sim as sim_utils
+            from pxr import Usd, UsdPhysics
+            stage = sim_utils.get_current_stage()
+            last = f'/World/envs/env_{self.num_envs-1}'
+            tables = [p for p in Usd.PrimRange(stage.GetPrimAtPath(last+'/Table')) if p.HasAPI(UsdPhysics.FilteredPairsAPI)]
+            targets = UsdPhysics.FilteredPairsAPI(tables[0]).GetFilteredPairsRel().GetTargets() if tables else []
+            remapped = bool(targets) and all(str(x).startswith(last+'/') for x in targets)
+            self.table_filter_report.update(cloned_env=last, cloned_targets=len(targets), cloned_targets_remapped=remapped)
+            print(f'TABLE_BODY_FILTER after_clone {last} targets={len(targets)} remapped={remapped}', flush=True)
 
     def __init__(self, cfg, *, sonic, render_mode=None, **kwargs):
         self._wholebody_ready = False
