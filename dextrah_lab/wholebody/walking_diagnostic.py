@@ -19,6 +19,38 @@ def cases():
     )]
 
 
+# Explicit clock profiles. 'native' is SONIC's pinned 200/50 Hz deployment
+# timing; 'task' is the manipulation training clock (120 Hz physics,
+# decimation 2, 60 Hz control) read from the touch-383 env_resolved.yaml.
+CLOCKS = dict(
+    native=dict(physics_dt=1/200, substeps=4, control_hz=50, capture_every=2),
+    task=dict(physics_dt=1/120, substeps=2, control_hz=60, capture_every=2),
+)
+
+# 'harness' is the original diagnostic (friction 1.0, Isaac default solver
+# iteration bounds). 'training' copies the touch-383 scene: friction 0.5
+# average combine, solver TGS with exactly 8 position / 0 velocity iterations.
+PHYSICS = dict(
+    harness=dict(friction=1., friction_combine_mode='average', physx={}),
+    training=dict(friction=.5, friction_combine_mode='average', physx=dict(
+        solver_type=1, min_position_iteration_count=8, max_position_iteration_count=8,
+        min_velocity_iteration_count=0, max_velocity_iteration_count=0,
+        bounce_threshold_velocity=.2, friction_offset_threshold=.04,
+        friction_correlation_distance=.025)),
+)
+
+
+def clock_profile(name, seconds=14.):
+    clock = dict(CLOCKS[name])
+    control_dt = 1/clock['control_hz']
+    if abs(clock['physics_dt']*clock['substeps']-control_dt) > 1e-12:
+        raise ValueError('Physics substeps must tile the control interval exactly')
+    clock.update(name=name, control_dt=control_dt, steps=int(round(seconds/control_dt)),
+                 physics_hz=1/clock['physics_dt'],
+                 capture_hz=clock['control_hz']/clock['capture_every'])
+    return clock
+
+
 def command_at(case, seconds):
     return np.array(case['command'] if 2. <= seconds < 10. else [0., 0., 0.], float)
 

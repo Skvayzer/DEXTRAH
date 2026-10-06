@@ -25,6 +25,10 @@ def main():
     parser.add_argument('--case', nargs='+', help='Explicit subset of predeclared tests')
     parser.add_argument('--packing', choices=['checkpoint', 'interleaved'], default='checkpoint',
                         help='Interleaved is an explicit diagnostic ablation, never a checkpoint migration')
+    parser.add_argument('--clock', choices=['native', 'task'], default='native',
+                        help='native: 200/50 Hz SONIC timing; task: 120/60 Hz manipulation training timing')
+    parser.add_argument('--physics', choices=['harness', 'training'], default='harness',
+                        help='harness: original diagnostic; training: touch-383 friction and solver iterations')
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     visible = os.environ.get('CUDA_VISIBLE_DEVICES', '')
@@ -42,7 +46,8 @@ def main():
     faulthandler.dump_traceback_later(90, repeat=True, file=stack)
     report = dict(completed=False, optimizer_updates=0, training_modified=False,
                   harness='Standalone IsaacLab, upstream robot config and pinned GRAIL manipulation base; not C++ runtime',
-                  source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), packing=args.packing)
+                  source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), packing=args.packing,
+                  clock=args.clock, physics=args.physics)
     try:
         import numpy as np
         import torch
@@ -54,7 +59,9 @@ def main():
         from dextrah_lab.wholebody.contract import BODY_JOINTS, nominal_body_pose, joint_indices
         from dextrah_lab.wholebody.actuators import body_motors
         from dextrah_lab.wholebody.navigation_reference import NavigationReference, yaw_of
-        from dextrah_lab.wholebody.walking_diagnostic import cases, command_at, metrics
+        from dextrah_lab.wholebody.walking_diagnostic import cases, command_at, metrics, clock_profile, PHYSICS
+        from dextrah_lab.wholebody.timed_history import TimedSonicHistory
+        clock, physics = clock_profile(args.clock), PHYSICS[args.physics]
         torch.set_num_threads(4)
         torch.manual_seed(42)
         torch.cuda.set_per_process_memory_fraction(4*2**30/torch.cuda.get_device_properties(0).total_memory)
@@ -74,10 +81,12 @@ def main():
         tests = [c for c in cases() if args.case is None or c['name'] in args.case]
         if not tests or (args.case and set(args.case) != {c['name'] for c in tests}):
             raise ValueError('Unknown or empty test selection')
-        material = sim_utils.RigidBodyMaterialCfg(static_friction=1., dynamic_friction=1., restitution=0.)
-        sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=.005, device=args.device,
-            render_interval=4, physics_material=material,
-            physx=sim_utils.PhysxCfg(gpu_found_lost_pairs_capacity=2**20,
+        material = sim_utils.RigidBodyMaterialCfg(static_friction=physics['friction'],
+            dynamic_friction=physics['friction'], restitution=0.,
+            friction_combine_mode=physics['friction_combine_mode'], restitution_combine_mode='average')
+        sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(dt=clock['physics_dt'], device=args.device,
+            render_interval=clock['substeps'], physics_material=material,
+            physx=sim_utils.PhysxCfg(**physics['physx'], gpu_found_lost_pairs_capacity=2**20,
                 gpu_found_lost_aggregate_pairs_capacity=2**21, gpu_total_aggregate_pairs_capacity=2**20,
                 gpu_max_rigid_contact_count=2**20, gpu_max_rigid_patch_count=2**18,
                 gpu_collision_stack_size=2**26)))
@@ -145,7 +154,8 @@ def main():
         session_owner = NavigationReference(planner_path, speed_limit=.4)
         planners, histories, ids, offsets, traces, last_actions = {}, {}, {}, {}, {}, {}
         report.update(pretrained_sonic_sha256=WEIGHTS_SHA256, cases=tests, robots={},
-                      physics_hz=200, control_hz=50, capture_hz=25, seconds=14,
+                      physics_hz=clock['physics_hz'], control_hz=clock['control_hz'],
+                      capture_hz=clock['capture_hz'], seconds=14, physics_profile=physics,
                       nominal_body_pose=nominal_body_pose().tolist(), body_joint_names=list(BODY_JOINTS))
         for robot_index, (kind, robot) in enumerate(robots.items()):
             ids[kind] = torch.tensor(joint_indices(robot.joint_names, BODY_JOINTS), device=args.device)
@@ -162,7 +172,10 @@ def main():
             robot.set_joint_position_target(q)
             robot.reset()
             robot.write_data_to_sim()
-            histories[kind] = SonicHistory(len(tests), args.device)
+            # native: checkpoint's ten consecutive 20 ms samples. task: the
+            # training env's causal interpolation of the same timestamps at 60 Hz.
+            histories[kind] = (SonicHistory(len(tests), args.device) if args.clock == 'native'
+                               else TimedSonicHistory(len(tests), clock['control_dt'], args.device))
             last_actions[kind] = torch.zeros(len(tests), 29, device=args.device)
             planners[kind] = [NavigationReference(planner_path, session=session_owner.session, speed_limit=.4) for _ in tests]
             for i, planner in enumerate(planners[kind]):
@@ -191,8 +204,8 @@ def main():
 
         start = time.monotonic()
         with torch.inference_mode():
-            for step in range(700):
-                now = step*.02
+            for step in range(clock['steps']):
+                now = step*clock['control_dt']
                 for kind, robot in robots.items():
                     data = robot.data
                     q, qd, ref = [], [], []
@@ -218,7 +231,7 @@ def main():
                         raise RuntimeError('Nonfinite SONIC motor targets')
                     robot.set_joint_position_target(target, joint_ids=ids[kind])
                     robot.write_data_to_sim()
-                    if step % 2 == 0:
+                    if step % clock['capture_every'] == 0:
                         def array(v): return v.detach().cpu().numpy().copy()
                         for i, case in enumerate(tests):
                             root = array(data.root_state_w[i, :7]); root[:3] -= array(offsets[kind][i])
@@ -231,10 +244,10 @@ def main():
                                 reference_q=array(q[i]), reference_qd=array(qd[i]), reference_root=array(ref[i]),
                                 action=array(action[i]), target=array(target[i])))
                     last_actions[kind] = action
-                for _ in range(4):
+                for _ in range(clock['substeps']):
                     sim.step(render=False)
-                    for robot in robots.values(): robot.update(.005)
-                if step % 50 == 0:
+                    for robot in robots.values(): robot.update(clock['physics_dt'])
+                if step % clock['control_hz'] == 0:
                     save_traces()
                     free = torch.cuda.mem_get_info()[0]/2**30
                     state = {kind: dict(min_height=float((r.data.root_pos_w-offsets[kind])[:, 2].min()),
