@@ -40,6 +40,8 @@ def main():
                    help='Finite extreme joint speeds reset that environment; non-finite states always abort')
     p.add_argument('--diagnostic-capture-seconds', type=float, default=0.,
                    help='Opt-in physics-state ring buffer for reproducing a numerical failure')
+    p.add_argument('--reset-best', action='store_true',
+                   help='After --resume, forget the parent run best return so this run saves its own best checkpoint')
     p.add_argument('--no-table-body-support', action='store_true',
                    help='Table collides only with right forearm/hand/fingers, so the body cannot lean on it')
     p.add_argument('--carry', action='store_true',
@@ -274,6 +276,11 @@ def main():
                     if previous.get(key) != contract[key]:
                         raise ValueError(f'Incompatible frozen-controller continuation: {key}')
             report['resume'] = resume_at_episode_boundary(algo, args.resume)
+            if args.reset_best:
+                # The parent's best return belongs to a different MDP; keeping
+                # it would block every best-checkpoint save in this run.
+                report['resume']['parent_best_return_discarded'] = float(algo.last_mean_rewards)
+                algo.last_mean_rewards = -1000000000
         if args.init_weights is not None:
             from dextrah_lab.wholebody.carry_training import load_initial_weights, install_critic_warmup
             report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)

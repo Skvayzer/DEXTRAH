@@ -53,6 +53,7 @@ fi
 if [[ "${NO_TABLE_BODY_SUPPORT:-0}" == 1 ]]; then extra_args+=(--no-table-body-support); fi
 if [[ -n "${INIT_WEIGHTS:-}" ]]; then extra_args+=(--init-weights "$INIT_WEIGHTS"); fi
 if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then extra_args+=(--resume "$RESUME_CHECKPOINT"); fi
+if [[ "${RESET_BEST:-0}" == 1 ]]; then extra_args+=(--reset-best); fi
 if [[ -n "${DIAGNOSTIC_CAPTURE_SECONDS:-}" ]]; then
     extra_args+=(--diagnostic-capture-seconds "$DIAGNOSTIC_CAPTURE_SECONDS")
 fi
