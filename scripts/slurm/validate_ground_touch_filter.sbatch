@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=g1_ground_touch
-#SBATCH --partition=batch
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:rtx_6000_ada:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=12G

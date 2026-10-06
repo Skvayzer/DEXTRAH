@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=g1_touch_smoke
-#SBATCH --partition=batch
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:rtx_6000_ada:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=g1_direct_smoke
-#SBATCH --partition=batch
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:rtx_6000_ada:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G

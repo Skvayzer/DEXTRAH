@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=g1_sonic_source
-#SBATCH --partition=batch
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

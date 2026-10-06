@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=adept_validate
-#SBATCH --partition=batch
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:rtx_6000_ada:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G

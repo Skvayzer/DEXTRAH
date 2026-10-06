@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=adept_rgb_dagger
-#SBATCH --partition=batch
+#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G

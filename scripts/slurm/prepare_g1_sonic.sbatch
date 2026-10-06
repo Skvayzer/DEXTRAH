@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=g1_sonic_prepare
-#SBATCH --partition=batch
+#SBATCH --partition=cpu
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=00:30:00
