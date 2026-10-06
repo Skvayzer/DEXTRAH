@@ -40,6 +40,15 @@ def main():
                    help='Finite extreme joint speeds reset that environment; non-finite states always abort')
     p.add_argument('--diagnostic-capture-seconds', type=float, default=0.,
                    help='Opt-in physics-state ring buffer for reproducing a numerical failure')
+    p.add_argument('--carry', action='store_true',
+                   help='Carry expert: restored grasps, no object goal, walking clips, carry reward')
+    p.add_argument('--carry-clips', type=Path, help='Precomputed planner walking clips (.npz)')
+    p.add_argument('--grasp-bank', type=Path, help='Grasp snapshots from build_grasp_bank.py')
+    p.add_argument('--carry-episode-seconds', type=float, default=20.)
+    p.add_argument('--init-weights', type=Path,
+                   help='Load actor/critic weights only (fresh optimizers, epoch 0) from a same-architecture checkpoint')
+    p.add_argument('--critic-warmup-epochs', type=int, default=0,
+                   help='Skip actor optimizer steps for this many epochs while the critic adapts')
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     if args.num_envs < 6 or args.num_envs % 6 or not args.output.name.startswith('0_'):
@@ -51,6 +60,11 @@ def main():
             raise ValueError('A fine-tuned decoder bootstrap is incompatible with frozen pretrained SONIC')
     elif args.bootstrap is None or not args.bootstrap.is_file():
         raise ValueError('Direct decoder training requires a valid --bootstrap')
+    if args.carry and (not args.frozen_pretrained_sonic or not args.carry_clips or not args.grasp_bank
+                       or not args.carry_clips.is_file() or not args.grasp_bank.is_file()):
+        raise ValueError('Carry training needs --frozen-pretrained-sonic, --carry-clips and --grasp-bank')
+    if args.init_weights is not None and (args.resume is not None or not args.init_weights.is_file()):
+        raise ValueError('--init-weights needs an existing checkpoint and excludes --resume')
     args.output.mkdir(parents=True)
     args.headless = True
     # Kit monkey-patches asyncio.run globally. W&B must start its background
@@ -58,13 +72,13 @@ def main():
     # thread while a local USD availability check is running (smoke 556).
     import wandb
     if args.wandb == 'online':
-        wandb.init(project='adept', entity='skvayzer', group='g1-sonic-bps128-touch',
+        wandb.init(project='adept', entity='skvayzer', group='g1-carry-expert' if args.carry else 'g1-sonic-bps128-touch',
             name=args.output.name, id='unique_id_'+args.output.name, resume='allow',
             dir=str(args.output), sync_tensorboard=True, mode='online',
             config=dict(source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), num_envs=args.num_envs),
             tags=['sapg', 'sonic', 'g1', 'revo2', 'bps128', 'touch70', 'floating-body',
                   'frozen-pretrained-sonic' if args.frozen_pretrained_sonic else 'trainable-sonic-decoder',
-                  'continuous' if args.continuous else 'training-smoke'])
+                  'continuous' if args.continuous else 'training-smoke'] + (['carry-expert'] if args.carry else []))
         if wandb.run is None or wandb.run.settings.mode != 'online':
             raise RuntimeError('Requested online logging did not initialize')
         wandb.run.summary.update(dict(experiment_status='initializing_simulation', optimizer_updates_started=False))
@@ -166,7 +180,30 @@ def main():
             if (bootstrap_report['source_sapg_sha256'] != TOUCH_SHA256 or student.task_dim != 249
                     or bootstrap_config.get('policy_hz') != 60):
                 raise ValueError('Require the completed touch teacher distilled on the 60 Hz task clock')
-        env = G1SonicTouchEnv(cfg, sonic=sonic)
+        if args.carry:
+            from dextrah_lab.wholebody.carry_env import G1CarryEnv
+            cfg.episode_length_s = args.carry_episode_seconds
+            cfg.termination.episode_length = round(args.carry_episode_seconds*60)
+            cfg.termination.max_consecutive_successes = 0
+            env = G1CarryEnv(cfg, sonic=sonic, clips_path=args.carry_clips, grasp_bank_path=args.grasp_bank)
+            def sha(path):
+                with Path(path).open('rb') as f:
+                    return hashlib.file_digest(f, 'sha256').hexdigest()
+            contract['carry'] = dict(env.carry_contract(), clips=str(args.carry_clips), clips_sha256=sha(args.carry_clips),
+                grasp_bank=str(args.grasp_bank), grasp_bank_sha256=sha(args.grasp_bank),
+                episode_seconds=args.carry_episode_seconds, critic_warmup_epochs=args.critic_warmup_epochs)
+            contract['unchanged'] = [x for x in contract['unchanged']
+                                     if x not in ('reward', 'goals', 'success_counters', 'task_terminations')]
+            contract['intentional_changes'] = contract['intentional_changes'] + [
+                'carry_reward_replaces_reposing_reward', 'no_object_goal_goal_error_zeroed',
+                'grasp_bank_resets_with_table_parked_below_floor', 'walking_clip_references',
+                'moving_body_frame_palm_object_observations', 'drop_termination', 'value_normalizers_reset']
+            (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
+            if args.wandb == 'online':
+                wandb.config.update(dict(carry=contract['carry'], intentional_changes=contract['intentional_changes']),
+                                    allow_val_change=True)
+        else:
+            env = G1SonicTouchEnv(cfg, sonic=sonic)
         if args.diagnostic_capture_seconds > 0:
             from dextrah_lab.wholebody.failure_recording import FailureRecorder
             diagnostic = FailureRecorder(env, args.output/'failure_clip', args.diagnostic_capture_seconds,
@@ -231,6 +268,11 @@ def main():
                     if previous.get(key) != contract[key]:
                         raise ValueError(f'Incompatible frozen-controller continuation: {key}')
             report['resume'] = resume_at_episode_boundary(algo, args.resume)
+        if args.init_weights is not None:
+            from dextrah_lab.wholebody.carry_training import load_initial_weights, install_critic_warmup
+            report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)
+            if args.critic_warmup_epochs:
+                install_critic_warmup(algo, args.critic_warmup_epochs)
         if args.memory_trace:
             from dextrah_lab.wholebody.memory_diagnostics import install_memory_trace
             install_memory_trace(algo, args.output, args.memory_gc_probe_epoch)

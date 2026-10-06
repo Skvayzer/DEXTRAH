@@ -45,6 +45,12 @@ if [[ -n "${NUMERICAL_FAILURE_MODE:-}" ]]; then
     extra_args+=(--numerical-failure-mode "$NUMERICAL_FAILURE_MODE")
 fi
 if [[ "${CONTINUOUS:-0}" == 1 ]]; then extra_args+=(--continuous); fi
+if [[ "${CARRY:-0}" == 1 ]]; then
+    python -m pytest -q tests/test_carry.py
+    extra_args+=(--carry --carry-clips "${CARRY_CLIPS:?Set CARRY_CLIPS}" --grasp-bank "${GRASP_BANK:?Set GRASP_BANK}")
+    extra_args+=(--critic-warmup-epochs "${CRITIC_WARMUP_EPOCHS:-0}")
+fi
+if [[ -n "${INIT_WEIGHTS:-}" ]]; then extra_args+=(--init-weights "$INIT_WEIGHTS"); fi
 if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then extra_args+=(--resume "$RESUME_CHECKPOINT"); fi
 if [[ -n "${DIAGNOSTIC_CAPTURE_SECONDS:-}" ]]; then
     extra_args+=(--diagnostic-capture-seconds "$DIAGNOSTIC_CAPTURE_SECONDS")
