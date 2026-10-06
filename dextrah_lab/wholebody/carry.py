@@ -181,15 +181,18 @@ class WalkingClips:
         return q, qd, root, (va+(vb-va)*vw)[:, 0], torch.where(cw < .5, ca, cb)[:, 0]
 
 
-def grasp_gate(object_lift_m, normal_n, rel_speed, *, lift=.05, force=.2, speed=.1):
+def grasp_gate(object_lift_m, normal_n, rel_speed, *, lift=.05, force=.2, speed=.2):
     """Instantaneous 'secure grasp' test; callers require it for 0.5 s.
 
     object_lift_m: object height above its resting reset height.
     normal_n: (N, 5) fingertip normal forces, thumb first.
     rel_speed: object linear speed relative to the palm point it would follow.
+
+    The reposing expert mostly holds objects against the (unsensed) palm with
+    index/middle fingers; its thumb touches in only ~25-30% of lifted frames
+    (final-best recording, 2026-10-06). So any fingertip contact counts.
     """
-    contact = normal_n > force
-    return (object_lift_m > lift) & contact[:, 0] & (contact[:, 1:].sum(-1) >= 1) & (rel_speed < speed)
+    return (object_lift_m > lift) & ((normal_n > force).any(-1)) & (rel_speed < speed)
 
 
 @dataclass
@@ -219,8 +222,7 @@ def carry_reward(cfg, *, distance, home_distance, normal_n, rel_linear, rel_angu
     planned_velocity are body-frame (vx, vy, wz).
     """
     near = (distance < home_distance+cfg.hold_margin_m).float()
-    contact = normal_n > cfg.contact_force_n
-    contact_ok = (contact[:, 0] & (contact[:, 1:].sum(-1) >= 1)).float()
+    contact_ok = (normal_n > cfg.contact_force_n).any(-1).float()
     terms = dict(
         hold=cfg.hold*near*(.5+.5*contact_ok),
         slip=-cfg.slip_linear*rel_linear.norm(dim=-1).clamp(max=1.)

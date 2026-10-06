@@ -3,8 +3,8 @@
 
 Runs a frozen-SONIC SAPG checkpoint (deterministic leader, no optimizer) in the
 unchanged reposing task with the table present. A grasp is captured when the
-gate (thumb + another fingertip in contact, object >= 5 cm above its resting
-reset height, low hand-object slip) has held for 0.5 s, and again every 0.75 s
+gate (any fingertip in contact, object >= 5 cm above its resting
+reset height, hand-object slip < 0.2 m/s) has held for 0.5 s, and again every 0.75 s
 while it keeps holding, up to K snapshots per environment. Snapshots are keyed
 by environment index, i.e. by the physical object assigned to it.
 """
@@ -86,8 +86,8 @@ def main():
         states = tuple(x.to(device) for x in model.get_default_rnn_state())
         faulthandler.cancel_dump_traceback_later()
         start = time.monotonic()
-        rule = (f'gate (thumb + >=1 finger normal > 0.2 N, lift > 5 cm above resting reset height, '
-                f'slip < 0.1 m/s) held {args.hold_steps} steps, then every {args.repeat_steps} steps, '
+        rule = (f'gate (any fingertip normal > 0.2 N, lift > 5 cm above resting reset height, '
+                f'slip < 0.2 m/s) held {args.hold_steps} steps, then every {args.repeat_steps} steps, '
                 f'max {k_max} per env; deterministic leader')
         print('GRASP_BANK_START '+json.dumps(dict(envs=n, checkpoint_sha256=checkpoint_sha, rule=rule)), flush=True)
         steps = round(args.seconds/env.step_dt)

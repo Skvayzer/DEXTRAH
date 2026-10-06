@@ -85,9 +85,9 @@ class WalkingClipTests(unittest.TestCase):
 
 
 class GateAndRewardTests(unittest.TestCase):
-    def test_grasp_gate_requires_thumb_and_finger(self):
-        normal = torch.tensor([[1., 1., 0., 0., 0.], [0., 1., 1., 1., 1.], [1., 0., 0., 0., 0.]])
-        gate = grasp_gate(torch.full((3,), .1), normal, torch.zeros(3))
+    def test_grasp_gate_needs_lift_contact_and_low_slip(self):
+        normal = torch.tensor([[0., 1., 0., 0., 0.], [0.]*5, [1., 0., 0., 0., 0.]])
+        gate = grasp_gate(torch.full((3,), .1), normal, torch.tensor([0., 0., .5]))
         self.assertEqual(gate.tolist(), [True, False, False])
         self.assertFalse(bool(grasp_gate(torch.tensor([.01]), normal[:1], torch.zeros(1))))
 
