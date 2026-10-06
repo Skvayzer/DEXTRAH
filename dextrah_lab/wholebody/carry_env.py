@@ -69,6 +69,7 @@ class G1CarryEnv(G1SonicTouchEnv):
             raise ValueError('Carry training uses the frozen pretrained SONIC latent interface')
         self.reward_cfg = reward_cfg or CarryRewardCfg()
         self.settle_s, self.idle_clip_probability = settle_s, idle_clip_probability
+        self.park_table = True  # diagnostics may keep the table to isolate its effect
         self.clips = WalkingClips.load(clips_path, self.device)
         self._idle_clip = self.clips.index('idle')
         bank = torch.load(grasp_bank_path, map_location='cpu', weights_only=False)
@@ -267,9 +268,10 @@ class G1CarryEnv(G1SonicTouchEnv):
             self._home_distance[valid] = snap[:, sl['palm_object_distance']].squeeze(-1)
             self._reset_root_xy[valid] = snap[:, sl['root']][:, :2]
             self._clip_heading[valid] = yaw_of(snap[:, sl['root']][:, 3:7])
-        pose = self.table.data.root_state_w[ids, :7].clone()
-        pose[:, 2] = self.scene.env_origins[ids, 2]+TABLE_PARKING_Z
-        self.table.write_root_pose_to_sim(pose, env_ids=ids)
+        if self.park_table:
+            pose = self.table.data.root_state_w[ids, :7].clone()
+            pose[:, 2] = self.scene.env_origins[ids, 2]+TABLE_PARKING_Z
+            self.table.write_root_pose_to_sim(pose, env_ids=ids)
         self._clip[ids] = self._idle_clip
         self._clip_t0[ids] = 0
         self._clip_started[ids] = False
