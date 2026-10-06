@@ -72,14 +72,15 @@ class G1CarryEnv(G1SonicTouchEnv):
         self.clips = WalkingClips.load(clips_path, self.device)
         self._idle_clip = self.clips.index('idle')
         bank = torch.load(grasp_bank_path, map_location='cpu', weights_only=False)
-        if bank['num_envs'] != self.num_envs:
-            raise ValueError('Grasp bank was captured with a different environment count')
-        if not torch.equal(bank['object_asset_index'], self._object_asset_index_per_env.cpu()):
+        # A bank from a larger scene serves a smaller one if the leading
+        # environments hold the same physical objects (checked, not assumed).
+        if bank['num_envs'] < self.num_envs or not torch.equal(
+                bank['object_asset_index'][:self.num_envs], self._object_asset_index_per_env.cpu()):
             raise ValueError('Grasp bank object assignment differs from this scene')
         if bank['snapshot_dim'] != SNAPSHOT_DIM:
             raise ValueError('Grasp bank snapshot layout changed')
-        self._bank = bank['snapshots'].to(self.device)          # (N, K, D)
-        self._bank_count = bank['count'].to(self.device)        # (N,)
+        self._bank = bank['snapshots'][:self.num_envs].to(self.device)    # (N, K, D)
+        self._bank_count = bank['count'][:self.num_envs].to(self.device)  # (N,)
         self._bank_meta = {k: bank[k] for k in ('checkpoint_sha256', 'seconds', 'capture_rule')}
         self.carry_valid = self._bank_count > 0
         self._slices = snapshot_slices()
@@ -102,7 +103,10 @@ class G1CarryEnv(G1SonicTouchEnv):
         self._reset_root_xy = torch.zeros(n, 2, device=d)
         self._prev_actions = torch.zeros(n, 70, device=d)
         self._actions_now = torch.zeros(n, 70, device=d)
-        sizes = obs_utils._obs_field_sizes(13, self._num_fingertips)
+        sizes = obs_utils._obs_field_sizes(obs_utils.robot_num_action_joints(cfg.assets),
+                                           obs_utils.robot_num_fingertips(cfg.assets))
+        if sum(sizes[f] for f in cfg.obs.obs_list) != 92:
+            raise ValueError('Unexpected source task observation layout')
         self._goal_policy = field_slice(cfg.obs.obs_list, sizes, 'keypoints_rel_goal')
         self._goal_critic = field_slice(cfg.obs.state_list, sizes, 'keypoints_rel_goal')
         self._carry_ready = True
