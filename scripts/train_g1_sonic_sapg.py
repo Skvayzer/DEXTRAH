@@ -40,6 +40,8 @@ def main():
                    help='Finite extreme joint speeds reset that environment; non-finite states always abort')
     p.add_argument('--diagnostic-capture-seconds', type=float, default=0.,
                    help='Opt-in physics-state ring buffer for reproducing a numerical failure')
+    p.add_argument('--no-table-body-support', action='store_true',
+                   help='Table collides only with right forearm/hand/fingers, so the body cannot lean on it')
     p.add_argument('--carry', action='store_true',
                    help='Carry expert: restored grasps, no object goal, walking clips, carry reward')
     p.add_argument('--carry-clips', type=Path, help='Precomputed planner walking clips (.npz)')
@@ -122,6 +124,7 @@ def main():
             raise ValueError('Pinned Play2Perfect revision changed')
         cfg, contract = source_task_config(args.output, args.num_envs, args.device)
         cfg.sonic_body.numerical_failure_mode = args.numerical_failure_mode
+        cfg.sonic_body.table_supports_body = not args.no_table_body_support
         frozen = args.frozen_pretrained_sonic
         cfg.sonic_body.controller_mode = 'frozen_pretrained_latent' if frozen else 'trainable_decoder'
         agent = load_yaml(Path(TOUCH_RUN)/'params/agent.yaml')
@@ -154,6 +157,9 @@ def main():
         else:
             contract['new_body_exploration_std_rad'] = .025
         contract['body_termination'] = cfg.sonic_body.to_dict()
+        if args.no_table_body_support:
+            contract['intentional_changes'] = contract['intentional_changes'] + [
+                'table_collides_only_with_right_forearm_hand_fingers']
         contract['nonfinite_state_handling'] = 'abort before rewards and terminal observations'
         contract['finite_numerical_failure_reward'] = 'unchanged source reward; separately logged true termination'
         contract['touch_global_partners'] = 'enabled static collision shapes under /World/ground'
