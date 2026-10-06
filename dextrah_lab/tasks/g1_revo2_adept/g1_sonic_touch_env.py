@@ -29,6 +29,11 @@ class SonicBodyCfg:
     # False: the table no longer collides with legs/pelvis/torso/left arm, so it
     # cannot support the body; right forearm/hand/fingers still touch it.
     table_supports_body: bool = True
+    # Terminate (like a robot fall) when any body link other than the right
+    # forearm/hand/fingers presses on the table: no leaning, no penetration.
+    body_table_contact_termination: bool = False
+    body_table_contact_force_n: float = 2.
+    body_table_contact_steps: int = 3
 
 
 @configclass
@@ -46,6 +51,11 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
     def _setup_scene(self):
         clone = self.scene.clone_environments
         def clone_with_table_filter(*args, **kwargs):
+            if self.cfg.sonic_body.body_table_contact_termination:
+                import isaaclab.sim as sim_utils
+                from dextrah_lab.wholebody.source_scene import prepare_table_contact_reporting
+                self._table_contact_source = prepare_table_contact_reporting(sim_utils.get_current_stage())
+                print(f'BODY_TABLE_CONTACT before_clone links={len(self._table_contact_source[1])}', flush=True)
             if not self.cfg.sonic_body.table_supports_body:
                 import isaaclab.sim as sim_utils
                 from dextrah_lab.wholebody.source_scene import filter_table_body_contacts
@@ -59,6 +69,21 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
                 super()._setup_scene()
         finally:
             self.scene.clone_environments = clone
+        self.body_table_sensors = []
+        if self.cfg.sonic_body.body_table_contact_termination:
+            if not self.cfg.sonic_body.table_supports_body:
+                raise ValueError('Contact termination needs real table collisions')
+            from isaaclab.sensors import ContactSensor, ContactSensorCfg
+            table, links = self._table_contact_source
+            partner = table.replace('env_0', 'env_.*', 1)
+            for name, path in links.items():
+                sensor = ContactSensor(ContactSensorCfg(prim_path=path.replace('env_0', 'env_.*', 1),
+                    update_period=0., filter_prim_paths_expr=[partner]))
+                self.scene.sensors[f'body_table_{name}'] = sensor
+                self.body_table_sensors.append(sensor)
+            self.body_table_names = list(links)
+            print(f'BODY_TABLE_CONTACT sensors={len(self.body_table_sensors)} partner={partner} '
+                  f'links={self.body_table_names}', flush=True)
         if not self.cfg.sonic_body.table_supports_body and self.num_envs > 1:
             import isaaclab.sim as sim_utils
             from pxr import Usd, UsdPhysics
@@ -108,6 +133,8 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._body_extra_step = None
         self._body_extra = None
         self._body_fallen = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._body_table_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._body_table_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._body_numerical_failure = torch.zeros_like(self._body_fallen)
         self._body_falls_total = torch.zeros((), dtype=torch.long, device=self.device)
         self._body_numerical_failures_total = torch.zeros_like(self._body_falls_total)
@@ -189,6 +216,15 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._body_max_joint_speed = torch.maximum(self._body_max_joint_speed, speed.max())
         self._body_checked_transitions += self.num_envs
         task_terminated, truncated = super()._get_dones()
+        if self.body_table_sensors and hasattr(self, '_body_table_count'):
+            force = torch.stack([s.data.force_matrix_w[:, 0].norm(dim=-1).sum(-1) for s in self.body_table_sensors], -1)
+            pressing = force.amax(-1) > cfg.body_table_contact_force_n
+            self._body_table_count = torch.where(pressing, self._body_table_count+1, torch.zeros_like(self._body_table_count))
+            self._body_table_contact = self._body_table_count >= cfg.body_table_contact_steps
+            self._body_table_force = force
+            # Same terminal treatment as a robot fall: a failure, never a time-out bootstrap.
+            task_terminated = task_terminated | self._body_table_contact
+            truncated = truncated & ~self._body_table_contact
         # A robot fall is NOT the source task's object-fall metric.
         return combine_terminations(task_terminated, truncated, self._body_fallen, self._body_numerical_failure)
 
@@ -196,6 +232,14 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         reward = super()._get_rewards()  # exact original manipulation reward
         self.extras['episode_final']['robot_fall'] = self._body_fallen.float()
         self.extras['episode_final']['numerical_failure'] = self._body_numerical_failure.float()
+        if self.body_table_sensors and hasattr(self, '_body_table_force'):
+            self.extras['episode_final']['done_body_table_contact'] = self._body_table_contact.float()
+            touching = self._body_table_force > self.cfg.sonic_body.body_table_contact_force_n
+            self.extras['body_table/any_link_touching'] = touching.any(-1).float().mean()
+            self.extras['body_table/max_force_n'] = self._body_table_force.amax(-1).mean()
+            for i, name in enumerate(self.body_table_names):
+                if any(k in name for k in ('knee', 'pelvis', 'hip', 'torso')):
+                    self.extras[f'body_table/touch_{name}'] = touching[:, i].float().mean()
         if 'final_observation' in self.extras:
             final = self.extras['final_observation']
             final['critic'] = torch.cat((final['critic'], self._wholebody_observation()), -1)
@@ -218,4 +262,6 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         self._last_latent_action[ids] = 0
         self._last_decoded_sonic_action[ids] = 0
         self._body_fallen[ids] = False
+        self._body_table_count[ids] = 0
+        self._body_table_contact[ids] = False
         self._body_numerical_failure[ids] = False

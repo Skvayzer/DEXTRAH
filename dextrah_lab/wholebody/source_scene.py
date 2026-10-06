@@ -40,6 +40,27 @@ def table_filtered_links(link_names):
     return [n for n in link_names if n not in keep and not n.startswith(fingers)]
 
 
+def table_contact_monitored_links(link_names):
+    """Body links whose table contact ends an episode (left-hand fingers skipped: they
+    sit far from the table and each sensor costs a PhysX view)."""
+    fingers = ('index', 'middle', 'ring', 'pinky', 'thumb')
+    return [n for n in table_filtered_links(link_names) if not any(f in n for f in fingers)]
+
+
+def prepare_table_contact_reporting(stage, env_path='/World/envs/env_0'):
+    """Enable contact reporting on monitored links of the source env before cloning."""
+    from pxr import Usd, UsdPhysics, PhysxSchema
+    tables = [p for p in Usd.PrimRange(stage.GetPrimAtPath(env_path+'/Table')) if p.HasAPI(UsdPhysics.RigidBodyAPI)]
+    links = {p.GetName(): p for p in Usd.PrimRange(stage.GetPrimAtPath(env_path+'/Robot'))
+             if p.HasAPI(UsdPhysics.RigidBodyAPI)}
+    if len(tables) != 1:
+        raise RuntimeError('Expected exactly one table rigid body')
+    names = table_contact_monitored_links(sorted(links))
+    for name in names:
+        PhysxSchema.PhysxContactReportAPI.Apply(links[name]).CreateThresholdAttr().Set(0.)
+    return str(tables[0].GetPath()), {n: str(links[n].GetPath()) for n in names}
+
+
 def filter_table_body_contacts(stage, env_path='/World/envs/env_0'):
     """Author PhysX filtered pairs on the source env's table before cloning."""
     from pxr import Usd, UsdPhysics

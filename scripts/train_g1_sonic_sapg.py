@@ -42,6 +42,8 @@ def main():
                    help='Opt-in physics-state ring buffer for reproducing a numerical failure')
     p.add_argument('--reset-best', action='store_true',
                    help='After --resume, forget the parent run best return so this run saves its own best checkpoint')
+    p.add_argument('--body-table-contact-termination', action='store_true',
+                   help='Real table collisions; end the episode when any body link except the right forearm/hand/fingers presses on the table')
     p.add_argument('--no-table-body-support', action='store_true',
                    help='Table collides only with right forearm/hand/fingers, so the body cannot lean on it')
     p.add_argument('--carry', action='store_true',
@@ -127,6 +129,9 @@ def main():
         cfg, contract = source_task_config(args.output, args.num_envs, args.device)
         cfg.sonic_body.numerical_failure_mode = args.numerical_failure_mode
         cfg.sonic_body.table_supports_body = not args.no_table_body_support
+        cfg.sonic_body.body_table_contact_termination = args.body_table_contact_termination
+        if args.body_table_contact_termination and args.no_table_body_support:
+            raise ValueError('Contact termination requires real table collisions')
         frozen = args.frozen_pretrained_sonic
         cfg.sonic_body.controller_mode = 'frozen_pretrained_latent' if frozen else 'trainable_decoder'
         agent = load_yaml(Path(TOUCH_RUN)/'params/agent.yaml')
@@ -159,6 +164,9 @@ def main():
         else:
             contract['new_body_exploration_std_rad'] = .025
         contract['body_termination'] = cfg.sonic_body.to_dict()
+        if args.body_table_contact_termination:
+            contract['intentional_changes'] = contract['intentional_changes'] + [
+                'terminate_on_body_table_contact_except_right_forearm_hand_fingers']
         if args.no_table_body_support:
             contract['intentional_changes'] = contract['intentional_changes'] + [
                 'table_collides_only_with_right_forearm_hand_fingers']
