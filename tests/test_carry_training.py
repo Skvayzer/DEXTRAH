@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 from rl_games.algos_torch.running_mean_std import RunningMeanStd
-from dextrah_lab.wholebody.carry_training import install_critic_warmup, reset_value_normalizers
+from dextrah_lab.wholebody.carry_training import install_critic_warmup, install_delayed_best, reset_value_normalizers
 
 
 class Model(nn.Module):
@@ -34,6 +34,21 @@ class CarryTrainingTests(unittest.TestCase):
             p.grad = torch.ones(1)
             opt.step()
             self.assertEqual(float(p), expected)
+
+    def test_delayed_best_blocks_then_resets(self):
+        class Algo:
+            epoch_num = 100
+            last_mean_rewards = 5e4
+            def update_epoch(self):
+                self.epoch_num += 1
+                return self.epoch_num
+        algo = Algo()
+        install_delayed_best(algo, 3)
+        self.assertEqual(algo.last_mean_rewards, float('inf'))
+        algo.update_epoch(); algo.update_epoch()
+        self.assertEqual(algo.last_mean_rewards, float('inf'))
+        algo.update_epoch()
+        self.assertEqual(algo.last_mean_rewards, -1000000000)
 
 
 if __name__ == '__main__':

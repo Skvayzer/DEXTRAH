@@ -60,3 +60,24 @@ def install_critic_warmup(algo, epochs):
 
     optimizer.step = MethodType(step, optimizer)
     return dict(critic_warmup_epochs=epochs)
+
+
+def install_delayed_best(algo, epochs):
+    """Start best-checkpoint tracking ``epochs`` updates after the current epoch.
+
+    Until then the best record is +inf, so nothing is saved; afterwards it is
+    reset so the first fully post-change return becomes the best.
+    """
+    start = int(algo.epoch_num)
+    algo.last_mean_rewards = float('inf')
+    original = algo.update_epoch
+
+    def update_epoch(self):
+        epoch = original()
+        if epoch == start+epochs:
+            self.last_mean_rewards = -1000000000
+            print(f'BEST_TRACKING_STARTED epoch={epoch}', flush=True)
+        return epoch
+
+    algo.update_epoch = MethodType(update_epoch, algo)
+    return dict(blocked_until_epoch=start+epochs, delay_epochs=epochs)

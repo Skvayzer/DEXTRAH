@@ -40,6 +40,8 @@ def main():
                    help='Finite extreme joint speeds reset that environment; non-finite states always abort')
     p.add_argument('--diagnostic-capture-seconds', type=float, default=0.,
                    help='Opt-in physics-state ring buffer for reproducing a numerical failure')
+    p.add_argument('--best-delay-epochs', type=int, default=200,
+                   help='With --reset-best: epochs after the resume before best-return tracking starts')
     p.add_argument('--reset-best', action='store_true',
                    help='After --resume, forget the parent run best return so this run saves its own best checkpoint')
     p.add_argument('--body-table-contact-termination', action='store_true',
@@ -286,9 +288,14 @@ def main():
             report['resume'] = resume_at_episode_boundary(algo, args.resume)
             if args.reset_best:
                 # The parent's best return belongs to a different MDP; keeping
-                # it would block every best-checkpoint save in this run.
+                # it would block every best-checkpoint save in this run. The
+                # first post-resume returns still include episodes from before
+                # the change (run 1063 locked its best at the 2nd epoch), and
+                # SAPG's continuous path saves from absolute epoch 10. So block
+                # saves until enough episodes have run under the new rules.
                 report['resume']['parent_best_return_discarded'] = float(algo.last_mean_rewards)
-                algo.last_mean_rewards = -1000000000
+                from dextrah_lab.wholebody.carry_training import install_delayed_best
+                report['resume']['best_tracking'] = install_delayed_best(algo, args.best_delay_epochs)
         if args.init_weights is not None:
             from dextrah_lab.wholebody.carry_training import load_initial_weights, install_critic_warmup
             report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)
