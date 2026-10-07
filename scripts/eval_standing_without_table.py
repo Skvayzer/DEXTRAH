@@ -34,6 +34,8 @@ def main():
     p.add_argument('--seconds', type=float, default=30.)
     p.add_argument('--window', type=float, default=3.)
     p.add_argument('--torch-memory-limit-gib', type=float, default=5.)
+    p.add_argument('--physics', choices=['filtered', 'contact'], default='filtered',
+                   help='filtered: table passes through the body; contact: real collisions + body-table contact termination')
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     if len(args.checkpoints) != len(args.labels) or args.output.exists():
@@ -66,7 +68,8 @@ def main():
         cfg.seed = 42
         cfg.sonic_body.from_dict(previous['body_termination'])
         cfg.sonic_body.numerical_failure_mode = 'reset'
-        cfg.sonic_body.table_supports_body = False
+        cfg.sonic_body.table_supports_body = args.physics == 'contact'
+        cfg.sonic_body.body_table_contact_termination = args.physics == 'contact'
         sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
         audit = FrozenControllerAudit(sonic)
         env = G1SonicTouchEnv(cfg, sonic=sonic)
@@ -99,7 +102,7 @@ def main():
             inside_steps = present_steps = 0
             max_depth = torch.zeros(len(LOWER_BODY), device=device)
             inside_per_link = torch.zeros(len(LOWER_BODY), device=device)
-            falls_total = episodes = hits = 0
+            falls_total = episodes = hits = table_terms = touch_steps = 0
             for step in range(round(args.seconds/dt)):
                 wrapped = torch.cat((obs['policy'], obs['policy'].new_zeros(n, 1)), -1)
                 out = model(dict(obs=wrapped, is_train=False, prev_actions=None, rnn_states=states))
@@ -109,6 +112,10 @@ def main():
                 final = info['episode_final']
                 fell = done & final['robot_fall'].bool()
                 falls_total += int(fell.sum()); episodes += int(done.sum())
+                if 'done_body_table_contact' in final:
+                    table_terms += int((done & final['done_body_table_contact'].bool()).sum())
+                if env.body_table_sensors:
+                    touch_steps += int((env._body_table_force > cfg.sonic_body.body_table_contact_force_n).any(-1).sum())
                 hits += int(final['successes'][done].sum()) if 'successes' in final else 0
                 active = removed_at >= 0
                 elapsed = step-removed_at
@@ -161,12 +168,14 @@ def main():
                 lower_body_inside_table_fraction=inside_steps/max(present_steps, 1),
                 inside_fraction_per_link={b: float(v)/max(present_steps, 1) for b, v in zip(LOWER_BODY, inside_per_link)},
                 max_inside_depth_m={b: float(v) for b, v in zip(LOWER_BODY, max_depth)},
-                episodes=episodes, robot_falls_per_episode=falls_total/max(episodes, 1), goal_hits=hits)
+                episodes=episodes, robot_falls_per_episode=falls_total/max(episodes, 1), goal_hits=hits,
+                body_table_contact_terminations=table_terms,
+                body_touching_table_step_fraction=touch_steps/max(n*round(args.seconds/dt), 1))
             print('STANDING_RESULT '+json.dumps({k: v for k, v in results[label].items()
                                                 if k not in ('inside_fraction_per_link', 'max_inside_depth_m')}), flush=True)
             del model
         report.update(completed=True, results=results, num_envs=n, seconds=args.seconds, window_s=args.window,
-            table_supports_body=False, seed=42, policy='deterministic leader', **audit.check())
+            physics=args.physics, seed=42, policy='deterministic leader', **audit.check())
     except BaseException as error:
         report.update(error=str(error), traceback=traceback.format_exc())
         raise
