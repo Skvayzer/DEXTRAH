@@ -47,6 +47,28 @@ def main():
         assignment = env._object_asset_index_per_env.cpu().numpy()
         selected = select_family_envs(env._object_urdf_paths, assignment, ['hammer', 'brush', 'spatula'])
         out = {}
+        import re
+        view = env.object.root_physx_view
+        masses = view.get_masses().cpu().numpy().reshape(env.num_envs, -1)
+        coms = view.get_coms().cpu().numpy().reshape(env.num_envs, -1)
+        inertias = view.get_inertias().cpu().numpy().reshape(env.num_envs, -1)
+        def urdf_mass_com(path):
+            text = Path(path).read_text()
+            mass = float(re.search(r'<mass value="([^"]+)"', text).group(1))
+            com = [float(x) for x in re.search(r'<inertial>\s*<origin xyz="([^"]+)"', text).group(1).split()]
+            return mass, com
+        table = []
+        for i in range(min(env.num_envs, 24)):
+            mass, com = urdf_mass_com(env._object_urdf_paths[int(assignment[i])])
+            table.append(dict(env=i, urdf=Path(env._object_urdf_paths[int(assignment[i])]).name[:24],
+                              urdf_mass=round(mass, 4), physx_mass=round(float(masses[i, 0]), 4),
+                              urdf_com=[round(c, 4) for c in com], physx_com=[round(float(c), 4) for c in coms[i, :3]],
+                              physx_inertia_diag=[round(float(inertias[i, k]), 7) for k in (0, 4, 8)]))
+            print('MASS '+json.dumps(table[-1]), flush=True)
+        report['mass_check'] = table
+        unique = len({tuple(np.round(masses[:, 0], 5))[k] for k in range(env.num_envs)})
+        print(f'UNIQUE_PHYSX_MASSES {unique} of {env.num_envs} envs', flush=True)
+        report['unique_physx_masses'] = unique
         for family, i in selected.items():
             text, path = object_urdf_for_env(env, i)
             mesh = yourdfpy.URDF.load(str(path)).scene.dump(concatenate=True)
