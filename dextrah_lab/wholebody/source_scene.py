@@ -65,13 +65,28 @@ def apply_table_contact_reporting_all_envs(stage, env_paths):
     """Per-env contact reporting for scenes spawned without cloning (upstream path)."""
     from pxr import Sdf, PhysxSchema
     table, links = prepare_table_contact_reporting(stage, env_paths[0])
+    # Schema helpers fail inside a change block, and per-prim API calls on
+    # 9,216 x 30 links take over an hour. Author the same opinions as Sdf specs:
+    # prepend the applied API schema and a float threshold of 0.
+    layer = stage.GetEditTarget().GetLayer()
     with Sdf.ChangeBlock():
         for env_path in env_paths[1:]:
             for path in links.values():
-                prim = stage.GetPrimAtPath(path.replace(env_paths[0], env_path, 1))
-                if not prim.IsValid():
-                    raise RuntimeError(f'Missing robot link {path} in {env_path}')
-                PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr().Set(0.)
+                spec = Sdf.CreatePrimInLayer(layer, path.replace(env_paths[0], env_path, 1))
+                schemas = spec.GetInfo('apiSchemas') if spec.HasInfo('apiSchemas') else Sdf.TokenListOp()
+                items = list(schemas.prependedItems)
+                if 'PhysxContactReportAPI' not in items:
+                    schemas.prependedItems = items+['PhysxContactReportAPI']
+                    spec.SetInfo('apiSchemas', schemas)
+                attr = spec.attributes.get('physxContactReport:threshold') or Sdf.AttributeSpec(
+                    spec, 'physxContactReport:threshold', Sdf.ValueTypeNames.Float)
+                attr.default = 0.
+    last = env_paths[-1]
+    for path in links.values():
+        prim = stage.GetPrimAtPath(path.replace(env_paths[0], last, 1))
+        if not prim.HasAPI(PhysxSchema.PhysxContactReportAPI) or \
+                PhysxSchema.PhysxContactReportAPI(prim).GetThresholdAttr().Get() != 0.:
+            raise RuntimeError(f'Contact reporting not applied at {prim.GetPath()}')
     return table, links
 
 
