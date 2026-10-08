@@ -76,6 +76,13 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         finally:
             self.scene.clone_environments = clone
         self.body_table_sensors = []
+        if self.cfg.sonic_body.body_table_contact_termination and not hasattr(self, '_table_contact_source'):
+            # Upstream scene path spawns envs directly (no clone hook ran).
+            import isaaclab.sim as sim_utils
+            from dextrah_lab.wholebody.source_scene import apply_table_contact_reporting_all_envs
+            self._table_contact_source = apply_table_contact_reporting_all_envs(
+                sim_utils.get_current_stage(), list(self.scene.env_prim_paths))
+            print(f'BODY_TABLE_CONTACT per_env_reporting envs={self.num_envs}', flush=True)
         if self.cfg.sonic_body.body_table_contact_termination:
             if not self.cfg.sonic_body.table_supports_body:
                 raise ValueError('Contact termination needs real table collisions')
@@ -90,6 +97,8 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
             self.body_table_names = list(links)
             print(f'BODY_TABLE_CONTACT sensors={len(self.body_table_sensors)} partner={partner} '
                   f'links={self.body_table_names}', flush=True)
+        if not self.cfg.sonic_body.table_supports_body and not hasattr(self, 'table_filter_report'):
+            raise ValueError('The no-table-support filter needs the cloned scene path')
         if not self.cfg.sonic_body.table_supports_body and self.num_envs > 1:
             import isaaclab.sim as sim_utils
             from pxr import Usd, UsdPhysics

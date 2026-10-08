@@ -61,6 +61,20 @@ def prepare_table_contact_reporting(stage, env_path='/World/envs/env_0'):
     return str(tables[0].GetPath()), {n: str(links[n].GetPath()) for n in names}
 
 
+def apply_table_contact_reporting_all_envs(stage, env_paths):
+    """Per-env contact reporting for scenes spawned without cloning (upstream path)."""
+    from pxr import Sdf, PhysxSchema
+    table, links = prepare_table_contact_reporting(stage, env_paths[0])
+    with Sdf.ChangeBlock():
+        for env_path in env_paths[1:]:
+            for path in links.values():
+                prim = stage.GetPrimAtPath(path.replace(env_paths[0], env_path, 1))
+                if not prim.IsValid():
+                    raise RuntimeError(f'Missing robot link {path} in {env_path}')
+                PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr().Set(0.)
+    return table, links
+
+
 def filter_table_body_contacts(stage, env_path='/World/envs/env_0'):
     """Author PhysX filtered pairs on the source env's table before cloning."""
     from pxr import Usd, UsdPhysics
