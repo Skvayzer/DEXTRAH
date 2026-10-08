@@ -39,7 +39,7 @@ def main():
     app = AppLauncher(args).app
     stack_log = (args.output/'stacks.log').open('w')
     faulthandler.enable(file=stack_log)
-    faulthandler.dump_traceback_later(120, repeat=True, file=stack_log)
+    # No periodic stack dumps: Kit segfaulted mid-dump during scene setup (jobs 618, 1084).
     report = dict(completed=False, optimizer_updates=0, source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'))
     try:
         import torch

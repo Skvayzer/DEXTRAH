@@ -69,7 +69,7 @@ def main():
     report = dict(completed=False, optimizer_updates=0)
     stack_log = (args.output/'stacks.log').open('w')
     faulthandler.enable(file=stack_log)
-    faulthandler.dump_traceback_later(90, repeat=True, file=stack_log)
+    # No periodic stack dumps: Kit segfaulted mid-dump during scene setup (jobs 618, 1084).
     try:
         import numpy as np
         import torch

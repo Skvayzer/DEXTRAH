@@ -33,6 +33,6 @@ for family in hammer brush spatula; do
 done
 export PATH="/data1/users/konstantin.smirnov/venvs/g1_sonic/bin:$PATH"
 python scripts/eval_standing_without_table.py --headless --device cuda:0 --kit_args="$kit" \
-    --physics contact --num-envs 120 --seconds 30 --torch-memory-limit-gib 8 \
+    --physics contact --num-envs 120 --seconds 30 --torch-memory-limit-gib 30 \
     --checkpoints "$EVAL_CHECKPOINT" "${BASELINE_CHECKPOINT:?Set BASELINE_CHECKPOINT}" \
     --labels notouch_best run560_best --output "$out/standing"
