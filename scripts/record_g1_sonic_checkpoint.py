@@ -36,6 +36,8 @@ def main():
                         help='Empty-hand diagnostic only: SONIC 50 Hz control / 200 Hz physics, video 25 fps')
     parser.add_argument('--carry-clips', type=Path, help='Carry-expert start: walking clips (.npz); requires --grasp-bank')
     parser.add_argument('--grasp-bank', type=Path, help='Carry-expert start: restored grasp snapshots')
+    parser.add_argument('--body-table-contact-termination', action='store_true',
+                        help='Real table collisions; end episode when the body (not right forearm/hand) presses on the table')
     parser.add_argument('--no-table-body-support', action='store_true',
                         help='Table collides only with right forearm/hand/fingers, not legs/torso/left arm')
     AppLauncher.add_app_launcher_args(parser)
@@ -99,6 +101,7 @@ def main():
         cfg.seed = args.seed
         cfg.sonic_body.from_dict(previous['body_termination'])
         cfg.sonic_body.table_supports_body = not args.no_table_body_support
+        cfg.sonic_body.body_table_contact_termination = args.body_table_contact_termination
         cfg.sonic_body.controller_mode = previous.get('controller_mode', 'trainable_decoder')
         for key in ('source_sha256', 'bank_sha256', 'physics_hz', 'policy_hz', 'tactile_hz', 'self_collision'):
             if contract[key] != previous[key]:
@@ -173,6 +176,7 @@ def main():
             body_poses='Measured PhysX link poses; no FK substitution or pose interpolation',
             task_contract=previous, recording_task_contract=contract,
             table_supports_body=cfg.sonic_body.table_supports_body,
+            body_table_contact_termination=cfg.sonic_body.body_table_contact_termination,
             table_filter=getattr(env, 'table_filter_report', None))
         if args.navigation_planner:
             metadata['diagnostic_timing_override'] = args.navigation_native_timing
