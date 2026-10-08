@@ -34,6 +34,10 @@ class SonicBodyCfg:
     body_table_contact_termination: bool = False
     body_table_contact_force_n: float = 2.
     body_table_contact_steps: int = 3
+    # True: PhysX parses every environment's own object. The source factorized
+    # scene replicates env_0's physics, so all environments simulated env_0's
+    # object while BPS/rendering used each env's assigned URDF (job 1096).
+    per_env_object_physics: bool = False
 
 
 @configclass
@@ -51,6 +55,12 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
     def _setup_scene(self):
         clone = self.scene.clone_environments
         def clone_with_table_filter(*args, **kwargs):
+            if self.cfg.sonic_body.per_env_object_physics:
+                # The source scene requires replicate_physics=True for its own
+                # checks; disable replication only for the actual clone so PhysX
+                # parses each environment's own object.
+                self.scene.cfg.replicate_physics = False
+                print('PER_ENV_OBJECT_PHYSICS replicate_physics=False at clone', flush=True)
             if self.cfg.sonic_body.body_table_contact_termination:
                 import isaaclab.sim as sim_utils
                 from dextrah_lab.wholebody.source_scene import prepare_table_contact_reporting

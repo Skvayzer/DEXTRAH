@@ -17,6 +17,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=120)
+    p.add_argument('--per-env-object-physics', action='store_true')
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -39,9 +40,14 @@ def main():
         cfg, _ = source_task_config(args.output, args.num_envs, args.device)
         cfg.seed = 42
         cfg.sonic_body.controller_mode = 'frozen_pretrained_latent'
+        cfg.sonic_body.per_env_object_physics = args.per_env_object_physics
+        import time
+        t0 = time.monotonic()
         sonic = FrozenSonic(ws/'GRAIL', ws/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
         env = G1SonicTouchEnv(cfg, sonic=sonic)
         env.reset()
+        report['startup_seconds'] = time.monotonic()-t0
+        print(f'STARTUP_SECONDS {report["startup_seconds"]:.1f}', flush=True)
         stage = sim_utils.get_current_stage()
         cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
         assignment = env._object_asset_index_per_env.cpu().numpy()
