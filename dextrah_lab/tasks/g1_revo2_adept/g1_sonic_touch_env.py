@@ -75,6 +75,13 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
                 super()._setup_scene()
         finally:
             self.scene.clone_environments = clone
+        if self.cfg.sonic_body.per_env_object_physics and self.num_envs > 1:
+            # The upstream direct-env scene path never filters inter-env
+            # collisions (DirectRLEnv skips InteractiveScene's own call), so a
+            # neighbour's object/robot could touch this robot (job 1101: 255 N
+            # unexplained fingertip force). Filter every env against all others.
+            self.scene.filter_collisions(global_prim_paths=['/World/ground'])
+            print(f'PER_ENV_OBJECT_PHYSICS inter-env collisions filtered envs={self.num_envs}', flush=True)
         self.body_table_sensors = []
         if self.cfg.sonic_body.body_table_contact_termination and not hasattr(self, '_table_contact_source'):
             # Upstream scene path spawns envs directly (no clone hook ran).
