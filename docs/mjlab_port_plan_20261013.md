@@ -96,7 +96,7 @@ Isaac backend unchanged; `--backend mjlab` / `BACKEND=mjlab` selects the port.
   table intersection, oriented footprint 1 cm inside the table. Isaac passive
   untouched falls 32% -> 17.7% (marker/screwdriver ~32%: round handles roll).
 * Object launches on mjlab, root causes (single-world mujoco_warp replay of
-  captured steps, `outputs/diag/`):
+  captured steps: `scripts/mj_capture_ejection.py`, `mj_replay_warp_variants.py`, `mj_overlap_truth.py`):
   1. Free joint at the URDF link origin couples a fast spin into translation
      -> object body frame at the COM; adapter keeps the link pose API.
   2. Objects spawn overlapping the open hand; MuJoCo solves contacts against
