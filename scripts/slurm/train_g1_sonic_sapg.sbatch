@@ -19,10 +19,21 @@ export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y WANDB_MODE=online
 unset DISPLAY
 cd "$source_snapshot"
 nvidia-smi --query-gpu=index,uuid,name,memory.used,memory.total --format=csv
-python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py tests/test_sapg_boundary_gc.py
 extra_args=()
+launch_args=(--headless)
+if [[ "${BACKEND:-isaac}" == mjlab ]]; then
+    # MuJoCo Warp port (dextrah_lab/mj): separate venv, no Kit, no AppLauncher.
+    export PATH="/data1/users/konstantin.smirnov/venvs/mjlab/bin:$PATH"
+    launch_args=(--backend mjlab)
+    if [[ -n "${MJ_NCONMAX:-}" ]]; then extra_args+=(--mj-nconmax "$MJ_NCONMAX"); fi
+    if [[ -n "${MJ_NJMAX:-}" ]]; then extra_args+=(--mj-njmax "$MJ_NJMAX"); fi
+else
+    python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py tests/test_sapg_boundary_gc.py
+fi
 if [[ "${FROZEN_PRETRAINED_SONIC:-0}" == 1 ]]; then
-    python -m pytest -q tests/test_frozen_sonic_sapg.py tests/test_sonic_source_actions.py
+    if [[ "${BACKEND:-isaac}" != mjlab ]]; then
+        python -m pytest -q tests/test_frozen_sonic_sapg.py tests/test_sonic_source_actions.py
+    fi
     extra_args+=(--frozen-pretrained-sonic --adapter-learning-rate "${ADAPTER_LEARNING_RATE:-0.0003}")
 else
     extra_args+=(--bootstrap "${STUDENT_CHECKPOINT:?Set STUDENT_CHECKPOINT to the validated touch-derived bootstrap}")
@@ -64,7 +75,7 @@ fi
 # an optimizer boundary. The actual Slurm limit remains authoritative.
 training_pid=''
 trap 'if [[ -n "$training_pid" ]]; then kill -USR1 "$training_pid"; fi' USR1 TERM
-python scripts/train_g1_sonic_sapg.py --headless --device cuda:0 \
+python scripts/train_g1_sonic_sapg.py "${launch_args[@]}" --device cuda:0 \
     --output "$project/outputs/${RUN_PREFIX:-0_sonic_sapg_touch}_${SLURM_JOB_ID}" \
     --num-envs "${NUM_ENVS:-768}" --max-epochs "${MAX_EPOCHS:-120}" "${extra_args[@]}" &
 training_pid=$!

@@ -16,11 +16,33 @@ import time
 import traceback
 
 
+def mjlab_task_config(args):
+    """The parent run's resolved task, verified against the touch-383 contract."""
+    from dextrah_lab.mj.env import load_run_cfg
+    from dextrah_lab.g1_adept.touch_continuation import load_yaml
+    from dextrah_lab.wholebody.task_contract import TOUCH_RUN, verify_task_contract
+    parent = (args.resume or args.init_weights).parent.parent
+    cfg = load_run_cfg(parent)
+    cfg.scene.num_envs = args.num_envs
+    cfg.bps_artifact_dir = str(args.output/'bps')
+    contract = verify_task_contract(load_yaml(Path(TOUCH_RUN)/'params/env_resolved.yaml'), cfg)
+    contract['task_config_source'] = str(parent/'params/env_resolved.yaml')
+    return cfg, contract
+
+
 def main():
     if not os.environ.get('SLURM_JOB_ID'):
         raise RuntimeError('Use a Slurm GPU allocation')
-    from isaaclab.app import AppLauncher
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--backend', choices=['isaac', 'mjlab'], default='isaac')
+    backend = pre.parse_known_args()[0].backend
+    if backend == 'isaac':
+        from isaaclab.app import AppLauncher
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--backend', choices=['isaac', 'mjlab'], default='isaac',
+                   help='mjlab: MuJoCo Warp port of the run-1105 task (dextrah_lab/mj); isaac: unchanged PhysX path')
+    p.add_argument('--mj-nconmax', type=int, help='mjlab: contacts allocated per world (pooled)')
+    p.add_argument('--mj-njmax', type=int, help='mjlab: constraint rows per world')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--bootstrap', type=Path)
     p.add_argument('--frozen-pretrained-sonic', action='store_true',
@@ -61,8 +83,18 @@ def main():
                    help='Load actor/critic weights only (fresh optimizers, epoch 0) from a same-architecture checkpoint')
     p.add_argument('--critic-warmup-epochs', type=int, default=0,
                    help='Skip actor optimizer steps for this many epochs while the critic adapts')
-    AppLauncher.add_app_launcher_args(p)
+    if backend == 'isaac':
+        AppLauncher.add_app_launcher_args(p)
+    else:
+        p.add_argument('--device', default='cuda:0')
     args = p.parse_args()
+    if backend == 'mjlab':
+        if not (args.frozen_pretrained_sonic and args.per_env_object_physics and args.body_table_contact_monitor_only):
+            raise ValueError('The mjlab port implements the run-1105 task: frozen SONIC, per-env objects, monitor-only table contact')
+        if args.carry or args.diagnostic_capture_seconds or args.no_table_body_support or args.body_table_contact_termination:
+            raise ValueError('Carry, failure capture and table-filter options exist only on the Isaac backend')
+        if (args.resume or args.init_weights) is None:
+            raise ValueError('mjlab training continues an existing run (its params define the task)')
     if args.num_envs < 6 or args.num_envs % 6 or not args.output.name.startswith('0_'):
         raise ValueError('Require six groups and a policy-index-prefixed output name')
     if args.output.exists():
@@ -90,14 +122,14 @@ def main():
             config=dict(source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), num_envs=args.num_envs),
             tags=['sapg', 'sonic', 'g1', 'revo2', 'bps128', 'touch70', 'floating-body',
                   'frozen-pretrained-sonic' if args.frozen_pretrained_sonic else 'trainable-sonic-decoder',
-                  'continuous' if args.continuous else 'training-smoke'] + (['carry-expert'] if args.carry else []))
+                  'continuous' if args.continuous else 'training-smoke', 'backend-'+backend] + (['carry-expert'] if args.carry else []))
         if wandb.run is None or wandb.run.settings.mode != 'online':
             raise RuntimeError('Requested online logging did not initialize')
         wandb.run.summary.update(dict(experiment_status='initializing_simulation', optimizer_updates_started=False))
         (args.output/'wandb.json').write_text(json.dumps(dict(id=wandb.run.id, url=wandb.run.url), indent=2))
         print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url, flush=True)
     try:
-        app = AppLauncher(args).app
+        app = AppLauncher(args).app if backend == 'isaac' else None
     except BaseException as error:
         failure = dict(completed=False, experiment_status='failed', error=f'{type(error).__name__}: {error}')
         (args.output/'training_result.json').write_text(json.dumps(failure, indent=2))
@@ -113,8 +145,18 @@ def main():
     try:
         import torch
         import wandb
-        from isaaclab.utils.io import dump_yaml
-        from isaacsimenvs.utils.rlgames_utils import register_rlgames_env, EnvStatsAlgoObserver, MultiObserver
+        if backend == 'mjlab':
+            from dextrah_lab.mj.compat import install
+            install()
+            from dextrah_lab.mj.rlgames import register_mj_rlgames_env
+            import yaml
+            def dump_yaml(path, data):
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(yaml.dump(data.to_dict() if hasattr(data, 'to_dict') else data))
+        else:
+            from isaaclab.utils.io import dump_yaml
+            from isaacsimenvs.utils.rlgames_utils import register_rlgames_env
+        from isaacsimenvs.utils.rlgames_utils import EnvStatsAlgoObserver, MultiObserver
         from rl_games.torch_runner import Runner
         from dextrah_lab.g1_adept.touch_continuation import (load_yaml, install_complete_checkpoint,
             install_atomic_checkpoint_saves, resume_at_episode_boundary)
@@ -123,16 +165,20 @@ def main():
             install_latent_action_bounds, install_latent_optimizer)
         from dextrah_lab.wholebody.student_checkpoint import load_student_checkpoint
         from dextrah_lab.wholebody.sapg_network import load_touch_sources, register_sonic_models
-        from dextrah_lab.wholebody.source_config import source_task_config
         from dextrah_lab.wholebody.task_contract import TOUCH_RUN, TOUCH_SHA256, P2P_REVISION
         from dextrah_lab.wholebody.training_observer import SonicTransferObserver
-        from dextrah_lab.tasks.g1_revo2_adept.g1_sonic_touch_env import G1SonicTouchEnv
+        if backend == 'isaac':
+            from dextrah_lab.wholebody.source_config import source_task_config
+            from dextrah_lab.tasks.g1_revo2_adept.g1_sonic_touch_env import G1SonicTouchEnv
         torch.set_num_threads(4)
         workspace = Path('/data1/users/konstantin.smirnov')
         revision = subprocess.check_output(['git', '-C', str(workspace/'play2perfect'), 'rev-parse', 'HEAD'], text=True).strip()
         if revision != P2P_REVISION:
             raise ValueError('Pinned Play2Perfect revision changed')
-        cfg, contract = source_task_config(args.output, args.num_envs, args.device)
+        if backend == 'mjlab':
+            cfg, contract = mjlab_task_config(args)
+        else:
+            cfg, contract = source_task_config(args.output, args.num_envs, args.device)
         cfg.sonic_body.numerical_failure_mode = args.numerical_failure_mode
         cfg.sonic_body.table_supports_body = not args.no_table_body_support
         cfg.sonic_body.body_table_contact_termination = args.body_table_contact_termination
@@ -194,12 +240,27 @@ def main():
         contract['boundary_gc_interval'] = args.boundary_gc_interval
         contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
         contract['periodic_stack_dumps_during_training'] = False
-        contract['wandb_initialization'] = 'before_Isaac_Kit_asyncio_patch'
-        import carb
-        settings = carb.settings.get_settings()
-        contract['runtime_worker_settings'] = {key: settings.get(key) for key in (
-            '/plugins/carb.tasking.plugin/threadCount', '/plugins/omni.tbb.globalcontrol/maxThreadCount',
-            '/app/asyncRendering', '/app/asyncRenderingLowLatency')}
+        contract['wandb_initialization'] = 'before_Isaac_Kit_asyncio_patch' if backend == 'isaac' else 'standard'
+        if backend == 'isaac':
+            import carb
+            settings = carb.settings.get_settings()
+            contract['runtime_worker_settings'] = {key: settings.get(key) for key in (
+                '/plugins/carb.tasking.plugin/threadCount', '/plugins/omni.tbb.globalcontrol/maxThreadCount',
+                '/app/asyncRendering', '/app/asyncRenderingLowLatency')}
+        else:
+            import mujoco, mujoco_warp, mjlab
+            from importlib.metadata import version
+            from dextrah_lab.mj.factory import DEFAULT_MUJOCO, DEFAULT_NCONMAX, DEFAULT_NJMAX
+            from dextrah_lab.mj.robot import ContactParams
+            from dataclasses import asdict
+            mj_settings = dict(backend='mjlab', mjlab=version('mjlab'), mujoco=mujoco.__version__,
+                mujoco_warp=version('mujoco-warp'), torch=torch.__version__,
+                nconmax=args.mj_nconmax or DEFAULT_NCONMAX, njmax=args.mj_njmax or DEFAULT_NJMAX,
+                mujoco_options=DEFAULT_MUJOCO, contact=asdict(ContactParams()),
+                joint_velocity_limits='PhysX max joint velocities emulated by clamping after each physics step',
+                asset_parity='scripts/mj_asset_parity.py: 0 mismatches vs Isaac dump (job 1112)')
+            contract['simulator'] = mj_settings
+            contract['intentional_changes'] = contract['intentional_changes'] + ['simulator_mjlab_mujoco_warp']
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
             wandb.config.update(contract, allow_val_change=True)
@@ -234,6 +295,11 @@ def main():
             if args.wandb == 'online':
                 wandb.config.update(dict(carry=contract['carry'], intentional_changes=contract['intentional_changes']),
                                     allow_val_change=True)
+        elif backend == 'mjlab':
+            from dextrah_lab.mj.env import G1SonicTouchMjEnv
+            env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device,
+                                    nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
+                                    mujoco_cfg=mj_settings['mujoco_options'])
         else:
             env = G1SonicTouchEnv(cfg, sonic=sonic)
         if args.diagnostic_capture_seconds > 0:
@@ -268,8 +334,9 @@ def main():
         agent['wandb_group'] = 'g1-sonic-bps128-touch'
         dump_yaml(str(args.output/'params/env_resolved.yaml'), cfg)
         dump_yaml(str(args.output/'params/agent.yaml'), agent)
-        wrapped = register_rlgames_env(env, rl_device=args.device, clip_obs=float('inf'),
-                                      clip_actions=float('inf') if frozen else 1.)
+        register = register_mj_rlgames_env if backend == 'mjlab' else register_rlgames_env
+        wrapped = register(env, rl_device=args.device, clip_obs=float('inf'),
+                           clip_actions=float('inf') if frozen else 1.)
         observer = SonicTransferObserver(env, args.output)
         observers = [EnvStatsAlgoObserver(), observer]
         if args.wandb == 'online':
@@ -378,10 +445,10 @@ def main():
         # Kit shutdown can exit the process with status zero BEFORE returning
         # from close(). On failure, preserve the report/W&B result and let the
         # OS release CUDA resources without entering that shutdown path.
-        if not report['completed']:
+        if not report['completed'] or backend == 'mjlab':
             import sys
             sys.stdout.flush(); sys.stderr.flush()
-            os._exit(1)
+            os._exit(0 if report['completed'] else 1)
         if env is not None:
             env.close()
         app.close()
