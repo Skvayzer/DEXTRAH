@@ -66,6 +66,10 @@ def main():
         falls = np.zeros(n, dtype=np.int64)
         touched_falls = np.zeros(n, dtype=np.int64)
         settle_xy = [[] for _ in range(n)]
+        palm = env.robot.body_names.index('right_base_link')
+        near = torch.full((n,), 9., device=env.device)   # min palm-object distance since reset
+        robot_falls = np.zeros(n, dtype=np.int64)
+        fall_xy, fall_near = [], []
         env.reset()
         with torch.inference_mode():
             for step in range(round(args.seconds/dt)):
@@ -74,6 +78,7 @@ def main():
                 since += 1
                 touched |= (env.touch_raw[..., 0] > 0).any(-1)
                 rel = env.object.data.root_pos_w-env.scene.env_origins
+                near = torch.minimum(near, (env.robot.data.body_pos_w[:, palm]-env.object.data.root_pos_w).norm(dim=-1))
                 table_top = env._table_z_per_env+0.15
                 fell = (rel[:, 2] < table_top-0.05) | done
                 in_window = (since <= window) & ~counted
@@ -83,6 +88,10 @@ def main():
                     t = touched[event].cpu().numpy()
                     falls[ids] += ~t
                     touched_falls[ids] += t
+                    robot = env._body_fallen[event].cpu().numpy()
+                    robot_falls[ids] += robot
+                    fall_xy += rel[event, :2].tolist()
+                    fall_near += near[event].tolist()
                     counted[event] = True
                 finished = (since == window) & ~counted
                 if finished.any():
@@ -92,6 +101,7 @@ def main():
                 spawns += (since == 1).cpu().numpy()
                 since[done] = 0
                 touched[done] = False
+                near[done] = 9.
                 counted[done] = False
         per_family = {}
         for fam in sorted(set(families)):
@@ -105,6 +115,15 @@ def main():
             per_object[int(a)] = dict(family=str(families[m][0]), spawns=int(spawns[m].sum()),
                                       untouched_falls=int(falls[m].sum()))
         worst = sorted(per_object.items(), key=lambda kv: -kv[1]['untouched_falls']/max(kv[1]['spawns'], 1))[:30]
+        fx, fn = np.array(fall_xy).reshape(-1, 2), np.array(fall_near)
+        hx, hy = 0.475/2, 0.4/2
+        edge = dict(robot_side=int((fx[:, 1] > hy).sum()), far_side=int((fx[:, 1] < -hy).sum()),
+                    left_right=int(((np.abs(fx[:, 0]) > hx) & (np.abs(fx[:, 1]) <= hy)).sum()),
+                    over_table=int(((np.abs(fx[:, 0]) <= hx) & (np.abs(fx[:, 1]) <= hy)).sum()))
+        report.update(fall_events=len(fn), fall_edges_at_crossing=edge,
+                      robot_fall_events=int(robot_falls.sum()),
+                      palm_min_dist_quantiles_m=np.quantile(fn, [.05, .25, .5, .75]).tolist() if len(fn) else None,
+                      falls_with_palm_never_within_10cm=int((fn > .10).sum()))
         report.update(completed=True, num_envs=n, seconds=args.seconds, window_s=args.window,
                       total_spawns=int(spawns.sum()), untouched_falls=int(falls.sum()),
                       untouched_fall_rate=float(falls.sum()/max(spawns.sum(), 1)),
@@ -112,7 +131,8 @@ def main():
                                                             for k, v in worst])
         (args.output/'per_object.json').write_text(json.dumps(per_object))
         print('SPAWN_CHECK '+json.dumps({k: report[k] for k in ('total_spawns', 'untouched_falls',
-                                                                 'untouched_fall_rate', 'per_family')}), flush=True)
+            'untouched_fall_rate', 'per_family', 'fall_events', 'fall_edges_at_crossing', 'robot_fall_events',
+            'palm_min_dist_quantiles_m', 'falls_with_palm_never_within_10cm')}), flush=True)
     except BaseException as error:
         report.update(error=str(error), traceback=traceback.format_exc())
         raise
