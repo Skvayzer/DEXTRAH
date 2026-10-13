@@ -265,12 +265,18 @@ class G1SonicTouchMjEnv:
         m = self.sim.model
         t = lambda x: torch.as_tensor(x, device=device, dtype=torch.float32)
         m.geom_size[:, geoms] = t(bank.size[a])
-        m.geom_pos[:, geoms] = t(bank.pos[a])
+        # Body frame at the COM (PhysX integrates rigid bodies about the COM).
+        # With the URDF link origin as body frame, MuJoCo's free joint couples
+        # a fast spin into translation (origin velocity v_com - w x r): at the
+        # 100 rad/s cap that launched objects at ~30 m/s in free flight. The
+        # adapter reports and writes the URDF link pose (`com_offset`).
+        com = t(bank.com[a])
+        m.geom_pos[:, geoms] = t(bank.pos[a])-com[:, None]
         m.geom_quat[:, geoms] = t(bank.quat[a])
         m.geom_rbound[:, geoms] = t(bank.rbound[a])
         m.geom_aabb[:, geoms] = t(bank.aabb[a]).view(n, 4, 2, 3)
         m.body_mass[:, body] = t(bank.mass[a])
-        m.body_ipos[:, body] = t(bank.com[a])
+        m.body_ipos[:, body] = 0.
         m.body_iquat[:, body] = t(np.tile([1., 0., 0., 0.], (n, 1)))
         m.body_inertia[:, body] = t(bank.inertia[a])
         from mjlab.managers.event_manager import RecomputeLevel
@@ -284,7 +290,7 @@ class G1SonicTouchMjEnv:
                       default_joint_vel=torch.zeros(n, len(joint_names), device=device),
                       default_root_state=t(reference['default_root_state']).expand(n, -1).clone())
         self.robot = MjArticulation(entities['robot'], self.sim, joint_names, body_names, static)
-        self.object = MjRigidObject(entities['object'], self.sim, default_mass=t(bank.mass[a])[:, None])
+        self.object = MjRigidObject(entities['object'], self.sim, default_mass=t(bank.mass[a])[:, None], com_offset=com)
         self.table = MjRigidObject(entities['table'], self.sim)
         self.goal_viz = scene_utils._TensorGoalViz(n, device)
         # Contact reader (fingertip pads, monitored body-table links).

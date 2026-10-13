@@ -168,7 +168,11 @@ class RigidObjectData:
     @property
     def root_pos_w(self):
         q = self._o.free_qpos
-        return self._d.root_link_pos_w if q is None else q[:, :3]
+        if q is None:
+            return self._d.root_link_pos_w
+        if self._o.com_offset is None:
+            return q[:, :3]
+        return q[:, :3]-_quat_apply(q[:, 3:7], self._o.com_offset)   # COM body frame -> URDF link
 
     @property
     def root_quat_w(self):
@@ -190,8 +194,11 @@ class RigidObjectData:
 class MjRigidObject:
     """Floating rigid body (object) or mocap body (table)."""
 
-    def __init__(self, entity, sim, default_mass=None):
+    def __init__(self, entity, sim, default_mass=None, com_offset=None):
+        # com_offset (n, 3): link-frame COM when the MuJoCo body frame is at the
+        # COM; root poses are still read and written as the URDF link pose.
         self.entity, self.sim = entity, sim
+        self.com_offset = com_offset
         self.num_instances, self.device = sim.num_envs, sim.device
         self.data = RigidObjectData(self)
         self.default_mass = default_mass
@@ -215,6 +222,8 @@ class MjRigidObject:
         if self._mocap:
             self.entity.write_mocap_pose_to_sim(pose, env_ids=ids)
         else:
+            if self.com_offset is not None:
+                pose = torch.cat((pose[:, :3]+_quat_apply(pose[:, 3:7], self.com_offset[ids]), pose[:, 3:7]), -1)
             self.entity.write_root_link_pose_to_sim(pose, env_ids=ids)
 
     def write_root_velocity_to_sim(self, velocity, env_ids=None):
