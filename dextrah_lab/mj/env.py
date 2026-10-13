@@ -1,0 +1,536 @@
+"""The G1 + Revo2 frozen-SONIC reposing task on mjlab (MuJoCo Warp).
+
+Same MDP as `G1SonicTouchEnv` on Isaac (run 1105 configuration). The class
+chain on Isaac is
+
+    DirectRLEnv -> PlayEnv -> G1Revo2DirectEnv -> G1Revo2BpsEnv
+                -> G1Revo2TouchEnv -> G1SonicTouchEnv
+
+This class reproduces each hook of that chain in the same order, calling the
+SAME pinned Play2Perfect utilities and the same wholebody/g1_adept modules.
+Only the simulator-facing parts are new: scene construction, state access
+(`assets.py`), contact sensing (`tactile.py`) and the physics loop below
+(Isaac Lab `DirectRLEnv.step` semantics).
+
+Physics-loop note: MuJoCo's `mj_step` leaves kinematics (xpos, cvel) at the
+pre-integration state, whereas PhysX reports post-step poses. Contacts and
+forces of a step are read right after it (consistent with those pre-step
+poses), and `forward()` then refreshes kinematics once per policy step
+before terminations/rewards/observations, as Isaac does after its substeps.
+"""
+from copy import deepcopy
+from pathlib import Path
+import json
+import math
+
+import gymnasium as gym
+import numpy as np
+import torch
+
+from .compat import p2p, install
+install()
+
+from isaaclab.utils.math import matrix_from_quat, quat_conjugate, quat_mul, yaw_quat  # noqa: E402
+from dextrah_lab.g1_adept.contact import FINGERS, TIP_BODIES, rotate_to_local  # noqa: E402
+from dextrah_lab.g1_adept.contact_geometry import load_pad_geometry  # noqa: E402
+from dextrah_lab.g1_adept.touch_frames import sensor_frames  # noqa: E402
+from dextrah_lab.g1_adept.touch_observations import TouchObservationConfig, TouchObservationModel  # noqa: E402
+from dextrah_lab.object_shape.bank import SHAPE_DIM, build_bank, map_features  # noqa: E402
+from dextrah_lab.wholebody.actuators import body_motors  # noqa: E402
+from dextrah_lab.wholebody.body_termination import classify_body_state, combine_terminations  # noqa: E402
+from dextrah_lab.wholebody.contract import BODY_JOINTS, joint_indices, nominal_body_pose  # noqa: E402
+from dextrah_lab.wholebody.source_actions import apply_frozen_latent_action, apply_wholebody_action  # noqa: E402
+from dextrah_lab.wholebody.task_contract import BANK_SHA256, BODY_EXTRA_DIM, TASK_ACTOR_DIM, TASK_CRITIC_DIM  # noqa: E402
+from dextrah_lab.wholebody.timed_history import TimedSonicHistory  # noqa: E402
+
+from .assets import MjArticulation, MjRigidObject  # noqa: E402
+from .objects import build_object_bank  # noqa: E402
+from .robot import ContactParams  # noqa: E402
+from .scene import SceneParams, TABLE_SIZE, build_scene_cfg, object_indices  # noqa: E402
+from .tactile import ContactReader  # noqa: E402
+
+REFERENCE = Path(__file__).with_name('isaac_reference.json')
+RUN_1105 = Path('/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_frozen_sonic_sapg_touch_dexterous_1105')
+
+obs_utils = p2p('obs_utils')
+reset_utils = p2p('reset_utils')
+action_utils = p2p('action_utils')
+reward_utils = p2p('reward_utils')
+termination_utils = p2p('termination_utils')
+logging_utils = p2p('logging_utils')
+scene_utils = p2p('scene_utils')
+generate_objects = p2p('generate_objects')
+size_distributions = p2p('object_size_distributions')
+
+
+class Cfg:
+    """Attribute view of the resolved Isaac env config (env_resolved.yaml)."""
+
+    def __init__(self, data):
+        for key, value in data.items():
+            setattr(self, key, Cfg(value) if isinstance(value, dict) else value)
+
+    def to_dict(self):
+        return {k: (v.to_dict() if isinstance(v, Cfg) else v) for k, v in vars(self).items()}
+
+    def __copy__(self):
+        new = Cfg({})
+        new.__dict__.update(self.__dict__)
+        return new
+
+
+def load_run_cfg(run=RUN_1105):
+    import yaml
+    return Cfg(yaml.unsafe_load((run/'params/env_resolved.yaml').read_text()))
+
+
+class _Scene:
+    """`env.scene` surface used by the task: env origins only (worlds do not overlap)."""
+
+    def __init__(self, n, device):
+        self.env_origins = torch.zeros(n, 3, device=device)
+
+
+class G1SonicTouchMjEnv:
+    def __init__(self, cfg, *, sonic, num_envs, device='cuda:0', scene_params=None,
+                 nconmax=None, njmax=None, mujoco_cfg=None, velocity_limits=True, seed=None):
+        from mjlab.scene import Scene
+        from mjlab.sim import Simulation, SimulationCfg
+        self.cfg, self.device, self.num_envs = cfg, device, num_envs
+        if cfg.sonic_body.controller_mode != 'frozen_pretrained_latent':
+            raise ValueError('The mjlab port implements the frozen-SONIC latent interface only')
+        reference = json.loads(REFERENCE.read_text())
+        seed = cfg.seed if seed is None else seed
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        # ---- PlayEnv.__init__ (before DirectRLEnv) ----------------------------
+        cfg.observation_space = obs_utils.compute_obs_dim(cfg.obs.obs_list, cfg)
+        cfg.state_space = obs_utils.compute_obs_dim(cfg.obs.state_list, cfg)
+        # ---- G1SonicTouchEnv.__init__ (before parent) ---------------------------
+        self._wholebody_ready = False
+        self._sonic_reference = sonic
+        self._frozen_latent = True
+        cfg.action_space = 13
+        self._touch_ready = False
+        self._touch_last_step = 0
+        # ---- DirectRLEnv.__init__ ----------------------------------------------
+        self.physics_dt = cfg.sim.dt
+        self.step_dt = cfg.sim.dt*cfg.decimation
+        self.max_episode_length = math.ceil(cfg.episode_length_s/self.step_dt)
+        self.scene_params = scene_params or SceneParams()
+        self._mj_scene = Scene(build_scene_cfg(num_envs, self.scene_params), device)
+        mj_model = self._mj_scene.compile()
+        mujoco_cfg = mujoco_cfg or {}
+        sim_cfg = SimulationCfg(nconmax=nconmax, njmax=njmax)
+        sim_cfg.mujoco.timestep = cfg.sim.dt
+        for key, value in mujoco_cfg.items():
+            setattr(sim_cfg.mujoco, key, value)
+        self.sim = Simulation(num_envs, sim_cfg, mj_model, device)
+        self._mj_scene.initialize(self.sim.mj_model, self.sim.model, self.sim.data)
+        self.mj_model = self.sim.mj_model
+        self.scene = _Scene(num_envs, device)
+        self._setup_scene(reference)
+        self._sim_step_counter = 0
+        self.common_step_counter = 0
+        self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
+        self.reset_terminated = torch.zeros(num_envs, device=device, dtype=torch.bool)
+        self.reset_time_outs = torch.zeros_like(self.reset_terminated)
+        self.reset_buf = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self.extras = {}
+        self.single_observation_space = gym.spaces.Dict()
+        self.single_observation_space['policy'] = gym.spaces.Box(-np.inf, np.inf, shape=(cfg.observation_space,))
+        self.single_observation_space['critic'] = gym.spaces.Box(-np.inf, np.inf, shape=(cfg.state_space,))
+        # ---- PlayEnv.__init__ (after DirectRLEnv) ---------------------------------
+        reset_utils.allocate_state_buffers(self)
+        # ---- G1Revo2DirectEnv.__init__ -----------------------------------------
+        requested = set(cfg.assets.handle_head_types)
+        expected = sum(d.type in requested for d in size_distributions.OBJECT_SIZE_DISTRIBUTIONS)*cfg.assets.num_assets_per_type
+        if len(self._object_urdf_paths) != expected:
+            raise RuntimeError(f'Object pool mismatch: expected {expected}, got {len(self._object_urdf_paths)}')
+        self._episode_ever_lifted = torch.zeros(num_envs, device=device, dtype=torch.bool)
+        # ---- G1Revo2BpsEnv.__init__ --------------------------------------------
+        if (cfg.observation_space, cfg.state_space) != (92, 114):
+            raise ValueError('Warm-start task requires the proven 92/114 P2P observation layout')
+        bank, manifest = build_bank(self._object_urdf_paths, cfg.bps_cache_dir)
+        indices = self._object_asset_index_per_env.cpu().numpy()
+        self._bps_features = torch.as_tensor(map_features(bank, indices), device=device)
+        self._bps_manifest = manifest
+        cfg.observation_space += SHAPE_DIM
+        cfg.state_space += SHAPE_DIM
+        # ---- G1Revo2TouchEnv.__init__ ------------------------------------------
+        tcfg = cfg.touch
+        obs_cfg = TouchObservationConfig(**{k: getattr(tcfg, k) for k in TouchObservationConfig.__dataclass_fields__})
+        if tcfg.material_override:
+            raise ValueError('Run 1105 reads touch without a distal material override')
+        self.touch_model = TouchObservationModel(num_envs, cfg.sim.dt, device, obs_cfg)
+        self.touch_raw = torch.zeros(num_envs, 5, 3, device=device)
+        self.touch_contact_w = torch.zeros_like(self.touch_raw)
+        self.touch_force_w = torch.zeros_like(self.touch_raw)
+        self.touch_friction_w = torch.zeros_like(self.touch_raw)
+        self.touch_link_force_w = torch.zeros_like(self.touch_raw)
+        self.g1_urdf = Path(scene_utils._resolve_asset_path(cfg.assets.robot_urdf))
+        self.pad_geometry = load_pad_geometry(self.g1_urdf, Path(tcfg.touch_description))
+        self.pad_frames = torch.as_tensor(sensor_frames(self.g1_urdf, self.pad_geometry), device=device)
+        self.pad_tensors = [tuple(torch.as_tensor(x, device=device, dtype=torch.float32)
+                                  for x in (p.pad_to_distal[:3, 3], p.pad_to_distal[:3, :3], p.bounds))
+                            for p in self.pad_geometry]
+        self.touch_body_ids = [self.robot.body_names.index(x) for x in TIP_BODIES]
+        self._touch_extra_dim = obs_cfg.dimension
+        cfg.observation_space += self._touch_extra_dim
+        cfg.state_space += self._touch_extra_dim
+        self._touch_ready = True
+        # ---- G1SonicTouchEnv.__init__ (after parent) -------------------------------
+        if (cfg.observation_space, cfg.state_space) != (TASK_ACTOR_DIM, TASK_CRITIC_DIM):
+            raise ValueError('Expected the trained BPS128 + touch interface')
+        if self._bps_manifest['features_sha256'] != BANK_SHA256:
+            raise ValueError('mjlab port generated a different object bank')
+        names = self.robot.joint_names
+        self._body_ids = torch.tensor(joint_indices(names, BODY_JOINTS), device=device)
+        self._body_nominal = torch.as_tensor(nominal_body_pose(), device=device)
+        self._body_scales = torch.tensor([m.action_scale for m in body_motors().values()], device=device)
+        self._body_lower = self.robot.data.joint_pos_limits[:, self._body_ids, 0].clone()
+        self._body_upper = self.robot.data.joint_pos_limits[:, self._body_ids, 1].clone()
+        for k, index in enumerate(self._arm_joint_ids.tolist()):
+            body_index = self._body_ids.tolist().index(index)
+            self._body_lower[:, body_index] = self._arm_lower[:, k]
+            self._body_upper[:, body_index] = self._arm_upper[:, k]
+        self._body_center = (self._body_lower+self._body_upper)/2
+        self._body_half_range = (self._body_upper-self._body_lower)/2
+        self._last_body_action = torch.zeros(num_envs, 29, device=device)
+        self._wholebody_action_queue = torch.zeros(num_envs, self._action_queue.shape[1], 70, device=device)
+        self._last_latent_action = torch.zeros(num_envs, 64, device=device)
+        self._last_decoded_sonic_action = torch.zeros(num_envs, 29, device=device)
+        self._body_history = TimedSonicHistory(num_envs, self.step_dt, device)
+        self._body_extra_step = None
+        self._body_extra = None
+        self._body_fallen = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self._body_table_count = torch.zeros(num_envs, dtype=torch.long, device=device)
+        self._body_table_contact = torch.zeros(num_envs, dtype=torch.bool, device=device)
+        self._body_numerical_failure = torch.zeros_like(self._body_fallen)
+        self._body_falls_total = torch.zeros((), dtype=torch.long, device=device)
+        self._body_numerical_failures_total = torch.zeros_like(self._body_falls_total)
+        self._body_max_joint_speed = torch.zeros((), device=device)
+        self._body_checked_transitions = 0
+        self._reference_q = self.robot.data.default_joint_pos[:, self._body_ids, None].transpose(1, 2).expand(-1, 10, -1).clone()
+        self._reference_qd = torch.zeros_like(self._reference_q)
+        self._reference_heading = torch.tensor(cfg.assets.robot_init_rot, device=device).expand(num_envs, -1)
+        cfg.action_space = 70
+        low = np.r_[np.full(64, -np.inf), np.full(6, -1.)].astype(np.float32)
+        high = np.r_[np.full(64, np.inf), np.full(6, 1.)].astype(np.float32)
+        self.single_action_space = gym.spaces.Box(low, high)
+        cfg.observation_space = TASK_ACTOR_DIM+BODY_EXTRA_DIM
+        cfg.state_space = TASK_CRITIC_DIM+BODY_EXTRA_DIM
+        for key, size in (('policy', cfg.observation_space), ('critic', cfg.state_space)):
+            self.single_observation_space[key] = gym.spaces.Box(-np.inf, np.inf, shape=(size,), dtype=np.float32)
+        self._wholebody_ready = True
+        # ---- backend extras ------------------------------------------------------
+        self._velocity_limits = velocity_limits
+        self._vel_limit = torch.as_tensor(reference['joint_vel_limits'], device=device)
+        self.contact_stats = dict(max_active=0)
+        print(f'MJ_SONIC_TOUCH_READY envs={num_envs} actor={cfg.observation_space} critic={cfg.state_space} '
+              f'actions=70 nconmax={nconmax} njmax={njmax} naconmax={self.sim.wp_data.naconmax} '
+              f'graphs={self.sim.use_cuda_graph}', flush=True)
+
+    # ======================================================================
+    # Scene
+    # ======================================================================
+    def _setup_scene(self, reference):
+        cfg, n, device = self.cfg, self.num_envs, self.device
+        entities = self._mj_scene.entities
+        # Same procedural pool, order and env assignment as Isaac (seed 42, shuffled).
+        import tempfile
+        self._tmp_asset_dir = tempfile.mkdtemp(prefix='mj_play_assets_')
+        paths, scales = generate_objects.generate_handle_head_urdfs(
+            handle_head_types=tuple(cfg.assets.handle_head_types), num_per_type=cfg.assets.num_assets_per_type,
+            out_dir=self._tmp_asset_dir, shuffle=cfg.assets.shuffle_assets)
+        self._object_urdf_paths = [str(p) for p in paths]
+        asset = torch.arange(n, device=device) % len(paths)
+        self._object_asset_index_per_env = asset
+        self._object_scale_per_env = torch.as_tensor(np.asarray(scales, dtype=np.float32), device=device)[asset]
+        self._table_variant_scales = None
+        # Per-world object geometry and inertials.
+        bank = build_object_bank(self._object_urdf_paths)
+        self.object_bank = bank
+        body, geoms = object_indices(self.sim.mj_model)
+        self.sim.expand_model_fields(('geom_size', 'geom_pos', 'geom_quat', 'geom_rbound', 'geom_aabb',
+                                      'body_mass', 'body_ipos', 'body_iquat', 'body_inertia'))
+        a = asset.cpu().numpy()
+        m = self.sim.model
+        t = lambda x: torch.as_tensor(x, device=device, dtype=torch.float32)
+        m.geom_size[:, geoms] = t(bank.size[a])
+        m.geom_pos[:, geoms] = t(bank.pos[a])
+        m.geom_quat[:, geoms] = t(bank.quat[a])
+        m.geom_rbound[:, geoms] = t(bank.rbound[a])
+        m.geom_aabb[:, geoms] = t(bank.aabb[a]).view(n, 4, 2, 3)
+        m.body_mass[:, body] = t(bank.mass[a])
+        m.body_ipos[:, body] = t(bank.com[a])
+        m.body_iquat[:, body] = t(np.tile([1., 0., 0., 0.], (n, 1)))
+        m.body_inertia[:, body] = t(bank.inertia[a])
+        from mjlab.managers.event_manager import RecomputeLevel
+        self.sim.recompute_constants(RecomputeLevel.set_const)
+        # Isaac-API assets.
+        joint_names, body_names = reference['joint_names'], reference['body_names']
+        lim = t(reference['joint_pos_limits'])
+        static = dict(joint_pos_limits=lim.expand(n, -1, -1).clone(),
+                      joint_vel_limits=t(reference['joint_vel_limits']).expand(n, -1).clone(),
+                      default_joint_pos=t(reference['default_joint_pos']).expand(n, -1).clone(),
+                      default_joint_vel=torch.zeros(n, len(joint_names), device=device),
+                      default_root_state=t(reference['default_root_state']).expand(n, -1).clone())
+        self.robot = MjArticulation(entities['robot'], self.sim, joint_names, body_names, static)
+        self.object = MjRigidObject(entities['object'], self.sim, default_mass=t(bank.mass[a])[:, None])
+        self.table = MjRigidObject(entities['table'], self.sim)
+        self.goal_viz = scene_utils._TensorGoalViz(n, device)
+        # Contact reader (fingertip pads, monitored body-table links).
+        from dextrah_lab.wholebody.source_scene import table_contact_monitored_links
+        mj = self.sim.mj_model
+        bid = lambda name: int(mj.body(name).id)
+        robot_bodies = [bid(f'robot/{b}') for b in body_names]
+        monitored = table_contact_monitored_links(sorted(body_names))   # Isaac sensor order
+        self.body_table_names = monitored
+        self._contacts_cfg = dict(
+            finger_bodies=[bid(f'robot/{b}') for b in TIP_BODIES],
+            monitored_bodies=[bid(f'robot/{b}') for b in monitored],
+            object_body=body, table_body=bid('table/box'),
+            ground_geom=int(mj.geom('ground').id), robot_bodies=robot_bodies)
+        self.body_table_sensors = [None]*len(monitored) if self.cfg.sonic_body.body_table_contact_termination else []
+
+    def _init_contacts(self):
+        self.contacts = ContactReader(self.sim, self.sim.mj_model, pad_tensors=self.pad_tensors, **self._contacts_cfg)
+
+    # ======================================================================
+    # DirectRLEnv.step / reset
+    # ======================================================================
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            torch.manual_seed(seed)
+        if not hasattr(self, 'contacts'):
+            self._init_contacts()
+        indices = torch.arange(self.num_envs, dtype=torch.int64, device=self.device)
+        self._reset_idx(indices)
+        self._write_data_to_sim()
+        self.sim.forward()
+        return self._get_observations(), self.extras
+
+    def step(self, action):
+        action = action.to(self.device)
+        self._pre_physics_step(action)
+        for _ in range(self.cfg.decimation):
+            self._sim_step_counter += 1
+            self._apply_action()
+            self._write_data_to_sim()
+            self.sim.step()
+            self._after_physics_step()
+        self.sim.forward()
+        self.episode_length_buf += 1
+        self.common_step_counter += 1
+        self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
+        self.reset_buf = self.reset_terminated | self.reset_time_outs
+        self.reward_buf = self._get_rewards()
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+        if len(reset_env_ids) > 0:
+            self._reset_idx(reset_env_ids)
+            self._write_data_to_sim()
+            self.sim.forward()
+        self.obs_buf = self._get_observations()
+        return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
+
+    def _write_data_to_sim(self):
+        self.robot.write_data_to_sim()
+        self.object.write_data_to_sim()
+
+    def _after_physics_step(self):
+        if self._velocity_limits:
+            # PhysX clamps joint speeds to the articulation's max joint velocity.
+            qvel = self.robot.entity.data.joint_vel
+            limit = self._vel_limit[self.robot.joint_perm.argsort()]
+            self.robot.entity.write_joint_velocity_to_sim(torch.maximum(torch.minimum(qvel, limit), -limit))
+        self.capture_touch(self._sim_step_counter)
+
+    # ======================================================================
+    # Hooks, in Isaac MRO order
+    # ======================================================================
+    def _reset_idx(self, env_ids):
+        # DirectRLEnv: scene.reset, episode length
+        self.episode_length_buf[env_ids] = 0
+        # PlayEnv
+        reset_utils.reset_env_state(self, torch.as_tensor(env_ids, device=self.device, dtype=torch.long))
+        # G1Revo2DirectEnv
+        self._episode_ever_lifted[env_ids] = False
+        # G1Revo2TouchEnv
+        if self._touch_ready:
+            self.touch_model.reset(env_ids)
+            self.touch_raw[env_ids] = 0
+        # G1SonicTouchEnv
+        if not self._wholebody_ready:
+            return
+        ids = env_ids
+        root = self.robot.data.default_root_state[ids].clone()
+        root[:, :3] += self.scene.env_origins[ids]
+        root[:, 7:] = 0
+        self.robot.write_root_state_to_sim(root, env_ids=ids)
+        self._body_history.reset(ids)
+        self._last_body_action[ids] = (self._cur_targets[ids][:, self._body_ids]-self._body_nominal)/self._body_scales
+        self._wholebody_action_queue[ids] = 0
+        self._last_latent_action[ids] = 0
+        self._last_decoded_sonic_action[ids] = 0
+        self._body_fallen[ids] = False
+        self._body_table_count[ids] = 0
+        self._body_table_contact[ids] = False
+        self._body_numerical_failure[ids] = False
+
+    def _pre_physics_step(self, actions):
+        apply_frozen_latent_action(self, actions, action_utils.apply_action_pipeline)
+        action_utils.apply_wrench_dr(self)
+
+    def _apply_action(self):
+        # G1Revo2TouchEnv captures the previous physics step here; on this
+        # backend that step was already captured right after it ran.
+        self.capture_touch(self._sim_step_counter-1)
+        target_ids = self._position_target_joint_ids
+        self.robot.set_joint_position_target(self._cur_targets[:, target_ids],
+                                             joint_ids=self._position_target_joint_ids_list)
+
+    def capture_touch(self, step=None):
+        if not self._touch_ready:
+            return
+        step = self._sim_step_counter if step is None else step
+        if step <= self._touch_last_step:
+            return
+        if step != self._touch_last_step+1:
+            raise RuntimeError('Tactile acquisition skipped physics steps')
+        self._touch_last_step = step
+        c = self.contacts.read()
+        self._last_contacts = c
+        q = self.sim.data.xquat[:, self.contacts.finger_bodies]
+        force = c['normal_masked_w']+c['friction_masked_w']
+        for i in range(5):
+            local = rotate_to_local(q[:, i], force[:, i]) @ self.pad_frames[i]
+            local[:, 0].clamp_min_(0)
+            self.touch_raw[:, i] = local
+        self.touch_force_w[:] = force
+        self.touch_friction_w[:] = c['friction_masked_w']
+        self.touch_link_force_w[:] = c['normal_all_w']+c['friction_all_w']
+        self.touch_contact_w[:] = c['centroid_w']
+        if 'body_table_force' in c:
+            self._body_table_force_step = c['body_table_force']
+        self.touch_model.advance(self.touch_raw)
+
+    def _get_dones(self):
+        data, cfg = self.robot.data, self.cfg.sonic_body
+        # G1SonicTouchEnv (pre)
+        self._body_fallen, self._body_numerical_failure, speed = classify_body_state(
+            data.joint_pos, data.joint_vel, data.root_state_w, data.projected_gravity_b,
+            self.scene.env_origins, self.object.data.root_state_w,
+            minimum_height=cfg.minimum_pelvis_height, minimum_upright=cfg.minimum_upright_cosine,
+            maximum_joint_speed=cfg.maximum_joint_speed, numerical_failure_mode=cfg.numerical_failure_mode)
+        self._body_falls_total += self._body_fallen.sum()
+        self._body_numerical_failures_total += self._body_numerical_failure.sum()
+        self._body_max_joint_speed = torch.maximum(self._body_max_joint_speed, speed.max())
+        self._body_checked_transitions += self.num_envs
+        # G1Revo2TouchEnv
+        self.capture_touch()
+        # PlayEnv
+        termination_utils.update_tolerance_curriculum(self)
+        obs_utils.compute_intermediate_values(self)
+        task_terminated, truncated = termination_utils.compute_terminations(self)
+        # G1SonicTouchEnv (post)
+        if self.body_table_sensors:
+            force = self._body_table_force_step
+            pressing = force.amax(-1) > cfg.body_table_contact_force_n
+            self._body_table_count = torch.where(pressing, self._body_table_count+1, torch.zeros_like(self._body_table_count))
+            self._body_table_contact = self._body_table_count >= cfg.body_table_contact_steps
+            self._body_table_force = force
+            if cfg.body_table_contact_terminates:
+                task_terminated = task_terminated | self._body_table_contact
+                truncated = truncated & ~self._body_table_contact
+        return combine_terminations(task_terminated, truncated, self._body_fallen, self._body_numerical_failure)
+
+    def _get_rewards(self):
+        # PlayEnv
+        reward = reward_utils.compute_rewards(self)
+        logging_utils.log_step_metrics(self)
+        if self.reset_buf.any():
+            self.extras['final_observation'] = {'critic': obs_utils.build_critic_observation(self, reward=reward).clone()}
+            self.extras['final_observation_mask'] = self.reset_buf.clone()
+            self.extras['final_model_state_extras'] = {
+                'lift_height': (0.05+self.object.data.root_pos_w[:, 2]-self.scene.env_origins[:, 2]-self._object_init_z).clone(),
+                'near_goal_steps': (self._near_goal_steps.float()/max(float(self.cfg.termination.success_steps), 1.)).clone(),
+                'success_tolerance': torch.full((self.num_envs,), float(self._current_success_tolerance), device=self.device),
+                'action_queue': self._action_queue.flatten(start_dim=1).clone()}
+        else:
+            for key in ('final_observation', 'final_observation_mask', 'final_model_state_extras'):
+                self.extras.pop(key, None)
+        # G1Revo2DirectEnv
+        self._episode_ever_lifted |= self._lifted_object
+        self.extras['episode_final']['ever_lifted'] = self._episode_ever_lifted.float()
+        self.extras['episode_final']['any_success'] = (self._successes > 0).float()
+        # G1Revo2BpsEnv
+        if 'final_observation' in self.extras:
+            final = self.extras['final_observation']
+            final['critic'] = torch.cat([final['critic'], self._bps_features], dim=-1)
+        final = self.extras['episode_final']
+        final['goals_reached_count'] = final['successes']
+        final['any_goal_success_rate'] = final['any_success']
+        final['ever_lifted_rate'] = final['ever_lifted']
+        final['all_goals_completed_rate'] = final['all_goals_hit']
+        # G1Revo2TouchEnv
+        if 'final_observation' in self.extras:
+            self.extras['final_observation']['critic'] = torch.cat(
+                (self.extras['final_observation']['critic'], self._touch_observation()), -1)
+        # G1SonicTouchEnv
+        self.extras['episode_final']['robot_fall'] = self._body_fallen.float()
+        self.extras['episode_final']['numerical_failure'] = self._body_numerical_failure.float()
+        if self.body_table_sensors and hasattr(self, '_body_table_force'):
+            self.extras['episode_final']['done_body_table_contact'] = self._body_table_contact.float()
+            touching = self._body_table_force > self.cfg.sonic_body.body_table_contact_force_n
+            self.extras['body_table/any_link_touching'] = touching.any(-1).float().mean()
+            self.extras['body_table/max_force_n'] = self._body_table_force.amax(-1).mean()
+            for i, name in enumerate(self.body_table_names):
+                if any(k in name for k in ('knee', 'pelvis', 'hip', 'torso')):
+                    self.extras[f'body_table/touch_{name}'] = touching[:, i].float().mean()
+        if 'final_observation' in self.extras:
+            final = self.extras['final_observation']
+            final['critic'] = torch.cat((final['critic'], self._wholebody_observation()), -1)
+        return reward
+
+    def _touch_observation(self):
+        return self.touch_model.observation(None)
+
+    def sonic_to_policy_body(self, sonic_action):
+        targets = self._body_nominal+self._body_scales*sonic_action
+        return (targets-self._body_center)/self._body_half_range
+
+    def _body_terms(self):
+        data = self.robot.data
+        return (data.root_ang_vel_b, data.joint_pos[:, self._body_ids]-self._body_nominal,
+                data.joint_vel[:, self._body_ids], self._last_body_action, data.projected_gravity_b)
+
+    @torch.no_grad()
+    def _wholebody_observation(self):
+        if self._body_extra_step != self._sim_step_counter:
+            proprio = self._body_history.push(*self._body_terms())
+        else:
+            self._body_history.initialize_fresh(*self._body_terms())
+            proprio = self._body_history.value()
+        heading_delta = quat_mul(quat_conjugate(yaw_quat(self.robot.data.root_quat_w)), self._reference_heading)
+        ori6 = matrix_from_quat(heading_delta)[:, :, :2].reshape(self.num_envs, 1, 6).expand(-1, 10, -1)
+        self._reference_ori6 = ori6
+        tokens = self._sonic_reference.reference_tokens(self._reference_q, self._reference_qd, ori6)
+        self._body_extra = torch.cat((proprio, tokens), -1)
+        self._body_extra_step = self._sim_step_counter
+        return self._body_extra
+
+    def _get_observations(self):
+        # PlayEnv
+        obs = obs_utils.build_observations(self)
+        # G1Revo2BpsEnv
+        obs = {key: torch.cat([value, self._bps_features], dim=-1) for key, value in obs.items()}
+        # G1Revo2TouchEnv
+        if self._touch_ready:
+            extra = self._touch_observation()
+            obs = {k: torch.cat((v, extra), -1) for k, v in obs.items()}
+        # G1SonicTouchEnv
+        if not self._wholebody_ready:
+            return obs
+        extra = self._wholebody_observation()
+        return {k: torch.cat((v, extra), -1) for k, v in obs.items()}
