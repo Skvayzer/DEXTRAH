@@ -42,6 +42,9 @@ class SonicBodyCfg:
     # rendering used each env's URDF (jobs 1095/1096; disabling replication
     # inside the factorized path alone did not help, job 1098).
     per_env_object_physics: bool = False
+    # True: re-place each reset object (orientation kept) so it does not
+    # intersect the table and its footprint lies on it (wholebody/spawn.py).
+    spawn_on_table: bool = False
 
 
 @configclass
@@ -190,6 +193,9 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
             self.single_observation_space[key] = gym.spaces.Box(-np.inf, np.inf, shape=(size,), dtype=np.float32)
         self.observation_space = gym.vector.utils.batch_space(self.single_observation_space['policy'], self.num_envs)
         self.state_space = gym.vector.utils.batch_space(self.single_observation_space['critic'], self.num_envs)
+        if cfg.sonic_body.spawn_on_table:
+            from dextrah_lab.wholebody.spawn import TableSpawn
+            self._table_spawn = TableSpawn(self._object_urdf_paths, self._object_asset_index_per_env, self.device)
         self._wholebody_ready = True
         print(f'SONIC_SOURCE_TASK_READY actor={cfg.observation_space} critic={cfg.state_space} actions={action_dim} '
               f'controller={cfg.sonic_body.controller_mode} '
@@ -284,6 +290,9 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
         if not self._wholebody_ready:
             return
         ids = self.robot._ALL_INDICES if env_ids is None else env_ids
+        if getattr(self, '_table_spawn', None) is not None:
+            from dextrah_lab.wholebody.spawn import apply_table_spawn
+            apply_table_spawn(self, torch.as_tensor(ids, device=self.device, dtype=torch.long))
         root = self.robot.data.default_root_state[ids].clone()
         root[:, :3] += self.scene.env_origins[ids]
         root[:, 7:] = 0

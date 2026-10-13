@@ -222,6 +222,9 @@ class G1SonicTouchMjEnv:
         cfg.state_space = TASK_CRITIC_DIM+BODY_EXTRA_DIM
         for key, size in (('policy', cfg.observation_space), ('critic', cfg.state_space)):
             self.single_observation_space[key] = gym.spaces.Box(-np.inf, np.inf, shape=(size,), dtype=np.float32)
+        if getattr(cfg.sonic_body, 'spawn_on_table', False):
+            from dextrah_lab.wholebody.spawn import TableSpawn
+            self._table_spawn = TableSpawn(self._object_urdf_paths, self._object_asset_index_per_env, device)
         self._wholebody_ready = True
         # ---- backend extras ------------------------------------------------------
         self._velocity_limits = velocity_limits
@@ -370,6 +373,9 @@ class G1SonicTouchMjEnv:
         if not self._wholebody_ready:
             return
         ids = env_ids
+        if getattr(self, '_table_spawn', None) is not None:
+            from dextrah_lab.wholebody.spawn import apply_table_spawn
+            apply_table_spawn(self, torch.as_tensor(ids, device=self.device, dtype=torch.long))
         root = self.robot.data.default_root_state[ids].clone()
         root[:, :3] += self.scene.env_origins[ids]
         root[:, 7:] = 0

@@ -43,6 +43,7 @@ def main():
     p.add_argument('--num-envs', type=int, default=1200)
     p.add_argument('--seconds', type=float, default=10.)
     p.add_argument('--checkpoint', type=Path)
+    p.add_argument('--spawn-on-table', action='store_true')
     p.add_argument('--nconmax', type=int, default=256)
     p.add_argument('--njmax', type=int, default=2000)
     p.add_argument('--device', default='cuda:0')
@@ -59,7 +60,7 @@ def main():
         from dextrah_lab.mj.factory import make_mj_env
         torch.set_num_threads(4)
         t0 = time.monotonic()
-        env = make_mj_env(args.num_envs, args.device, nconmax=args.nconmax, njmax=args.njmax)
+        env = make_mj_env(args.num_envs, args.device, nconmax=args.nconmax, njmax=args.njmax, spawn_on_table=args.spawn_on_table)
         report['build_s'] = time.monotonic()-t0
         n = env.num_envs
         obs, _ = env.reset()

@@ -23,6 +23,6 @@ export PYTHONPATH="$src" OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 PYTHONUNBUFFERED=1 
 export OMNI_KIT_ACCEPT_EULA=YES ACCEPT_EULA=Y WANDB_MODE=disabled
 unset DISPLAY
 cd "$src"
-out="$project/outputs/spawn_check_${backend}_${SLURM_JOB_ID}"
+out="$project/outputs/spawn_check_${backend}${SPAWN_ON_TABLE:+_fixed}_${SLURM_JOB_ID}"
 python scripts/check_spawn_stability.py --backend "$backend" --output "$out" \
-    --num-envs "${NUM_ENVS:-1200}" --seconds "${SECONDS_SIM:-40}" "${extra[@]}"
+    --num-envs "${NUM_ENVS:-1200}" --seconds "${SECONDS_SIM:-40}" ${SPAWN_ON_TABLE:+--spawn-on-table} "${extra[@]}"

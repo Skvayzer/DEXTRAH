@@ -64,6 +64,7 @@ fi
 if [[ "${NO_TABLE_BODY_SUPPORT:-0}" == 1 ]]; then extra_args+=(--no-table-body-support); fi
 if [[ "${BODY_TABLE_CONTACT_TERMINATION:-0}" == 1 ]]; then extra_args+=(--body-table-contact-termination); fi
 if [[ "${PER_ENV_OBJECT_PHYSICS:-0}" == 1 ]]; then extra_args+=(--per-env-object-physics); fi
+if [[ "${SPAWN_ON_TABLE:-0}" == 1 ]]; then extra_args+=(--spawn-on-table); fi
 if [[ "${BODY_TABLE_CONTACT_MONITOR_ONLY:-0}" == 1 ]]; then extra_args+=(--body-table-contact-monitor-only); fi
 if [[ -n "${INIT_WEIGHTS:-}" ]]; then extra_args+=(--init-weights "$INIT_WEIGHTS"); fi
 if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then extra_args+=(--resume "$RESUME_CHECKPOINT"); fi

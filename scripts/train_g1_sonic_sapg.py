@@ -68,6 +68,8 @@ def main():
                    help='After --resume, forget the parent run best return so this run saves its own best checkpoint')
     p.add_argument('--body-table-contact-monitor-only', action='store_true',
                    help='Keep body-table contact sensors/metrics but do not end episodes on contact')
+    p.add_argument('--spawn-on-table', action='store_true',
+                   help='Re-place reset objects (orientation kept): no table intersection, footprint on the table')
     p.add_argument('--per-env-object-physics', action='store_true',
                    help='Upstream scene path: each environment simulates its own assigned object')
     p.add_argument('--body-table-contact-termination', action='store_true',
@@ -183,6 +185,7 @@ def main():
         cfg.sonic_body.table_supports_body = not args.no_table_body_support
         cfg.sonic_body.body_table_contact_termination = args.body_table_contact_termination
         cfg.sonic_body.per_env_object_physics = args.per_env_object_physics
+        cfg.sonic_body.spawn_on_table = args.spawn_on_table
         if args.body_table_contact_monitor_only:
             cfg.sonic_body.body_table_contact_termination = True
             cfg.sonic_body.body_table_contact_terminates = False
@@ -223,6 +226,9 @@ def main():
         if args.body_table_contact_monitor_only:
             contract['intentional_changes'] = contract['intentional_changes'] + [
                 'body_table_contact_logged_only_no_termination']
+        if args.spawn_on_table:
+            contract['intentional_changes'] = contract['intentional_changes'] + [
+                'object_spawn_above_table_footprint_on_table']
         if args.per_env_object_physics:
             contract['intentional_changes'] = contract['intentional_changes'] + [
                 'per_env_object_physics_upstream_scene_path_no_physx_replication']

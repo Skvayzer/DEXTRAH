@@ -156,14 +156,24 @@ class RigidObjectData:
     def _d(self):
         return self._o.entity.data
 
-    root_pos_w = property(lambda self: self._d.root_link_pos_w)
-    root_quat_w = property(lambda self: self._d.root_link_quat_w)
+    # A free body's pose IS its qpos; reading it there (not xpos/xquat) keeps
+    # it current right after a write, as Isaac's buffers are.
+    @property
+    def root_pos_w(self):
+        q = self._o.free_qpos
+        return self._d.root_link_pos_w if q is None else q[:, :3]
+
+    @property
+    def root_quat_w(self):
+        q = self._o.free_qpos
+        return self._d.root_link_quat_w if q is None else q[:, 3:7]
+
     root_lin_vel_w = property(lambda self: self._d.root_com_lin_vel_w)
     root_ang_vel_w = property(lambda self: self._d.root_com_ang_vel_w)
 
     @property
     def root_state_w(self):
-        return torch.cat((self._d.root_link_pose_w, self._d.root_com_vel_w), -1)
+        return torch.cat((self.root_pos_w, self.root_quat_w, self._d.root_com_vel_w), -1)
 
     @property
     def default_mass(self):
@@ -185,6 +195,13 @@ class MjRigidObject:
             model = sim.mj_model
             joint = [j for j in range(model.njnt) if model.jnt_bodyid[j] == entity.indexing.root_body_id]
             self._free_dof = int(model.jnt_dofadr[joint[0]])
+            self._free_qadr = int(model.jnt_qposadr[joint[0]])
+
+    @property
+    def free_qpos(self):
+        if self._free_dof is None:
+            return None
+        return self.sim.data.qpos[:, self._free_qadr:self._free_qadr+7]
 
     def write_root_pose_to_sim(self, pose, env_ids=None):
         ids = _ids(env_ids, self.num_instances, self.device)

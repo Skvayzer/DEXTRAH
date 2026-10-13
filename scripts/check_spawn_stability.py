@@ -27,6 +27,7 @@ def main():
     p.add_argument('--window', type=float, default=3., help='seconds after reset that count as spawn')
     p.add_argument('--backend', choices=['isaac', 'mjlab'], default='isaac')
     p.add_argument('--torch-memory-limit-gib', type=float, default=6.)
+    p.add_argument('--spawn-on-table', action='store_true', help='Spawn fix: no table intersection, footprint on the table')
     if p.parse_known_args()[0].backend == 'isaac':
         from isaaclab.app import AppLauncher
         AppLauncher.add_app_launcher_args(p)   # adds --device
@@ -40,7 +41,7 @@ def main():
         args.headless = True
         AppLauncher(args)
     faulthandler.enable(file=(args.output/'stacks.log').open('w'))
-    report = dict(completed=False, backend=args.backend, policy='none: zero latent residual, open right fingers')
+    report = dict(completed=False, backend=args.backend, spawn_on_table=args.spawn_on_table, policy='none: zero latent residual, open right fingers')
     try:
         import numpy as np
         import torch
@@ -52,7 +53,7 @@ def main():
             env = make_isaac_env(args)
         else:
             from dextrah_lab.mj.factory import make_mj_env
-            env = make_mj_env(args.num_envs, args.device, seed=42)
+            env = make_mj_env(args.num_envs, args.device, seed=42, spawn_on_table=args.spawn_on_table)
         n, dt = env.num_envs, env.step_dt
         window = round(args.window/dt)
         action = torch.zeros(n, 70, device=env.device)
@@ -153,6 +154,7 @@ def make_isaac_env(args):
     # Same body/table/object-physics settings as the last training run (1105).
     contract = json.loads((workspace/'DEXTRAH-G1-WholeBody/outputs/0_frozen_sonic_sapg_touch_dexterous_1105/task_contract.json').read_text())
     cfg.sonic_body.from_dict(contract['body_termination'])
+    cfg.sonic_body.spawn_on_table = args.spawn_on_table
     sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
     return G1SonicTouchEnv(cfg, sonic=sonic)
 

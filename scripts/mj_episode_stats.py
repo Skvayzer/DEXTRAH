@@ -12,6 +12,7 @@ def main():
     p.add_argument('--num-envs', type=int, default=120)
     p.add_argument('--seconds', type=float, default=5.)
     p.add_argument('--checkpoint', type=Path)
+    p.add_argument('--spawn-on-table', action='store_true')
     p.add_argument('--contact', type=json.loads, default={}, help='ContactParams overrides')
     p.add_argument('--mujoco', type=json.loads, default=None)
     p.add_argument('--label', default='default')
@@ -23,7 +24,7 @@ def main():
     from dextrah_lab.mj.robot import ContactParams
     from dextrah_lab.mj.scene import SceneParams
     contact = ContactParams(**{k: tuple(v) if isinstance(v, list) else v for k, v in args.contact.items()})
-    env = make_mj_env(args.num_envs, 'cuda:0', scene_params=SceneParams(contact=contact), mujoco_cfg=args.mujoco)
+    env = make_mj_env(args.num_envs, 'cuda:0', scene_params=SceneParams(contact=contact), mujoco_cfg=args.mujoco, spawn_on_table=args.spawn_on_table)
     peak_speed = torch.zeros(n if False else args.num_envs, device='cuda:0')
     speeds = []
     n = env.num_envs
