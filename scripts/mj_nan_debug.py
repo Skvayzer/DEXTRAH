@@ -76,8 +76,11 @@ def main():
             try:
                 env.step(action)
             except RuntimeError as error:
+                import traceback
+                traceback.print_exc()
                 result['stopped'] = f'{error} at policy step {step}'
-                break
+                print('NAN_DEBUG '+json.dumps(result), flush=True)
+                os._exit(1)
     result['overflow_worlds'] = int((overflow > 0).sum())
     result['overflow_bits'] = sorted(set(overflow[overflow > 0].tolist()))
     print('NAN_DEBUG '+json.dumps(result), flush=True)
