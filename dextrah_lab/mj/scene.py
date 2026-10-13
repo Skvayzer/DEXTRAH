@@ -58,6 +58,8 @@ def add_ground(contact):
     def edit(spec):
         geom = spec.worldbody.add_geom(name='ground', type=mujoco.mjtGeom.mjGEOM_PLANE, size=(0., 0., 1.))
         _world_geom(geom, contact)
+        if contact.robot_ground_only:
+            geom.conaffinity = WORLD_CONAFFINITY | 4
     return edit
 
 

@@ -42,6 +42,8 @@ class ContactParams:
     # takes the max, so 1.0 reproduces the effective coefficient.
     marker_friction: float = 1.0
     maxhullvert: int = 64
+    # Diagnostics only: robot geoms collide with nothing but the ground.
+    robot_ground_only: bool = False
 
 
 def prepared_urdf_text(path=ROBOT_URDF):
@@ -126,6 +128,8 @@ def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF, implicit_drive_dt
         mesh.maxhullvert = contact.maxhullvert
     for geom in spec.geoms:
         geom.contype, geom.conaffinity = ROBOT_CONTYPE, ROBOT_CONAFFINITY
+        if contact.robot_ground_only:
+            geom.contype, geom.conaffinity = 4, 0
         geom.condim = contact.condim
         geom.solref = contact.solref
         geom.solimp = contact.solimp
