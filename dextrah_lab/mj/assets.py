@@ -95,8 +95,39 @@ class MjArticulation:
         cols = slice(None) if joint_ids is None else torch.as_tensor(joint_ids, device=self.device)
         self._targets[rows, cols] = target
 
-    def write_data_to_sim(self):
-        self.sim.data.ctrl[:, self._ctrl_ids] = self._targets
+    def configure_hand_servos(self, servos):
+        """Revo2 joints use velocity servos (robot.hand_servo); ctrl is a velocity."""
+        names = self.joint_names
+        self._servo_ids = torch.tensor([names.index(n) for n in servos], device=self.device)
+        self._servo_gain = torch.tensor([servos[n]['kp']/servos[n]['kv'] for n in servos], device=self.device)
+        self._servo_vmax = torch.tensor([servos[n]['vmax'] for n in servos], device=self.device)
+
+    def configure_velocity_limits(self, limits, dt):
+        """Emulate PhysX max joint velocities of the PD-driven (body) joints.
+
+        PhysX enforces the limit inside its solver. Clamping MuJoCo velocities
+        after a step instead removes the motion the contact solver needs to
+        resolve penetration. Here the position-actuator setpoint moves toward
+        the target by at most limit*dt per physics step. (Hand joints are
+        velocity servos whose command is already capped at their limit.)
+        """
+        self._step_limit = (limits*dt).to(self.device)
+        self._setpoint = self._targets.clone()
+
+    def reset_setpoint(self, env_ids, values):
+        if getattr(self, '_setpoint', None) is not None:
+            self._setpoint[env_ids] = values
+
+    def write_data_to_sim(self, advance=True):
+        ctrl = self._targets
+        if getattr(self, '_setpoint', None) is not None:
+            if advance:
+                self._setpoint += (self._targets-self._setpoint).clamp(-self._step_limit, self._step_limit)
+            ctrl = self._setpoint.clone()
+        if getattr(self, '_servo_ids', None) is not None:
+            error = self._targets[:, self._servo_ids]-self.data.joint_pos[:, self._servo_ids]
+            ctrl[:, self._servo_ids] = torch.maximum(torch.minimum(self._servo_gain*error, self._servo_vmax), -self._servo_vmax)
+        self.sim.data.ctrl[:, self._ctrl_ids] = ctrl
 
     def write_joint_state_to_sim(self, position, velocity, joint_ids=None, env_ids=None):
         ids = _ids(env_ids, self.num_instances, self.device)

@@ -257,7 +257,7 @@ def main():
                 mujoco_warp=version('mujoco-warp'), torch=torch.__version__,
                 nconmax=args.mj_nconmax or DEFAULT_NCONMAX, njmax=args.mj_njmax or DEFAULT_NJMAX,
                 mujoco_options=DEFAULT_MUJOCO, contact=asdict(ContactParams()),
-                joint_velocity_limits='PhysX max joint velocities emulated by clamping after each physics step',
+                joint_velocity_limits='body: PD setpoint rate-limited at the PhysX max joint velocity; Revo2: velocity servo kv=effort/vmax, v_cmd=clamp(kp*err/kv, +-vmax) (robot.hand_servo)',
                 asset_parity='scripts/mj_asset_parity.py: 0 mismatches vs Isaac dump (job 1112)')
             contract['simulator'] = mj_settings
             contract['intentional_changes'] = contract['intentional_changes'] + ['simulator_mjlab_mujoco_warp']

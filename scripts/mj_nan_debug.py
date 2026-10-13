@@ -77,16 +77,19 @@ def main():
         original_after()
 
     env._after_physics_step = checked
+    result['numerical_failure_resets'] = 0
     with torch.inference_mode():
         for step in range(steps):
             try:
-                env.step(action)
+                _, _, _, _, info = env.step(action)
+                result['numerical_failure_resets'] += int(info['episode_final']['numerical_failure'].sum())
             except RuntimeError as error:
                 import traceback
                 traceback.print_exc()
                 result['stopped'] = f'{error} at policy step {step}'
                 print('NAN_DEBUG '+json.dumps(result), flush=True)
                 os._exit(1)
+    result['max_joint_speed_seen'] = float(env._body_max_joint_speed)
     result['overflow_worlds'] = int((overflow > 0).sum())
     result['overflow_bits'] = sorted(set(overflow[overflow > 0].tolist()))
     print('NAN_DEBUG '+json.dumps(result), flush=True)

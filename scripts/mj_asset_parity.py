@@ -24,7 +24,7 @@ def main():
     import mujoco
     from dextrah_lab.mj.compat import install
     install()
-    from dextrah_lab.mj.robot import build_robot_spec, IMPLICIT_DRIVE_DT
+    from dextrah_lab.mj.robot import build_robot_spec, IMPLICIT_DRIVE_DT, hand_servo
     from dextrah_lab.mj.objects import build_object_bank
     from dextrah_lab.mj.compat import p2p
     ref = np.load(args.dump, allow_pickle=False)
@@ -71,14 +71,25 @@ def main():
         if abs(m.dof_armature[dof]-ref['joint_armature'][k]) > 1e-7:
             issue(f'joint {name}: armature {m.dof_armature[dof]} vs {ref["joint_armature"][k]}')
         a = act[name]
-        # kv carries the implicit-stiffness term kp*dt (see robot.py); compare the PhysX kd.
-        kp = m.actuator_gainprm[a, 0]
-        kd = -m.actuator_biasprm[a, 2]-kp*IMPLICIT_DRIVE_DT
-        if abs(kp-ref['joint_stiffness'][k]) > 1e-3*max(1, kp) or abs(kd-ref['joint_damping'][k]) > 1e-3*max(1, kd):
-            issue(f'joint {name}: kp/kd {kp:.4f}/{kd:.4f} vs {ref["joint_stiffness"][k]:.4f}/{ref["joint_damping"][k]:.4f}')
-        effort = m.actuator_forcerange[a, 1]
-        if abs(effort-ref['joint_effort_limits'][k]) > 1e-4*max(1, effort):
-            issue(f'joint {name}: effort {effort} vs Isaac {ref["joint_effort_limits"][k]}')
+        if m.actuator_biasprm[a, 1] == 0.:
+            # Revo2 velocity servo (robot.hand_servo): check it encodes the PhysX
+            # drive limits: kv = effort/vmax with Isaac's kp, effort and vmax.
+            servo = hand_servo(name)
+            ok = (abs(servo['kp']-ref['joint_stiffness'][k]) < 1e-3 and abs(servo['effort']-ref['joint_effort_limits'][k]) < 1e-4
+                  and abs(servo['vmax']-ref['joint_vel_limits'][k]) < 1e-4 and abs(m.actuator_gainprm[a, 0]-servo['kv']) < 1e-6)
+            if not ok:
+                issue(f'joint {name}: servo {servo} vs Isaac kp {ref["joint_stiffness"][k]}, effort {ref["joint_effort_limits"][k]}, vmax {ref["joint_vel_limits"][k]}')
+            out.setdefault('hand_servos', 0)
+            out['hand_servos'] += 1
+        else:
+            # kv carries the implicit-stiffness term kp*dt (see robot.py); compare the PhysX kd.
+            kp = m.actuator_gainprm[a, 0]
+            kd = -m.actuator_biasprm[a, 2]-kp*IMPLICIT_DRIVE_DT
+            if abs(kp-ref['joint_stiffness'][k]) > 1e-3*max(1, kp) or abs(kd-ref['joint_damping'][k]) > 1e-3*max(1, kd):
+                issue(f'joint {name}: kp/kd {kp:.4f}/{kd:.4f} vs {ref["joint_stiffness"][k]:.4f}/{ref["joint_damping"][k]:.4f}')
+            effort = m.actuator_forcerange[a, 1]
+            if abs(effort-ref['joint_effort_limits'][k]) > 1e-4*max(1, effort):
+                issue(f'joint {name}: effort {effort} vs Isaac {ref["joint_effort_limits"][k]}')
         if abs(ref['joint_friction'][k]) > 0:
             issue(f'joint {name}: Isaac joint friction {ref["joint_friction"][k]} (MuJoCo 0)')
     out['isaac_velocity_limits'] = {n: float(v) for n, v in zip(joints, ref['joint_vel_limits'])}

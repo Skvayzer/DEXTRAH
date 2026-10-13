@@ -127,6 +127,7 @@ def main():
                       gpu_used_gib=(total-free)/2**30, torch_peak_gib=torch.cuda.max_memory_allocated(args.device)/2**30,
                       episodes=episodes, goal_hits=hits, robot_falls=falls, object_drops=drops,
                       fingertip_touch_fraction=touch_any/steps,
+                      numerical_failure_resets=int(env._body_numerical_failures_total), max_joint_speed_seen=float(env._body_max_joint_speed),
                       recommended=dict(nconmax=int(np.ceil(1.5*max(q(.999), 1))), njmax=int(np.ceil(1.25*int(nefc_max.max())))))
         print('MJ_CAPACITY '+json.dumps(report), flush=True)
     except BaseException as error:

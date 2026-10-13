@@ -97,6 +97,25 @@ def urdf_joint_efforts(path=ROBOT_URDF):
 IMPLICIT_DRIVE_DT = 1/120
 
 
+def hand_servo(name, path=ROBOT_URDF):
+    """PhysX Revo2 finger drive (kp 1200, kd 25, maxForce = URDF effort,
+    maxJointVelocity = URDF velocity) as an equivalent MuJoCo velocity servo.
+
+    effort/kp is 0.4-1.7 mrad, so in PhysX these drives are saturated almost
+    always: fingers move at the velocity cap and push with at most `effort`.
+    A clamped MuJoCo position actuator loses its implicit damping when it
+    saturates and gram-scale finger links then diverge (measured: >1e6 rad/s).
+    The servo  tau = kv (v_cmd - qd),  kv = effort / vmax,
+               v_cmd = clamp(kp (q* - q) / kv, -vmax, vmax)
+    gives a blocked joint tau = min(kp |q* - q|, effort) (the PhysX static law)
+    and free motion at |qd| <= vmax, with no force clamp (implicit, stable).
+    """
+    effort = urdf_joint_efforts(path)[name]
+    vmax = {j.get('name'): float(j.find('limit').get('velocity')) for j in ET.parse(path).getroot().findall('joint')
+            if j.find('limit') is not None}[name]
+    return dict(kp=HAND_KP, effort=effort, vmax=vmax, kv=effort/vmax)
+
+
 def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF, implicit_drive_dt=IMPLICIT_DRIVE_DT):
     from dextrah_lab.wholebody.actuators import body_motors
     spec = mujoco.MjSpec.from_string(prepared_urdf_text(path))
@@ -114,22 +133,21 @@ def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF, implicit_drive_dt
         marker = geom.parent.name.endswith('_tip') and geom.parent.name.startswith('right_')
         geom.friction = (contact.marker_friction if marker else contact.friction, 0.005, 0.0001)
     motors = body_motors()
-    efforts = urdf_joint_efforts(path)
     for joint in spec.joints:
         if joint.type == mujoco.mjtJoint.mjJNT_FREE:
             continue
         joint.damping = (0., 0., 0.)
         joint.frictionloss = 0.
+        act = spec.add_actuator(name=joint.name, target=joint.name, trntype=mujoco.mjtTrn.mjTRN_JOINT)
+        act.ctrllimited = mujoco.mjtLimited.mjLIMITED_FALSE
         if joint.name in motors:
             m = motors[joint.name]
-            kp, kd, armature, effort = m.stiffness, m.damping, m.armature, m.effort
-        else:   # right and left Revo2 hands (actuated and distal follower joints)
-            kp, kd, armature, effort = HAND_KP, HAND_KD, 0., efforts[joint.name]
-        joint.armature = armature
-        act = spec.add_actuator(name=joint.name, target=joint.name,
-                                trntype=mujoco.mjtTrn.mjTRN_JOINT)
-        act.set_to_position(kp=kp, kv=kd+kp*implicit_drive_dt)
-        act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
-        act.forcerange = (-effort, effort)
-        act.ctrllimited = mujoco.mjtLimited.mjLIMITED_FALSE
+            joint.armature = m.armature
+            act.set_to_position(kp=m.stiffness, kv=m.damping+m.stiffness*implicit_drive_dt)
+            act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
+            act.forcerange = (-m.effort, m.effort)
+        else:   # Revo2 hands: velocity servo, see hand_servo()
+            joint.armature = 0.
+            act.set_to_velocity(kv=hand_servo(joint.name, path)['kv'])
+            act.forcelimited = mujoco.mjtLimited.mjLIMITED_FALSE
     return spec

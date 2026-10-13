@@ -225,7 +225,11 @@ class G1SonicTouchMjEnv:
         self._wholebody_ready = True
         # ---- backend extras ------------------------------------------------------
         self._velocity_limits = velocity_limits
-        self._vel_limit = torch.as_tensor(reference['joint_vel_limits'], device=device)
+        from .robot import hand_servo
+        from dextrah_lab.wholebody.actuators import body_motors as _motors
+        self.robot.configure_hand_servos({n: hand_servo(n) for n in self.robot.joint_names if n not in _motors()})
+        if velocity_limits:
+            self.robot.configure_velocity_limits(torch.as_tensor(reference['joint_vel_limits'], device=device), self.physics_dt)
         self.contact_stats = dict(max_active=0)
         print(f'MJ_SONIC_TOUCH_READY envs={num_envs} actor={cfg.observation_space} critic={cfg.state_space} '
               f'actions=70 nconmax={nconmax} njmax={njmax} naconmax={self.sim.wp_data.naconmax} '
@@ -307,7 +311,7 @@ class G1SonicTouchMjEnv:
             self._init_contacts()
         indices = torch.arange(self.num_envs, dtype=torch.int64, device=self.device)
         self._reset_idx(indices)
-        self._write_data_to_sim()
+        self._write_data_to_sim(advance=False)
         self.sim.forward()
         return self._get_observations(), self.extras
 
@@ -329,21 +333,17 @@ class G1SonicTouchMjEnv:
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
             self._reset_idx(reset_env_ids)
-            self._write_data_to_sim()
+            self._write_data_to_sim(advance=False)
             self.sim.forward()
         self.obs_buf = self._get_observations()
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
 
-    def _write_data_to_sim(self):
-        self.robot.write_data_to_sim()
+    def _write_data_to_sim(self, advance=True):
+        # advance=False after resets: no physics step follows the write yet.
+        self.robot.write_data_to_sim(advance=advance)
         self.object.write_data_to_sim()
 
     def _after_physics_step(self):
-        if self._velocity_limits:
-            # PhysX clamps joint speeds to the articulation's max joint velocity.
-            qvel = self.robot.entity.data.joint_vel
-            limit = self._vel_limit[self.robot.joint_perm.argsort()]
-            self.robot.entity.write_joint_velocity_to_sim(torch.maximum(torch.minimum(qvel, limit), -limit))
         self.capture_touch(self._sim_step_counter)
 
     # ======================================================================
@@ -354,6 +354,8 @@ class G1SonicTouchMjEnv:
         self.episode_length_buf[env_ids] = 0
         # PlayEnv
         reset_utils.reset_env_state(self, torch.as_tensor(env_ids, device=self.device, dtype=torch.long))
+        # Drive setpoints restart at the reset joint targets (as PhysX drives do).
+        self.robot.reset_setpoint(env_ids, self._cur_targets[env_ids])
         # G1Revo2DirectEnv
         self._episode_ever_lifted[env_ids] = False
         # G1Revo2TouchEnv
