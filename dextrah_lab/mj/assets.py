@@ -14,6 +14,13 @@ Isaac Lab's conventions:
 import torch
 
 
+def _quat_apply(q, v):
+    """Rotate vectors v by wxyz quaternions q."""
+    xyz = q[..., 1:]
+    t = 2*torch.linalg.cross(xyz, v)
+    return v+q[..., :1]*t+torch.linalg.cross(xyz, t)
+
+
 def _ids(env_ids, n, device):
     if env_ids is None:
         return torch.arange(n, device=device)
@@ -221,11 +228,21 @@ class MjRigidObject:
         object bake does not override it). MuJoCo has no cap, and its explicit
         gyroscopic term diverges for fast-spinning anisotropic bodies (an
         ejected eraser went 47 -> 2.8e6 rad/s in free flight). Same norm clamp.
+
+        PhysX clamps about the COM. MuJoCo's free-joint linear velocity is that
+        of the body origin (v_o = v_com - w x r, r = origin->COM offset), so the
+        origin velocity is corrected to keep the COM velocity unchanged;
+        clamping w alone launched off-centre objects at up to 33 m/s.
         """
-        dof = self._free_dof
-        w = self.sim.data.qvel[:, dof+3:dof+6]          # body-frame angular velocity
-        speed = w.norm(dim=-1, keepdim=True)
-        self.sim.data.qvel[:, dof+3:dof+6] = w*torch.clamp(max_rad_s/speed.clamp_min(1e-9), max=1.)
+        dof, qadr = self._free_dof, self._free_qadr
+        qvel = self.sim.data.qvel
+        w = qvel[:, dof+3:dof+6]                         # body-frame angular velocity
+        scale = torch.clamp(max_rad_s/w.norm(dim=-1, keepdim=True).clamp_min(1e-9), max=1.)
+        quat = self.sim.data.qpos[:, qadr+3:qadr+7]
+        r = _quat_apply(quat, self.sim.model.body_ipos[:, self.entity.indexing.root_body_id])
+        lost = _quat_apply(quat, (1.-scale)*w)          # removed spin, world frame
+        qvel[:, dof:dof+3] = qvel[:, dof:dof+3]+torch.linalg.cross(lost, r)
+        qvel[:, dof+3:dof+6] = w*scale
 
     def set_external_force_and_torque(self, forces, torques, env_ids=None, body_ids=None, is_global=False):
         if not is_global or env_ids is not None or body_ids is not None:
