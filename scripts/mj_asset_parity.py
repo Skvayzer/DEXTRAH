@@ -24,7 +24,8 @@ def main():
     import mujoco
     from dextrah_lab.mj.compat import install
     install()
-    from dextrah_lab.mj.robot import build_robot_spec, IMPLICIT_DRIVE_DT, hand_servo
+    from dextrah_lab.mj.robot import build_robot_spec, ContactParams, IMPLICIT_DRIVE_DT, hand_servo
+    from dextrah_lab.wholebody.actuators import body_motors
     from dextrah_lab.mj.objects import build_object_bank
     from dextrah_lab.mj.compat import p2p
     ref = np.load(args.dump, allow_pickle=False)
@@ -68,7 +69,10 @@ def main():
         if abs(lo-ref['joint_pos_limits'][k, 0]) > 1e-5 or abs(hi-ref['joint_pos_limits'][k, 1]) > 1e-5:
             issue(f'joint {name}: range {lo:.5f},{hi:.5f} vs {ref["joint_pos_limits"][k]}')
         dof = m.jnt_dofadr[j]
-        if abs(m.dof_armature[dof]-ref['joint_armature'][k]) > 1e-7:
+        expected = ref['joint_armature'][k]
+        if name not in body_motors():   # Revo2 finger servo
+            expected = ContactParams().hand_armature   # MuJoCo-only, see ContactParams.hand_armature
+        if abs(m.dof_armature[dof]-expected) > 1e-7:
             issue(f'joint {name}: armature {m.dof_armature[dof]} vs {ref["joint_armature"][k]}')
         a = act[name]
         if m.actuator_biasprm[a, 1] == 0.:

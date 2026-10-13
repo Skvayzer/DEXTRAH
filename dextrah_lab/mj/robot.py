@@ -50,7 +50,11 @@ class ContactParams:
     # implicit drive together with the contacts. Armature gives the contact
     # solve a finger inertia; the servo time constant armature/kv (<= 1 ms)
     # stays far below the 8.3 ms step, so free finger motion is unchanged.
-    hand_armature: float = 0.
+    # Sweep (job 1143, spawn fix, 1200 envs x 40 s passive): spawn-window peak
+    # object speed > 5 m/s: armature 0 8.7%, 1e-4 0.17%, 1e-3 0% (Isaac 0.77%);
+    # zero-shot 1105 policy hand_far 61% / 15% / 0.5% (Isaac training 3%).
+    # Free finger motion changes by <= 0.07 rad (transient).
+    hand_armature: float = 1e-3
     # Diagnostics only: robot geoms collide with nothing but the ground.
     robot_ground_only: bool = False
 

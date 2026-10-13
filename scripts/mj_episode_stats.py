@@ -34,7 +34,7 @@ def main():
         model, _ = build_policy(env, args.checkpoint, 'cuda:0')
         states = tuple(x.cuda() for x in model.get_default_rnn_state())
     passive = torch.zeros(n, 70, device='cuda:0'); passive[:, 64:] = -1
-    counts, lengths = {}, []
+    counts, lengths, sums = {}, [], {}
     first = {}
     with torch.inference_mode():
         for step in range(round(args.seconds/env.step_dt)):
@@ -68,11 +68,16 @@ def main():
                 if k.startswith('done_') or k in ('robot_fall', 'numerical_failure'):
                     counts[k] = counts.get(k, 0)+int((done & v.bool()).sum())
             counts['episodes'] = counts.get('episodes', 0)+int(done.sum())
+            for k, v in final.items():   # episode means, as logged by Isaac training (episode_final/*)
+                if torch.is_tensor(v) and v.shape == done.shape:
+                    sums[k] = sums.get(k, 0.)+float(v.float()[done].sum())
             lengths += (ep[done]+1).tolist()
     import numpy as np
     print('EPISODE_STATS '+json.dumps(dict(label=args.label, hand_far_rate=counts.get('done_hand_far', 0)/max(counts['episodes'], 1),
                                             fall_rate=counts.get('done_fall', 0)/max(counts['episodes'], 1),
                                             max_post_spawn_object_speed=max(speeds) if speeds else None, counts=counts, mean_len_steps=sum(lengths)/max(len(lengths), 1),
+                                            episode_final_means={k: v/max(counts['episodes'], 1) for k, v in sorted(sums.items())},
+                                            success_tolerance=float(env._current_success_tolerance),
                                             first_step=first)), flush=True)
     os._exit(0)
 
