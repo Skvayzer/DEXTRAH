@@ -87,7 +87,17 @@ def urdf_joint_efforts(path=ROBOT_URDF):
     return efforts
 
 
-def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF):
+# PhysX joint drives are implicit in position AND velocity:
+#   F = kp (q* - q_{n+1}) - kd v_{n+1},  q_{n+1} = q_n + dt v_{n+1}
+#     = kp (q* - q_n) - (kd + kp dt) v_{n+1}.
+# MuJoCo's implicitfast integrator treats actuator velocity terms implicitly
+# (v_{n+1}) but position stiffness explicitly, which is unstable for the
+# 1200 N m/rad finger drives on gram-scale links at dt = 1/120 s. Using
+# kv = kd + kp dt reproduces the PhysX backward-Euler drive exactly.
+IMPLICIT_DRIVE_DT = 1/120
+
+
+def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF, implicit_drive_dt=IMPLICIT_DRIVE_DT):
     from dextrah_lab.wholebody.actuators import body_motors
     spec = mujoco.MjSpec.from_string(prepared_urdf_text(path))
     spec.compiler.degree = False
@@ -118,7 +128,7 @@ def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF):
         joint.armature = armature
         act = spec.add_actuator(name=joint.name, target=joint.name,
                                 trntype=mujoco.mjtTrn.mjTRN_JOINT)
-        act.set_to_position(kp=kp, kv=kd)
+        act.set_to_position(kp=kp, kv=kd+kp*implicit_drive_dt)
         act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
         act.forcerange = (-effort, effort)
         act.ctrllimited = mujoco.mjtLimited.mjLIMITED_FALSE

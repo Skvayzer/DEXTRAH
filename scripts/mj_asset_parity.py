@@ -24,7 +24,7 @@ def main():
     import mujoco
     from dextrah_lab.mj.compat import install
     install()
-    from dextrah_lab.mj.robot import build_robot_spec, HAND_KP, HAND_KD
+    from dextrah_lab.mj.robot import build_robot_spec, IMPLICIT_DRIVE_DT
     from dextrah_lab.mj.objects import build_object_bank
     from dextrah_lab.mj.compat import p2p
     ref = np.load(args.dump, allow_pickle=False)
@@ -71,7 +71,9 @@ def main():
         if abs(m.dof_armature[dof]-ref['joint_armature'][k]) > 1e-7:
             issue(f'joint {name}: armature {m.dof_armature[dof]} vs {ref["joint_armature"][k]}')
         a = act[name]
-        kp, kd = m.actuator_gainprm[a, 0], -m.actuator_biasprm[a, 2]
+        # kv carries the implicit-stiffness term kp*dt (see robot.py); compare the PhysX kd.
+        kp = m.actuator_gainprm[a, 0]
+        kd = -m.actuator_biasprm[a, 2]-kp*IMPLICIT_DRIVE_DT
         if abs(kp-ref['joint_stiffness'][k]) > 1e-3*max(1, kp) or abs(kd-ref['joint_damping'][k]) > 1e-3*max(1, kd):
             issue(f'joint {name}: kp/kd {kp:.4f}/{kd:.4f} vs {ref["joint_stiffness"][k]:.4f}/{ref["joint_damping"][k]:.4f}')
         effort = m.actuator_forcerange[a, 1]
