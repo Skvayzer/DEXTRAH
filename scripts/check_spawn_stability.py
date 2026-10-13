@@ -7,7 +7,8 @@ fully open right fingers. Every environment keeps its assigned object
 per reset. Unchanged reset rules (spawn XY box, drop height, random
 orientation). A spawn counts as an untouched fall when the object goes below
 the table top within the window after reset while no right fingertip has
-sensed any contact since that reset.
+sensed any contact since that reset. Also reports the peak object speed in
+each spawn window (ejections) and hand_far terminations.
 """
 import argparse
 import faulthandler
@@ -71,12 +72,19 @@ def main():
         near = torch.full((n,), 9., device=env.device)   # min palm-object distance since reset
         robot_falls = np.zeros(n, dtype=np.int64)
         fall_xy, fall_near = [], []
+        peak = torch.zeros(n, device=env.device)   # peak object COM speed in the window
+        window_peaks = []
+        hand_far = 0
         env.reset()
         with torch.inference_mode():
             for step in range(round(args.seconds/dt)):
                 _, _, terminated, truncated, _ = env.step(action)
                 done = terminated | truncated
+                reasons = getattr(env, '_termination_reasons', None) or {}
+                if 'hand_far' in reasons:
+                    hand_far += int((done & reasons['hand_far']).sum())
                 since += 1
+                peak = torch.where(since <= window, torch.maximum(peak, env.object.data.root_lin_vel_w.norm(dim=-1)), peak)
                 touched |= (env.touch_raw[..., 0] > 0).any(-1)
                 rel = env.object.data.root_pos_w-env.scene.env_origins
                 near = torch.minimum(near, (env.robot.data.body_pos_w[:, palm]-env.object.data.root_pos_w).norm(dim=-1))
@@ -93,16 +101,19 @@ def main():
                     robot_falls[ids] += robot
                     fall_xy += rel[event, :2].tolist()
                     fall_near += near[event].tolist()
+                    window_peaks += peak[event].tolist()
                     counted[event] = True
                 finished = (since == window) & ~counted
                 if finished.any():
                     for i, xy in zip(finished.nonzero().flatten().tolist(), rel[finished, :2].tolist()):
                         settle_xy[i].append(xy)
+                    window_peaks += peak[finished].tolist()
                     counted[finished] = True
                 spawns += (since == 1).cpu().numpy()
                 since[done] = 0
                 touched[done] = False
                 near[done] = 9.
+                peak[done] = 0.
                 counted[done] = False
         per_family = {}
         for fam in sorted(set(families)):
@@ -125,6 +136,11 @@ def main():
                       robot_fall_events=int(robot_falls.sum()),
                       palm_min_dist_quantiles_m=np.quantile(fn, [.05, .25, .5, .75]).tolist() if len(fn) else None,
                       falls_with_palm_never_within_10cm=int((fn > .10).sum()))
+        wp_ = np.array(window_peaks)
+        report.update(hand_far_terminations=hand_far,
+                      window_peak_object_speed=dict(spawns=len(wp_), quantiles_50_90_99=np.quantile(wp_, [.5, .9, .99]).tolist(),
+                                                    max=float(wp_.max()), over_2=float((wp_ > 2).mean()),
+                                                    over_5=float((wp_ > 5).mean()), over_10=float((wp_ > 10).mean())))
         report.update(completed=True, num_envs=n, seconds=args.seconds, window_s=args.window,
                       total_spawns=int(spawns.sum()), untouched_falls=int(falls.sum()),
                       untouched_fall_rate=float(falls.sum()/max(spawns.sum(), 1)),
@@ -133,7 +149,8 @@ def main():
         (args.output/'per_object.json').write_text(json.dumps(per_object))
         print('SPAWN_CHECK '+json.dumps({k: report[k] for k in ('total_spawns', 'untouched_falls',
             'untouched_fall_rate', 'per_family', 'fall_events', 'fall_edges_at_crossing', 'robot_fall_events',
-            'palm_min_dist_quantiles_m', 'falls_with_palm_never_within_10cm')}), flush=True)
+            'palm_min_dist_quantiles_m', 'falls_with_palm_never_within_10cm', 'hand_far_terminations',
+            'window_peak_object_speed')}), flush=True)
     except BaseException as error:
         report.update(error=str(error), traceback=traceback.format_exc())
         raise
