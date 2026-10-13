@@ -343,7 +343,11 @@ class G1SonicTouchMjEnv:
         self.robot.write_data_to_sim(advance=advance)
         self.object.write_data_to_sim()
 
+    # physxRigidBody:maxAngularVelocity schema default (5729.58 deg/s), unchanged by Isaac's object bake.
+    PHYSX_MAX_ANGULAR_VELOCITY = 100.
+
     def _after_physics_step(self):
+        self.object.limit_angular_velocity(self.PHYSX_MAX_ANGULAR_VELOCITY)
         self.capture_touch(self._sim_step_counter)
 
     # ======================================================================

@@ -180,6 +180,11 @@ class MjRigidObject:
         self.default_mass = default_mass
         self._mocap = entity.is_mocap if hasattr(entity, 'is_mocap') else entity.indexing.mocap_id is not None
         self._wrench = None
+        self._free_dof = None
+        if not self._mocap:
+            model = sim.mj_model
+            joint = [j for j in range(model.njnt) if model.jnt_bodyid[j] == entity.indexing.root_body_id]
+            self._free_dof = int(model.jnt_dofadr[joint[0]])
 
     def write_root_pose_to_sim(self, pose, env_ids=None):
         ids = _ids(env_ids, self.num_instances, self.device)
@@ -192,6 +197,18 @@ class MjRigidObject:
         if self._mocap:
             raise RuntimeError('Kinematic table has no velocity state')
         self.entity.write_root_com_velocity_to_sim(velocity, env_ids=_ids(env_ids, self.num_instances, self.device))
+
+    def limit_angular_velocity(self, max_rad_s):
+        """PhysX caps each dynamic rigid body's angular speed (physxRigidBody:
+        maxAngularVelocity, schema default 5729.58 deg/s = 100 rad/s; Isaac's
+        object bake does not override it). MuJoCo has no cap, and its explicit
+        gyroscopic term diverges for fast-spinning anisotropic bodies (an
+        ejected eraser went 47 -> 2.8e6 rad/s in free flight). Same norm clamp.
+        """
+        dof = self._free_dof
+        w = self.sim.data.qvel[:, dof+3:dof+6]          # body-frame angular velocity
+        speed = w.norm(dim=-1, keepdim=True)
+        self.sim.data.qvel[:, dof+3:dof+6] = w*torch.clamp(max_rad_s/speed.clamp_min(1e-9), max=1.)
 
     def set_external_force_and_torque(self, forces, torques, env_ids=None, body_ids=None, is_global=False):
         if not is_global or env_ids is not None or body_ids is not None:
