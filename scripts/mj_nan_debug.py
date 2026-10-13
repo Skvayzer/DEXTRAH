@@ -28,9 +28,10 @@ def main():
     n = env.num_envs
     d = env.sim.wp_data
     m = env.sim.mj_model
-    robot_q = env.robot.entity.indexing.joint_q_adr.cpu().tolist()
-    free_q = env.robot.entity.indexing.free_joint_q_adr.cpu().tolist()
-    obj_q = env.object.entity.indexing.free_joint_q_adr.cpu().tolist()
+    jq = lambda name: int(m.jnt_qposadr[m.joint(name).id])
+    free_q = list(range(jq('robot/floating_base_joint'), jq('robot/floating_base_joint')+7))
+    obj_q = list(range(jq('object/object_free'), jq('object/object_free')+7))
+    robot_q = [i for i in range(free_q[-1]+1, obj_q[0])]
     env.reset()
     action = torch.zeros(n, 70, device='cuda:0')
     action[:, 64:] = -1.
@@ -48,9 +49,14 @@ def main():
         if bad.any() and result['first_nan'] is None:
             w = int(bad.nonzero()[0])
             def which(q):
-                return dict(robot_root=bool((~torch.isfinite(q[w, free_q])).any()) if free_q else None,
-                            robot_joints=int((~torch.isfinite(q[w, robot_q])).sum()),
-                            object=bool((~torch.isfinite(q[w, obj_q])).any()))
+                q = q[w].cpu()
+                v = q.shape[0] < m.nq   # qvel: free joints have 6 dofs
+                f, o = (slice(0, 6), slice(m.nv-6, m.nv)) if v else (slice(free_q[0], free_q[-1]+1), slice(obj_q[0], obj_q[-1]+1))
+                j = slice(f.stop, o.start)
+                bad_joints = [m.joint(int(m.dof_jntid[k])).name for k in range(j.start, j.stop) if not torch.isfinite(q[k])] if v else None
+                return dict(robot_root=bool((~torch.isfinite(q[f])).any()),
+                            robot_joints=int((~torch.isfinite(q[j])).sum()), bad_joints=bad_joints,
+                            object=bool((~torch.isfinite(q[o])).any()))
             nefc = wp.to_torch(d.nefc)
             world = wp.to_torch(d.contact.worldid)
             nacon = int(wp.to_torch(d.nacon))
@@ -62,7 +68,7 @@ def main():
                 overflow_bits=int(overflow[w]), total_contacts=nacon,
                 last_finite=None if prev is None else dict(
                     max_abs_qvel=float(prev[1][w].abs().max()), argmax_qvel=int(prev[1][w].abs().argmax()),
-                    root_pos=prev[0][w, :3].tolist(), object_pos=prev[0][w, obj_q[:3]].tolist() if obj_q else None))
+                    root_pos=prev[0][w, :3].tolist(), object_pos=prev[0][w].cpu()[obj_q[:3]].tolist()))
             dof = result['first_nan']['last_finite']['argmax_qvel'] if prev is not None else None
             if dof is not None:
                 result['first_nan']['last_finite']['argmax_dof_joint'] = m.joint(int(m.dof_jntid[dof])).name
