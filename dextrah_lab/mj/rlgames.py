@@ -26,6 +26,10 @@ class MjRlGamesVecEnv:
         low, high = env.single_action_space.low, env.single_action_space.high
         self.action_space = gym.spaces.Box(np.maximum(low, -clip_actions), np.minimum(high, clip_actions))
 
+    @property
+    def device(self):   # RlGamesVecEnvWrapper.device; the P2P rl_games fork moves actions there
+        return self._sim_device
+
     def get_number_of_agents(self):
         return 1
 
