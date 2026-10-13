@@ -34,6 +34,8 @@ class SonicBodyCfg:
     body_table_contact_termination: bool = False
     body_table_contact_force_n: float = 2.
     body_table_contact_steps: int = 3
+    # False: sensors and metrics only; table contact no longer ends episodes.
+    body_table_contact_terminates: bool = True
     # True: upstream Play2Perfect scene path (no factorized templates, no PhysX
     # replication), so every environment simulates its own assigned object.
     # The G1 factorized path simulated env_0's object everywhere while BPS and
@@ -254,8 +256,9 @@ class G1SonicTouchEnv(G1Revo2TouchEnv):
             self._body_table_contact = self._body_table_count >= cfg.body_table_contact_steps
             self._body_table_force = force
             # Same terminal treatment as a robot fall: a failure, never a time-out bootstrap.
-            task_terminated = task_terminated | self._body_table_contact
-            truncated = truncated & ~self._body_table_contact
+            if cfg.body_table_contact_terminates:
+                task_terminated = task_terminated | self._body_table_contact
+                truncated = truncated & ~self._body_table_contact
         # A robot fall is NOT the source task's object-fall metric.
         return combine_terminations(task_terminated, truncated, self._body_fallen, self._body_numerical_failure)
 

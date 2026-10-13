@@ -44,6 +44,8 @@ def main():
                    help='With --reset-best: epochs after the resume before best-return tracking starts')
     p.add_argument('--reset-best', action='store_true',
                    help='After --resume, forget the parent run best return so this run saves its own best checkpoint')
+    p.add_argument('--body-table-contact-monitor-only', action='store_true',
+                   help='Keep body-table contact sensors/metrics but do not end episodes on contact')
     p.add_argument('--per-env-object-physics', action='store_true',
                    help='Upstream scene path: each environment simulates its own assigned object')
     p.add_argument('--body-table-contact-termination', action='store_true',
@@ -135,6 +137,9 @@ def main():
         cfg.sonic_body.table_supports_body = not args.no_table_body_support
         cfg.sonic_body.body_table_contact_termination = args.body_table_contact_termination
         cfg.sonic_body.per_env_object_physics = args.per_env_object_physics
+        if args.body_table_contact_monitor_only:
+            cfg.sonic_body.body_table_contact_termination = True
+            cfg.sonic_body.body_table_contact_terminates = False
         if args.body_table_contact_termination and args.no_table_body_support:
             raise ValueError('Contact termination requires real table collisions')
         frozen = args.frozen_pretrained_sonic
@@ -169,6 +174,9 @@ def main():
         else:
             contract['new_body_exploration_std_rad'] = .025
         contract['body_termination'] = cfg.sonic_body.to_dict()
+        if args.body_table_contact_monitor_only:
+            contract['intentional_changes'] = contract['intentional_changes'] + [
+                'body_table_contact_logged_only_no_termination']
         if args.per_env_object_physics:
             contract['intentional_changes'] = contract['intentional_changes'] + [
                 'per_env_object_physics_upstream_scene_path_no_physx_replication']
