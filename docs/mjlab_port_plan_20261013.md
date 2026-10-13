@@ -84,3 +84,31 @@ Each stage must pass before the next, and runs one GPU job at a time.
 - No determinism.
 - Python overhead plus SONIC inference every step.
 - PhysX velocity clamp and friction-combine differences.
+
+## Status, 2026-10-13 (late)
+
+Isaac backend unchanged; `--backend mjlab` / `BACKEND=mjlab` selects the port.
+
+* Asset parity vs the Isaac dump (job 1112): 0 issues (`scripts/mj_asset_parity.py`).
+* Contact capacity (job 1126): <= 49 contacts and <= 150 constraint rows per
+  world, no overflow at 9216 envs; defaults nconmax 96 / njmax 600.
+* Spawn fix (user decision, opt-in `--spawn-on-table`, both backends): no
+  table intersection, oriented footprint 1 cm inside the table. Isaac passive
+  untouched falls 32% -> 17.7% (marker/screwdriver ~32%: round handles roll).
+* Object launches on mjlab, root causes (single-world mujoco_warp replay of
+  captured steps, `outputs/diag/`):
+  1. Free joint at the URDF link origin couples a fast spin into translation
+     -> object body frame at the COM; adapter keeps the link pose API.
+  2. Objects spawn overlapping the open hand; MuJoCo solves contacts against
+     the explicit Revo2 servo force on zero-armature 9 g finger links
+     (60-160 N) -> `ContactParams.hand_armature = 1e-3` (MuJoCo-only).
+  Spawn-window peak object speed > 5 m/s: 8.7% -> 0% (Isaac 0.77%).
+* Zero-shot run-1105 policy on mjlab (600 envs x 30 s, deterministic, 1 cm
+  tolerance): ever lifted 74% (Isaac training 75%), any goal 8% (Isaac 33%),
+  0.17 goals/episode (Isaac 2.9). Remaining gap is precision manipulation;
+  needs fine-tuning on mjlab.
+* Training path works (smoke run 1151, 9216 envs, resume 1105 + RESET_BEST):
+  57k env-steps/s step+inference (Isaac 52.6k), best checkpoints saved after
+  the 200-epoch delay.
+* Open: Stage-2 PD step-response protocol; one unreproduced segfault at env
+  build (job 1146).
