@@ -27,10 +27,11 @@ def main():
     p.add_argument('--window', type=float, default=3., help='seconds after reset that count as spawn')
     p.add_argument('--backend', choices=['isaac', 'mjlab'], default='isaac')
     p.add_argument('--torch-memory-limit-gib', type=float, default=6.)
-    p.add_argument('--device', default='cuda:0')
     if p.parse_known_args()[0].backend == 'isaac':
         from isaaclab.app import AppLauncher
-        AppLauncher.add_app_launcher_args(p)
+        AppLauncher.add_app_launcher_args(p)   # adds --device
+    else:
+        p.add_argument('--device', default='cuda:0')
     args = p.parse_args()
     if args.output.exists() or args.num_envs % 6:
         raise ValueError('Fresh output and a multiple of six environments')
