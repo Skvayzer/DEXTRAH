@@ -73,8 +73,12 @@ class ContactReader:
         nacon = wp.to_torch(self.sim.wp_data.nacon)
         active = torch.arange(self.naconmax, device=self.device) < nacon
         active &= (wp.to_torch(c.type) & 1) > 0
-        world = torch.where(active, world, 0).clamp(0, self.n-1)
-        g0, g1 = geom[:, 0].clamp_min(0), geom[:, 1].clamp_min(0)
+        # Inactive slots hold stale or uninitialised ids: never index with them.
+        ngeom = self.partner.numel()
+        active &= (geom >= 0).all(-1) & (geom < ngeom).all(-1) & (world >= 0) & (world < self.n)
+        world = torch.where(active, world, 0)
+        g0 = torch.where(active, geom[:, 0], 0)
+        g1 = torch.where(active, geom[:, 1], 0)
         normal = frame[:, 0]
         fn = (force*normal).sum(-1, keepdim=True)*normal             # normal part on geom[1]
         ff = force-fn                                                 # friction part on geom[1]
