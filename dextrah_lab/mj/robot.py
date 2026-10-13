@@ -42,6 +42,15 @@ class ContactParams:
     # takes the max, so 1.0 reproduces the effective coefficient.
     marker_friction: float = 1.0
     maxhullvert: int = 64
+    # Revo2 finger joints (PhysX armature 0). MuJoCo solves contacts with the
+    # explicit actuator force on the 9 g finger links; with zero armature an
+    # open-commanded finger overlapping an object at reset pushed it with
+    # 60-160 N for a whole 1/120 s step (launches at 10-19 m/s; replayed in
+    # single-world mujoco_warp, gone with the servo off). PhysX solves the
+    # implicit drive together with the contacts. Armature gives the contact
+    # solve a finger inertia; the servo time constant armature/kv (<= 1 ms)
+    # stays far below the 8.3 ms step, so free finger motion is unchanged.
+    hand_armature: float = 0.
     # Diagnostics only: robot geoms collide with nothing but the ground.
     robot_ground_only: bool = False
 
@@ -151,7 +160,7 @@ def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF, implicit_drive_dt
             act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
             act.forcerange = (-m.effort, m.effort)
         else:   # Revo2 hands: velocity servo, see hand_servo()
-            joint.armature = 0.
+            joint.armature = contact.hand_armature
             act.set_to_velocity(kv=hand_servo(joint.name, path)['kv'])
             act.forcelimited = mujoco.mjtLimited.mjLIMITED_FALSE
     return spec

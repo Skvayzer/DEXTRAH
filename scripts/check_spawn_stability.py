@@ -34,6 +34,7 @@ def main():
         AppLauncher.add_app_launcher_args(p)   # adds --device
     else:
         p.add_argument('--device', default='cuda:0')
+        p.add_argument('--contact', type=json.loads, default={}, help='mjlab ContactParams overrides')
     args = p.parse_args()
     if args.output.exists() or args.num_envs % 6:
         raise ValueError('Fresh output and a multiple of six environments')
@@ -54,7 +55,12 @@ def main():
             env = make_isaac_env(args)
         else:
             from dextrah_lab.mj.factory import make_mj_env
-            env = make_mj_env(args.num_envs, args.device, seed=42, spawn_on_table=args.spawn_on_table)
+            from dextrah_lab.mj.robot import ContactParams
+            from dextrah_lab.mj.scene import SceneParams
+            contact = ContactParams(**{k: tuple(v) if isinstance(v, list) else v for k, v in args.contact.items()})
+            report['contact'] = vars(contact)
+            env = make_mj_env(args.num_envs, args.device, seed=42, spawn_on_table=args.spawn_on_table,
+                              scene_params=SceneParams(contact=contact))
         n, dt = env.num_envs, env.step_dt
         window = round(args.window/dt)
         action = torch.zeros(n, 70, device=env.device)
