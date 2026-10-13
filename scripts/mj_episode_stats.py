@@ -12,12 +12,20 @@ def main():
     p.add_argument('--num-envs', type=int, default=120)
     p.add_argument('--seconds', type=float, default=5.)
     p.add_argument('--checkpoint', type=Path)
+    p.add_argument('--contact', type=json.loads, default={}, help='ContactParams overrides')
+    p.add_argument('--mujoco', type=json.loads, default=None)
+    p.add_argument('--label', default='default')
     args = p.parse_args()
     import torch
     sys.path.insert(0, str(Path(__file__).parent))
     from dextrah_lab.mj.factory import make_mj_env
     from mj_contact_capacity import build_policy
-    env = make_mj_env(args.num_envs, 'cuda:0')
+    from dextrah_lab.mj.robot import ContactParams
+    from dextrah_lab.mj.scene import SceneParams
+    contact = ContactParams(**{k: tuple(v) if isinstance(v, list) else v for k, v in args.contact.items()})
+    env = make_mj_env(args.num_envs, 'cuda:0', scene_params=SceneParams(contact=contact), mujoco_cfg=args.mujoco)
+    peak_speed = torch.zeros(n if False else args.num_envs, device='cuda:0')
+    speeds = []
     n = env.num_envs
     obs, _ = env.reset()
     model = states = None
@@ -46,6 +54,11 @@ def main():
             ep = env.episode_length_buf.clone()
             obs, r, te, tr, info = env.step(action)
             done = te | tr
+            speed = env.object.data.root_lin_vel_w.norm(dim=-1)
+            young = env.episode_length_buf <= 30
+            peak_speed = torch.where(done, torch.zeros_like(peak_speed), torch.maximum(peak_speed, torch.where(young, speed, 0.)))
+            if step % 30 == 29:
+                speeds.append(float(peak_speed.max()))
             if states is not None:
                 for s in states:
                     s[:, done, :] = 0
@@ -55,7 +68,10 @@ def main():
                     counts[k] = counts.get(k, 0)+int((done & v.bool()).sum())
             counts['episodes'] = counts.get('episodes', 0)+int(done.sum())
             lengths += (ep[done]+1).tolist()
-    print('EPISODE_STATS '+json.dumps(dict(counts=counts, mean_len_steps=sum(lengths)/max(len(lengths), 1),
+    import numpy as np
+    print('EPISODE_STATS '+json.dumps(dict(label=args.label, hand_far_rate=counts.get('done_hand_far', 0)/max(counts['episodes'], 1),
+                                            fall_rate=counts.get('done_fall', 0)/max(counts['episodes'], 1),
+                                            max_post_spawn_object_speed=max(speeds) if speeds else None, counts=counts, mean_len_steps=sum(lengths)/max(len(lengths), 1),
                                             first_step=first)), flush=True)
     os._exit(0)
 
