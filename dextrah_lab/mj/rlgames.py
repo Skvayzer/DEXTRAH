@@ -5,9 +5,11 @@ Mirrors `isaaclab_rl.rl_games.RlGamesVecEnvWrapper` as used by Play2Perfect's
 observations clipped to the given bounds, dones = terminated | truncated,
 `extras['time_outs'] = truncated` (infinite-horizon task).
 """
-import gymnasium as gym
 import numpy as np
 import torch
+# rl_games allocates its buffers only for `type(space) is gym.spaces.Box` of
+# the legacy gym package it imports; gymnasium spaces leave 'obses' = None.
+from rl_games.common.experience import gym
 
 
 class MjRlGamesVecEnv:
