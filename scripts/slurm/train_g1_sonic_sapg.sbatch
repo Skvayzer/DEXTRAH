@@ -27,6 +27,7 @@ if [[ "${BACKEND:-isaac}" == mjlab ]]; then
     launch_args=(--backend mjlab)
     if [[ -n "${MJ_NCONMAX:-}" ]]; then extra_args+=(--mj-nconmax "$MJ_NCONMAX"); fi
     if [[ -n "${MJ_NJMAX:-}" ]]; then extra_args+=(--mj-njmax "$MJ_NJMAX"); fi
+    if [[ "${MJ_NAN_CAPTURE:-0}" == 1 ]]; then extra_args+=(--mj-nan-capture); fi
 else
     python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py tests/test_sapg_boundary_gc.py
 fi

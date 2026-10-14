@@ -132,6 +132,7 @@ class G1SonicTouchMjEnv:
         self._setup_scene(reference)
         self._sim_step_counter = 0
         self.common_step_counter = 0
+        self._nan_capture = None
         self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
         self.reset_terminated = torch.zeros(num_envs, device=device, dtype=torch.bool)
         self.reset_time_outs = torch.zeros_like(self.reset_terminated)
@@ -331,7 +332,11 @@ class G1SonicTouchMjEnv:
             self._sim_step_counter += 1
             self._apply_action()
             self._write_data_to_sim()
+            if self._nan_capture is not None:
+                self._nan_capture.before_step(self._sim_step_counter)
             self.sim.step()
+            if self._nan_capture is not None:
+                self._nan_capture.after_step(self._sim_step_counter)
             self._after_physics_step()
         self.sim.forward()
         self.episode_length_buf += 1
@@ -346,6 +351,12 @@ class G1SonicTouchMjEnv:
             self.sim.forward()
         self.obs_buf = self._get_observations()
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
+
+    def enable_nan_capture(self, out_dir, depth=4):
+        """Diagnostic only: record the first non-finite world (mj/nan_capture.py)."""
+        from .nan_capture import NanCapture
+        self._nan_capture = NanCapture(self, out_dir, depth=depth)
+        return self._nan_capture
 
     def _write_data_to_sim(self, advance=True):
         # advance=False after resets: no physics step follows the write yet.
@@ -436,11 +447,16 @@ class G1SonicTouchMjEnv:
     def _get_dones(self):
         data, cfg = self.robot.data, self.cfg.sonic_body
         # G1SonicTouchEnv (pre)
-        self._body_fallen, self._body_numerical_failure, speed = classify_body_state(
-            data.joint_pos, data.joint_vel, data.root_state_w, data.projected_gravity_b,
-            self.scene.env_origins, self.object.data.root_state_w,
-            minimum_height=cfg.minimum_pelvis_height, minimum_upright=cfg.minimum_upright_cosine,
-            maximum_joint_speed=cfg.maximum_joint_speed, numerical_failure_mode=cfg.numerical_failure_mode)
+        state = (data.joint_pos, data.joint_vel, data.root_state_w, data.projected_gravity_b)
+        try:
+            self._body_fallen, self._body_numerical_failure, speed = classify_body_state(
+                *state, self.scene.env_origins, self.object.data.root_state_w,
+                minimum_height=cfg.minimum_pelvis_height, minimum_upright=cfg.minimum_upright_cosine,
+                maximum_joint_speed=cfg.maximum_joint_speed, numerical_failure_mode=cfg.numerical_failure_mode)
+        except RuntimeError:
+            if self._nan_capture is not None:
+                self._nan_capture.dump_env_state(self._sim_step_counter, state+(self.object.data.root_state_w,))
+            raise
         self._body_falls_total += self._body_fallen.sum()
         self._body_numerical_failures_total += self._body_numerical_failure.sum()
         self._body_max_joint_speed = torch.maximum(self._body_max_joint_speed, speed.max())

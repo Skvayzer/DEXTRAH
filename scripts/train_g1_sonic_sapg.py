@@ -43,6 +43,8 @@ def main():
                    help='mjlab: MuJoCo Warp port of the run-1105 task (dextrah_lab/mj); isaac: unchanged PhysX path')
     p.add_argument('--mj-nconmax', type=int, help='mjlab: contacts allocated per world (pooled)')
     p.add_argument('--mj-njmax', type=int, help='mjlab: constraint rows per world')
+    p.add_argument('--mj-nan-capture', action='store_true',
+                   help='mjlab diagnostic: record the first non-finite world to OUTPUT/nan_capture (no dynamics change)')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--bootstrap', type=Path)
     p.add_argument('--frozen-pretrained-sonic', action='store_true',
@@ -264,7 +266,8 @@ def main():
                 nconmax=args.mj_nconmax or DEFAULT_NCONMAX, njmax=args.mj_njmax or DEFAULT_NJMAX,
                 mujoco_options=DEFAULT_MUJOCO, contact=asdict(ContactParams()),
                 joint_velocity_limits='body: PD setpoint rate-limited at the PhysX max joint velocity; Revo2: velocity servo kv=effort/vmax, v_cmd=clamp(kp*err/kv, +-vmax) (robot.hand_servo)',
-                asset_parity='scripts/mj_asset_parity.py: 0 mismatches vs Isaac dump (job 1112)')
+                asset_parity='scripts/mj_asset_parity.py: 0 mismatches vs Isaac dump (job 1112)',
+                nan_capture=bool(args.mj_nan_capture))
             contract['simulator'] = mj_settings
             contract['intentional_changes'] = contract['intentional_changes'] + ['simulator_mjlab_mujoco_warp']
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
@@ -306,6 +309,8 @@ def main():
             env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device,
                                     nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
                                     mujoco_cfg=mj_settings['mujoco_options'])
+            if args.mj_nan_capture:
+                env.enable_nan_capture(args.output/'nan_capture')
         else:
             env = G1SonicTouchEnv(cfg, sonic=sonic)
         if args.diagnostic_capture_seconds > 0:
