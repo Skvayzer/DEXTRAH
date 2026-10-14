@@ -227,8 +227,13 @@ class NanCapture:
                 except Exception:
                     continue
                 if t.ndim >= 1 and t.shape[0] == self.nworld and self.nworld > 1:
+                    # Per-world (expanded) field, or a model dimension that
+                    # happens to equal nworld: keep the slice, and the whole
+                    # array when small; the replay tells them apart by shape.
                     expanded.append(name)
                     model_arrays[name] = t[worlds[:max_worlds]].cpu().numpy()
+                    if t.numel() <= 2_000_000:
+                        model_arrays[name+'#full'] = t.cpu().numpy()
                 elif t.numel() <= FULL_ARRAY_LIMIT:
                     model_arrays[name] = t.cpu().numpy()
             elif isinstance(value, (bool, int, float, str)) or value is None:

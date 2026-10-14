@@ -98,6 +98,8 @@ def main():
         m = mjw.put_model(mjm)
         restored, changed, mismatch = 0, [], []
         for name in saved.files:
+            if name.endswith('#full'):
+                continue
             try:
                 obj, attr = resolve(m, name)
                 cur = getattr(obj, attr)
@@ -107,9 +109,17 @@ def main():
             if not isinstance(cur, wp.array):
                 continue
             val = saved[name]
-            if name in meta['expanded']:
-                val = val[k_model][None]
             t = wp.to_torch(cur)
+            if name in meta['expanded']:
+                # Batched field expanded per world (single-world shape (1, ...)),
+                # or a model dimension equal to nworld (whole array saved).
+                if t.shape[0] == 1 and tuple(t.shape[1:]) == val.shape[1:]:
+                    val = val[k_model][None]
+                elif name+'#full' in saved.files:
+                    val = saved[name+'#full']
+                else:
+                    mismatch.append([name, list(t.shape), list(val.shape), 'per-world candidate'])
+                    continue
             if tuple(t.shape) != val.shape:
                 if val.shape[0] == 1 and tuple(t.shape[1:]) == val.shape[1:]:
                     pass
