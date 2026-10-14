@@ -30,6 +30,9 @@ def main():
     p.add_argument('--mj-nconmax', type=int, help='mjlab: contacts allocated per world (pooled)')
     p.add_argument('--mj-njmax', type=int, help='mjlab: constraint rows per world')
     p.add_argument('--mj-nan-capture', action='store_true', help='mjlab: record the first non-finite world')
+    p.add_argument('--mj-arm-armature', action='store_true',
+                   help='mjlab: G1 motor rotor armature on the 7 arm joints (Isaac profile has 0; MuJoCo arm blows up '
+                        'without it, see dextrah_lab/mj/robot.py ContactParams.g1_arm_armature)')
     p.add_argument('--mj-nan-capture-max-qvel', type=float,
                    help='mjlab diagnostic: also capture (and abort) when any |qvel| exceeds this')
     p.add_argument('--mj-cone-hessian-fix', action='store_true',
@@ -116,7 +119,8 @@ def main():
             mj_settings = dict(task_config=str(RUN_FIXED/'params/env_resolved.yaml'),
                                nconmax=args.mj_nconmax or DEFAULT_NCONMAX, njmax=args.mj_njmax or DEFAULT_NJMAX,
                                mujoco_options=DEFAULT_MUJOCO, mujoco_warp=str(Path(mujoco_warp.__file__).parent),
-                               cone_hessian_fix=args.mj_cone_hessian_fix, nan_capture=args.mj_nan_capture)
+                               cone_hessian_fix=args.mj_cone_hessian_fix, nan_capture=args.mj_nan_capture,
+                               g1_arm_armature=args.mj_arm_armature)
         else:
             cfg = G1Revo2BpsEnvCfg() if args.control else G1Revo2TouchEnvCfg()
             cfg.seed = saved['seed']
@@ -194,9 +198,12 @@ def main():
             (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))
             print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url,flush=True)
         if backend == 'mjlab':
+            from dextrah_lab.mj.robot import ContactParams
+            from dextrah_lab.mj.scene import SceneParams
             env = G1SonicTouchMjEnv(cfg, sonic=None, num_envs=args.num_envs, device=args.device,
                                     nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
-                                    mujoco_cfg=mj_settings['mujoco_options'], fixed_body=True)
+                                    mujoco_cfg=mj_settings['mujoco_options'], fixed_body=True,
+                                    scene_params=SceneParams(contact=ContactParams(g1_arm_armature=args.mj_arm_armature)))
             if args.mj_nan_capture:
                 env.enable_nan_capture(args.output/'nan_capture', max_abs_qvel=args.mj_nan_capture_max_qvel)
             masses = env.sim.model.body_mass[:, env.object.entity.indexing.root_body_id]

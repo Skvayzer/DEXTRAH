@@ -55,6 +55,15 @@ class ContactParams:
     # zero-shot 1105 policy hand_far 61% / 15% / 0.5% (Isaac training 3%).
     # Free finger motion changes by <= 0.07 rad (transient).
     hand_armature: float = 1e-3
+    # Fixed-body task only: the Isaac right-arm profile has armature 0 on the
+    # arm joints. PhysX tolerates it (implicit drives, joint speed capped in the
+    # solver); MuJoCo integrates a force-saturated actuator explicitly, and at
+    # wrist poses where roll and yaw align the arm inertia has a 2.4e-4 kg m^2
+    # mode: 25/5 N m saturated torques then accelerate it at ~6e4 rad/s^2 and
+    # it blows up (captured run 1250: 10 -> -538 rad/s in one step, 1e19 later;
+    # identical in C MuJoCo float64). True: the G1 motors' reflected rotor
+    # inertia (wholebody.actuators, as in the whole-body model and SONIC).
+    g1_arm_armature: bool = False
     # Diagnostics only: robot geoms collide with nothing but the ground.
     robot_ground_only: bool = False
 
@@ -236,6 +245,9 @@ def build_fixed_robot_spec(reference, contact=ContactParams(), path=ROBOT_URDF, 
         else:
             kp, kd = float(reference['joint_stiffness'][i]), float(reference['joint_damping'][i])
             joint.armature = float(reference['joint_armature'][i])
+            if contact.g1_arm_armature:
+                from dextrah_lab.wholebody.actuators import body_motors
+                joint.armature = float(body_motors()[joint.name].armature)
             act.set_to_position(kp=kp, kv=kd+kp*implicit_drive_dt)
             act.forcelimited = mujoco.mjtLimited.mjLIMITED_TRUE
             effort = float(reference['joint_effort_limits'][i])

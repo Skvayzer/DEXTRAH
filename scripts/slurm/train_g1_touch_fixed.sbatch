@@ -36,6 +36,8 @@ if [[ "${BACKEND:-isaac}" == mjlab ]]; then
     if [[ -n "${MJ_NCONMAX:-}" ]]; then extra_args+=(--mj-nconmax "$MJ_NCONMAX"); fi
     if [[ -n "${MJ_NJMAX:-}" ]]; then extra_args+=(--mj-njmax "$MJ_NJMAX"); fi
     if [[ "${MJ_NAN_CAPTURE:-0}" == 1 ]]; then extra_args+=(--mj-nan-capture); fi
+    if [[ -n "${MJ_NAN_CAPTURE_MAX_QVEL:-}" ]]; then extra_args+=(--mj-nan-capture-max-qvel "$MJ_NAN_CAPTURE_MAX_QVEL"); fi
+    if [[ "${MJ_ARM_ARMATURE:-0}" == 1 ]]; then extra_args+=(--mj-arm-armature); fi
     if [[ "${MJ_CONE_HESSIAN_FIX:-0}" == 1 ]]; then
         export PYTHONPATH="$source_snapshot/third_party/mujoco_warp_cone_fix:$PYTHONPATH"
         extra_args+=(--mj-cone-hessian-fix)
