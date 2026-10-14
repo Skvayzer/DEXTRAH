@@ -30,6 +30,8 @@ def main():
     p.add_argument('--mj-nconmax', type=int, help='mjlab: contacts allocated per world (pooled)')
     p.add_argument('--mj-njmax', type=int, help='mjlab: constraint rows per world')
     p.add_argument('--mj-nan-capture', action='store_true', help='mjlab: record the first non-finite world')
+    p.add_argument('--mj-nan-capture-max-qvel', type=float,
+                   help='mjlab diagnostic: also capture (and abort) when any |qvel| exceeds this')
     p.add_argument('--mj-cone-hessian-fix', action='store_true',
                    help='mjlab: require the vendored mujoco_warp with the elliptic cone Hessian fix')
     p.add_argument('--source-run', type=Path, required=True)
@@ -196,7 +198,7 @@ def main():
                                     nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
                                     mujoco_cfg=mj_settings['mujoco_options'], fixed_body=True)
             if args.mj_nan_capture:
-                env.enable_nan_capture(args.output/'nan_capture')
+                env.enable_nan_capture(args.output/'nan_capture', max_abs_qvel=args.mj_nan_capture_max_qvel)
             masses = env.sim.model.body_mass[:, env.object.entity.indexing.root_body_id]
             object_physics = dict(backend='mjlab per-world object geometry and inertials', envs=env.num_envs,
                                   unique_masses=int(torch.unique(masses).numel()))

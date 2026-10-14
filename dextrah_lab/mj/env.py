@@ -376,10 +376,11 @@ class G1SonicTouchMjEnv:
         self.obs_buf = self._get_observations()
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
 
-    def enable_nan_capture(self, out_dir, depth=4):
-        """Diagnostic only: record the first non-finite world (mj/nan_capture.py)."""
+    def enable_nan_capture(self, out_dir, depth=4, max_abs_qvel=None):
+        """Diagnostic only: record the first non-finite (or, with max_abs_qvel,
+        exploding) world (mj/nan_capture.py)."""
         from .nan_capture import NanCapture
-        self._nan_capture = NanCapture(self, out_dir, depth=depth)
+        self._nan_capture = NanCapture(self, out_dir, depth=depth, max_abs_qvel=max_abs_qvel)
         return self._nan_capture
 
     def _write_data_to_sim(self, advance=True):

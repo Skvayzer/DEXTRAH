@@ -65,7 +65,7 @@ def _nonfinite(a):
 
 
 class NanCapture:
-    def __init__(self, env, out_dir, depth=4, stats_interval=2000):
+    def __init__(self, env, out_dir, depth=4, stats_interval=2000, max_abs_qvel=None):
         self.env = env
         self.sim = env.sim
         self.out_dir = Path(out_dir)
@@ -81,6 +81,9 @@ class NanCapture:
                      for f, v in self.inputs.items()}
         self.ring_step = [-1]*self.depth
         self.check = {f: _torch(getattr(d, f)) for f in CHECK_FIELDS}
+        # Optional: also trigger on finite but exploding velocities (onset of a
+        # blow-up, before float32 overflow turns it into NaN).
+        self.max_abs_qvel = max_abs_qvel
         dev = self.check['qpos'].device
         # Running per-world maxima and overflow bits (no host sync per step).
         self.max_nefc = torch.zeros(self.nworld, dtype=torch.int32, device=dev)
@@ -113,11 +116,16 @@ class NanCapture:
         ok = torch.ones(self.nworld, dtype=torch.bool, device=self.max_nefc.device)
         for t in self.check.values():
             ok &= _finite_rows(t)
+        exploding = None
+        if self.max_abs_qvel:
+            exploding = self.check['qvel'].abs().amax(-1) > self.max_abs_qvel
+            ok &= ~exploding
         self._stats(d)
         bad = ~ok
         if bool(bad.any()):
             path = self.dump(step, bad)
-            raise RuntimeError(f'Non-finite simulation state; refusing to feed it to SAPG (captured in {path})')
+            kind = 'Exploding velocity (>%g)' % self.max_abs_qvel if exploding is not None and bool(exploding.any()) else 'Non-finite simulation state'
+            raise RuntimeError(f'{kind}; refusing to feed it to SAPG (captured in {path})')
         self.steps += 1
         self.check_seconds += time.perf_counter()-t0
         if self.steps % self.stats_interval == 0:
