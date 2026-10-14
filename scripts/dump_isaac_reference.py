@@ -50,6 +50,7 @@ def main():
             from dextrah_lab.wholebody import per_env_objects
             resolved = load_yaml(args.fixed_body_run/'params/env_resolved.yaml')
             cfg = G1Revo2TouchEnvCfg()
+            cfg.seed = resolved['seed']   # None-typed default: set before from_dict, as the trainer does
             cfg.from_dict(replace_strings_with_slices(copy.deepcopy(resolved)))
             cfg.scene.num_envs = args.num_envs
             cfg.sim.device = args.device
