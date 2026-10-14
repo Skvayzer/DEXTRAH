@@ -43,6 +43,8 @@ def main():
                    help='mjlab: MuJoCo Warp port of the run-1105 task (dextrah_lab/mj); isaac: unchanged PhysX path')
     p.add_argument('--mj-nconmax', type=int, help='mjlab: contacts allocated per world (pooled)')
     p.add_argument('--mj-njmax', type=int, help='mjlab: constraint rows per world')
+    p.add_argument('--mj-cone-hessian-fix', action='store_true',
+                   help='mjlab: require the vendored mujoco_warp with the elliptic cone Hessian fix (third_party/mujoco_warp_cone_fix)')
     p.add_argument('--mj-nan-capture', action='store_true',
                    help='mjlab diagnostic: record the first non-finite world to OUTPUT/nan_capture (no dynamics change)')
     p.add_argument('--output', type=Path, required=True)
@@ -258,6 +260,9 @@ def main():
         else:
             import mujoco, mujoco_warp, mjlab
             from importlib.metadata import version
+            vendored = 'mujoco_warp_cone_fix' in Path(mujoco_warp.__file__).parts
+            if args.mj_cone_hessian_fix != vendored:
+                raise RuntimeError(f'--mj-cone-hessian-fix={args.mj_cone_hessian_fix} but mujoco_warp is {mujoco_warp.__file__}')
             from dextrah_lab.mj.factory import DEFAULT_MUJOCO, DEFAULT_NCONMAX, DEFAULT_NJMAX
             from dextrah_lab.mj.robot import ContactParams
             from dataclasses import asdict
@@ -267,9 +272,14 @@ def main():
                 mujoco_options=DEFAULT_MUJOCO, contact=asdict(ContactParams()),
                 joint_velocity_limits='body: PD setpoint rate-limited at the PhysX max joint velocity; Revo2: velocity servo kv=effort/vmax, v_cmd=clamp(kp*err/kv, +-vmax) (robot.hand_servo)',
                 asset_parity='scripts/mj_asset_parity.py: 0 mismatches vs Isaac dump (job 1112)',
-                nan_capture=bool(args.mj_nan_capture))
+                nan_capture=bool(args.mj_nan_capture),
+                mujoco_warp_path=str(Path(mujoco_warp.__file__).parent),
+                cone_hessian_fix=dict(enabled=True, sites=3, change='T=max(T,1e-12); ttt=T^3 (was max(T^3,1e-15))',
+                                      solver_sha256=hashlib.sha256(Path(mujoco_warp.__file__).with_name('_src').joinpath('solver.py').read_bytes()).hexdigest())
+                if args.mj_cone_hessian_fix else dict(enabled=False))
             contract['simulator'] = mj_settings
-            contract['intentional_changes'] = contract['intentional_changes'] + ['simulator_mjlab_mujoco_warp']
+            contract['intentional_changes'] = contract['intentional_changes'] + ['simulator_mjlab_mujoco_warp'] + (
+                ['mujoco_warp_elliptic_cone_hessian_fix'] if args.mj_cone_hessian_fix else [])
         (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
         if args.wandb == 'online':
             wandb.config.update(contract, allow_val_change=True)

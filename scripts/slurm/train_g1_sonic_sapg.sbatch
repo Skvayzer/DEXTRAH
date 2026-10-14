@@ -28,6 +28,11 @@ if [[ "${BACKEND:-isaac}" == mjlab ]]; then
     if [[ -n "${MJ_NCONMAX:-}" ]]; then extra_args+=(--mj-nconmax "$MJ_NCONMAX"); fi
     if [[ -n "${MJ_NJMAX:-}" ]]; then extra_args+=(--mj-njmax "$MJ_NJMAX"); fi
     if [[ "${MJ_NAN_CAPTURE:-0}" == 1 ]]; then extra_args+=(--mj-nan-capture); fi
+    if [[ "${MJ_CONE_HESSIAN_FIX:-0}" == 1 ]]; then
+        # Vendored mujoco_warp 3.11.0 with the elliptic cone Hessian fix (third_party/.../README.md).
+        export PYTHONPATH="$source_snapshot/third_party/mujoco_warp_cone_fix:$PYTHONPATH"
+        extra_args+=(--mj-cone-hessian-fix)
+    fi
 else
     python -m pytest -q tests/test_resume_optimizer_devices.py tests/test_training_stack_watchdog.py tests/test_sapg_boundary_gc.py
 fi
