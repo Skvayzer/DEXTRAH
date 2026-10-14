@@ -112,3 +112,33 @@ Isaac backend unchanged; `--backend mjlab` / `BACKEND=mjlab` selects the port.
   the 200-epoch delay.
 * Open: Stage-2 PD step-response protocol; one unreproduced segfault at env
   build (job 1146).
+
+## NaN crash root cause, 2026-10-14
+
+Run 1157 (23,040 envs) aborted after 6.5 h on "Non-finite simulation state".
+Capture run 1213 (`MJ_NAN_CAPTURE=1`, same settings, resumed 1157 `latest.pth`)
+hit it again after 1 h 24 min and recorded the failing world (11650, a
+screwdriver resting on the table; 5 ordinary contacts, no buffer overflow, all
+step inputs finite). Tools: `dextrah_lab/mj/nan_capture.py`,
+`scripts/mj_nan_replay.py`, `mj_nan_batch_replay.py`, `mj_nan_solver_trace.py`.
+
+* The step is a numerical knife edge: identical inputs give NaN in about 55% of
+  23,040 copies (and of repeated single-world solves); float32 atomic-order
+  noise decides. Not hardware (reproducible on demand), not CUDA graphs.
+* Mechanism (solver trace): at Newton iteration 3 an object-table contact
+  lands in the elliptic middle zone with tangential residual T = 5.9e-6.
+  mujoco_warp 3.11.0 computes the cone curvature with
+  `ttt = max(T^3, MJ_MINVAL=1e-15)` while `-mu/T` stays exact; C MuJoCo uses
+  `mu*N/(T*T*T)` with no clamp. For T < 1e-5 the curvature is under-weighted,
+  the cone Hessian is indefinite, the object block of H gets eigenvalue
+  -6.2e-4, and Warp's tile Cholesky (`sqrt(pivot)`, no guard; C MuJoCo clamps
+  pivots at mjMINVAL) produces NaN at the object's spin dof; the line search
+  then returns alpha = 0 and everything is NaN.
+* Fix tested: consistent `T = max(T, 1e-12); ttt = T^3` at the three cone
+  Hessian sites (sparse, compact, dense) in a private copy
+  (`outputs/diag/mjwarp_cone_fix`). Same replay: 0 NaN in 481,300 solves
+  (stock: 51-55% per batch); qacc unchanged (identical difference to C MuJoCo
+  float64, 3.0 of max 2,010; copy spread 1.3e-3 as before).
+* Capture stats (run 1213, 15k physics steps): max 216 of 300 constraint
+  rows per world, max 70 contacts in a world, no overflow.
+* Not yet adopted for training (simulator code change; needs a decision).
