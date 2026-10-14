@@ -2,13 +2,13 @@
 """Self-test of the mjlab NaN capture + replay (diagnostic tooling only).
 
 Passive robot (zero latent residual, open fingers) at the run-1157 buffer
-sizes. After a few policy steps a NaN is injected into one world's actuator
-command right before a physics step; the capture must fire on that step,
+sizes. After a few policy steps a NaN is injected into one world's applied
+generalized force right before a physics step; the capture must fire on that step,
 dump the world, and `mj_nan_replay.py` must (a) replay the earlier buffered
 steps with small error and (b) place the first non-finite stage at
-actuation. The NaN goes into a Revo2 velocity servo: the body position
-actuators are force-limited and CUDA's fmin/fmax inside the force clamp
-turn a NaN command into the limit, so it would never propagate.
+acceleration (qfrc_smooth). A NaN actuator command would not propagate:
+every robot joint carries the URDF effort as a joint actuator-force range,
+and CUDA's fmin/fmax inside that clamp return the limit for a NaN.
 """
 import argparse
 import json
@@ -36,13 +36,12 @@ def main():
     action = torch.zeros(env.num_envs, 70, device='cuda:0')
     action[:, 64:] = -1.
     original = env._write_data_to_sim
-    servo_ctrl = int(env.robot._ctrl_ids[env.robot._servo_ids[0]])
     state = dict(policy_step=0)
 
     def write(advance=True):
         original(advance)
         if advance and state['policy_step'] == args.inject_policy_step:
-            env.sim.data.ctrl[args.inject_world, servo_ctrl] = float('nan')
+            env.sim.data.qfrc_applied[args.inject_world, 0] = float('nan')
     env._write_data_to_sim = write
     raised = None
     with torch.inference_mode():
@@ -59,7 +58,7 @@ def main():
     summary = json.loads((cap.dumped/'summary.json').read_text())
     w = summary['per_world'][str(args.inject_world)]
     assert summary['worlds'] == [args.inject_world], summary['worlds']
-    assert w['nonfinite_inputs_at_failing_step'] == ['ctrl'], w['nonfinite_inputs_at_failing_step']
+    assert w['nonfinite_inputs_at_failing_step'] == ['qfrc_applied'], w['nonfinite_inputs_at_failing_step']
     replay = subprocess.run([sys.executable, 'scripts/mj_nan_replay.py', str(cap.dumped)],
                             capture_output=True, text=True)
     print(replay.stdout[-6000:], replay.stderr[-6000:], flush=True)
@@ -67,7 +66,7 @@ def main():
     out = json.loads((cap.dumped/f'replay_w{args.inject_world}.json').read_text())
     print('SELFTEST first stage', out['first_nonfinite_stage'], 'fidelity',
           [round(f['qpos_max_abs_diff'], 9) for f in out['fidelity']], flush=True)
-    assert out['first_nonfinite_stage'] == 'actuation', out['first_nonfinite_stage']
+    assert out['first_nonfinite_stage'] == 'acceleration', out['first_nonfinite_stage']
     print('SELFTEST PASSED', flush=True)
     sys.stdout.flush()
     os._exit(0)
