@@ -203,7 +203,8 @@ def main():
                 mjw_types.IntegratorType.IMPLICITFAST, mjw_types.IntegratorType.IMPLICIT) else forward.euler(m, d)),
         ]
         staged, first = [], None
-        seen = set()
+        seen = set(nonfinite_fields(d, wp, mjw_types))   # inputs already non-finite
+        staged.append(dict(stage='inputs', nonfinite=sorted(seen)))
         for name, fn in stages:
             if sleep:
                 staged.append(dict(stage=name, note='sleep enabled: staged replay not exact'))
@@ -266,13 +267,33 @@ def main():
                     setattr(mjd, f, float(val))
                 else:
                     target[:] = np.asarray(val).reshape(np.shape(target))
-        mujoco.mj_forward(mjm, mjd)
-        c_contacts = [dict(geom=[int(mjd.contact.geom1[i]), int(mjd.contact.geom2[i])], dist=float(mjd.contact.dist[i]))
-                      for i in range(mjd.ncon)]
-        mujoco.mj_step(mjm, mjd)
-        out['c_mujoco'] = dict(finite=bool(np.isfinite(mjd.qpos).all() and np.isfinite(mjd.qvel).all()
-                                           and np.isfinite(mjd.qacc).all()),
-                               ncon=len(c_contacts), contacts=c_contacts, nefc=int(mjd.nefc),
+        # Stage by stage: mj_step/mj_forward reset the whole state on a bad
+        # qacc (mjWARN_BADQACC), which would hide the result.
+        c_stages, c_first = [], None
+        def c_bad():
+            names = ('qacc_smooth', 'qfrc_smooth', 'qacc', 'qfrc_constraint', 'efc_force', 'efc_J', 'efc_D',
+                     'efc_aref', 'actuator_force', 'qfrc_actuator', 'qfrc_bias', 'xpos', 'xquat', 'cinert', 'qM')
+            out_ = [n for n in names if np.size(getattr(mjd, n)) and not np.isfinite(getattr(mjd, n)).all()]
+            if mjd.ncon and not (np.isfinite(mjd.contact.dist).all() and np.isfinite(mjd.contact.frame).all()):
+                out_.append('contact')
+            return out_
+        c_seen = set(c_bad())
+        for name, fn in (('fwdPosition', mujoco.mj_fwdPosition), ('fwdVelocity', mujoco.mj_fwdVelocity),
+                         ('fwdActuation', mujoco.mj_fwdActuation), ('fwdAcceleration', mujoco.mj_fwdAcceleration),
+                         ('fwdConstraint', mujoco.mj_fwdConstraint)):
+            fn(mjm, mjd)
+            bad = set(c_bad())
+            c_stages.append(dict(stage=name, new_nonfinite=sorted(bad-c_seen)))
+            if bad-c_seen and c_first is None:
+                c_first = name
+            c_seen |= bad
+            if name == 'fwdPosition':
+                c_contacts = [dict(geom=[int(mjd.contact.geom1[i]), int(mjd.contact.geom2[i])],
+                                   dist=float(mjd.contact.dist[i])) for i in range(mjd.ncon)]
+        out['c_mujoco'] = dict(first_nonfinite_stage=c_first, stages=c_stages, ncon=len(c_contacts),
+                               contacts=c_contacts, nefc=int(mjd.nefc),
+                               qacc_finite=bool(np.isfinite(mjd.qacc).all()),
+                               qacc_max_abs=float(np.nanmax(np.abs(mjd.qacc))),
                                warnings={mujoco.mjtWarning(i).name: int(mjd.warning[i].number)
                                          for i in range(len(mjd.warning)) if mjd.warning[i].number})
     except Exception as e:
