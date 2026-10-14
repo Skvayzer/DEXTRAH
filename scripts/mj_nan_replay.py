@@ -66,6 +66,79 @@ def walk(obj, prefix=''):
             yield prefix+f.name, value
 
 
+
+def restore_model(mjm, saved, meta, k_model):
+    """Single-world mujoco_warp Model of captured world `meta['worlds'][k_model]`.
+
+    Per-world (expanded) fields keep their batched (1, ...) shape, which
+    mujoco_warp broadcasts to any nworld (index worldid % 1).
+    """
+    import torch
+    import warp as wp
+    import mujoco_warp as mjw
+    m = mjw.put_model(mjm)
+    restored, changed, mismatch = 0, [], []
+    for name in saved.files:
+        if name.endswith('#full'):
+            continue
+        try:
+            obj, attr = resolve(m, name)
+            cur = getattr(obj, attr)
+        except AttributeError:
+            mismatch.append([name, 'missing'])
+            continue
+        if not isinstance(cur, wp.array):
+            continue
+        val = saved[name]
+        t = wp.to_torch(cur)
+        if name in meta['expanded']:
+            # Batched field expanded per world (single-world shape (1, ...)),
+            # or a model dimension equal to nworld (whole array saved).
+            if t.shape[0] == 1 and tuple(t.shape[1:]) == val.shape[1:]:
+                val = val[k_model][None]
+            elif name+'#full' in saved.files:
+                val = saved[name+'#full']
+            else:
+                mismatch.append([name, list(t.shape), list(val.shape), 'per-world candidate'])
+                continue
+        if tuple(t.shape) != val.shape:
+            if not (val.shape[0] == 1 and tuple(t.shape[1:]) == val.shape[1:]):
+                mismatch.append([name, list(t.shape), list(val.shape)])
+                continue
+        new = torch.as_tensor(val, device=t.device).to(t.dtype).reshape(t.shape)
+        if not torch.equal(t, new):
+            changed.append(name)
+            t.copy_(new)
+        restored += 1
+    scal_diff = {}
+    for name, value in meta['scalars'].items():
+        try:
+            obj, attr = resolve(m, name)
+            cur = getattr(obj, attr)
+        except AttributeError:
+            continue
+        cur_v = int(cur.value) if hasattr(cur, 'value') else cur
+        if isinstance(cur_v, (bool, int, float, str)) and cur_v != value:
+            scal_diff[name] = [cur_v, value]
+            if name.startswith('opt.'):
+                setattr(obj, attr, type(cur)(value))
+    return m, dict(arrays=restored, changed_from_mjb=changed, mismatched=mismatch, scalar_differences=scal_diff)
+
+
+def load_inputs(d, inputs, slot, k_in):
+    """Write buffered pre-step input `slot` of captured world `k_in` into every world of d."""
+    import torch
+    import warp as wp
+    for f in inputs.files:
+        if f in ('worlds', 'steps'):
+            continue
+        arr = getattr(d, f, None)
+        if arr is None or arr.size == 0:
+            continue
+        t = wp.to_torch(arr)
+        t[:] = torch.as_tensor(inputs[f][slot, k_in], device=t.device).to(t.dtype).reshape(t.shape[1:])
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('dump', type=Path, help='nan_capture/nan_step<k> directory')
@@ -95,69 +168,13 @@ def main():
     mjm = mujoco.MjModel.from_binary_path(str(dump/'model.mjb'))
     saved = np.load(dump/'model.npz')
     with wp.ScopedDevice(args.device):
-        m = mjw.put_model(mjm)
-        restored, changed, mismatch = 0, [], []
-        for name in saved.files:
-            if name.endswith('#full'):
-                continue
-            try:
-                obj, attr = resolve(m, name)
-                cur = getattr(obj, attr)
-            except AttributeError:
-                mismatch.append([name, 'missing'])
-                continue
-            if not isinstance(cur, wp.array):
-                continue
-            val = saved[name]
-            t = wp.to_torch(cur)
-            if name in meta['expanded']:
-                # Batched field expanded per world (single-world shape (1, ...)),
-                # or a model dimension equal to nworld (whole array saved).
-                if t.shape[0] == 1 and tuple(t.shape[1:]) == val.shape[1:]:
-                    val = val[k_model][None]
-                elif name+'#full' in saved.files:
-                    val = saved[name+'#full']
-                else:
-                    mismatch.append([name, list(t.shape), list(val.shape), 'per-world candidate'])
-                    continue
-            if tuple(t.shape) != val.shape:
-                if val.shape[0] == 1 and tuple(t.shape[1:]) == val.shape[1:]:
-                    pass
-                else:
-                    mismatch.append([name, list(t.shape), list(val.shape)])
-                    continue
-            new = torch.as_tensor(val, device=t.device).to(t.dtype).reshape(t.shape)
-            if not torch.equal(t, new):
-                changed.append(name)
-                t.copy_(new)
-            restored += 1
-        scal_diff = {}
-        for name, value in meta['scalars'].items():
-            try:
-                obj, attr = resolve(m, name)
-                cur = getattr(obj, attr)
-            except AttributeError:
-                continue
-            cur_v = int(cur.value) if hasattr(cur, 'value') else cur
-            if isinstance(cur_v, (bool, int, float, str)) and cur_v != value:
-                scal_diff[name] = [cur_v, value]
-                if name.startswith('opt.'):
-                    setattr(obj, attr, type(cur)(value))
-        out['model_restore'] = dict(arrays=restored, changed_from_mjb=changed, mismatched=mismatch,
-                                    scalar_differences=scal_diff)
+        m, out['model_restore'] = restore_model(mjm, saved, meta, k_model)
 
         def fresh_data():
             return mjw.put_data(mjm, mujoco.MjData(mjm), nworld=1, nconmax=args.nconmax, njmax=njmax)
 
         def load(d, slot):
-            for f in inputs.files:
-                if f in ('worlds', 'steps'):
-                    continue
-                arr = getattr(d, f, None)
-                if arr is None or arr.size == 0:
-                    continue
-                t = wp.to_torch(arr)
-                t.copy_(torch.as_tensor(inputs[f][slot, k_in], device=t.device).to(t.dtype).reshape(t.shape))
+            load_inputs(d, inputs, slot, k_in)
 
         def state(d, f):
             return wp.to_torch(getattr(d, f))[0].double().cpu().numpy()
