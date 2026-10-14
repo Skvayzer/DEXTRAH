@@ -19,12 +19,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('dump', type=Path, help='outputs/isaac_reference_<job>/isaac_reference.npz')
     p.add_argument('--write-reference', action='store_true')
+    p.add_argument('--fixed-body', action='store_true',
+                   help='Dump of the fixed-body touch task: reference -> isaac_reference_fixed.json, robot = build_fixed_robot_spec')
     args = p.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     import mujoco
     from dextrah_lab.mj.compat import install
     install()
-    from dextrah_lab.mj.robot import build_robot_spec, ContactParams, IMPLICIT_DRIVE_DT, hand_servo
+    from dextrah_lab.mj.robot import build_fixed_robot_spec, build_robot_spec, ContactParams, IMPLICIT_DRIVE_DT, hand_servo
     from dextrah_lab.wholebody.actuators import body_motors
     from dextrah_lab.mj.objects import build_object_bank
     from dextrah_lab.mj.compat import p2p
@@ -32,16 +34,18 @@ def main():
     joints, bodies = list(ref['joint_names']), list(ref['body_names'])
     out = dict(joints=len(joints), bodies=len(bodies), issues=[])
     issue = lambda *a: out['issues'].append(' '.join(str(x) for x in a))
+    reference = dict(
+        source=str(args.dump), joint_names=joints, body_names=bodies,
+        joint_pos_limits=ref['joint_pos_limits'].tolist(), joint_vel_limits=ref['joint_vel_limits'].tolist(),
+        default_joint_pos=ref['default_joint_pos'].tolist(), default_root_state=ref['default_root_state'].tolist(),
+        joint_effort_limits=ref['joint_effort_limits'].tolist(), joint_stiffness=ref['joint_stiffness'].tolist(),
+        joint_damping=ref['joint_damping'].tolist(), joint_armature=ref['joint_armature'].tolist())
     if args.write_reference:
-        dest = Path(__file__).resolve().parents[1]/'dextrah_lab/mj/isaac_reference.json'
-        dest.write_text(json.dumps(dict(
-            source=str(args.dump), joint_names=joints, body_names=bodies,
-            joint_pos_limits=ref['joint_pos_limits'].tolist(), joint_vel_limits=ref['joint_vel_limits'].tolist(),
-            default_joint_pos=ref['default_joint_pos'].tolist(), default_root_state=ref['default_root_state'].tolist(),
-            joint_effort_limits=ref['joint_effort_limits'].tolist(), joint_stiffness=ref['joint_stiffness'].tolist(),
-            joint_damping=ref['joint_damping'].tolist(), joint_armature=ref['joint_armature'].tolist()), indent=1))
+        name = 'isaac_reference_fixed.json' if args.fixed_body else 'isaac_reference.json'
+        dest = Path(__file__).resolve().parents[1]/'dextrah_lab/mj'/name
+        dest.write_text(json.dumps(reference, indent=1))
         out['reference_written'] = str(dest)
-    m = build_robot_spec().compile()
+    m = (build_fixed_robot_spec(reference) if args.fixed_body else build_robot_spec()).compile()
     jid = {m.joint(i).name: i for i in range(m.njnt)}
     bid = {m.body(i).name: i for i in range(m.nbody)}
     if set(joints) != set(jid)-{'floating_base_joint'}:

@@ -28,11 +28,24 @@ source_run=/data1/users/konstantin.smirnov/DEXTRAH-BPS128/dextrah_lab/rl_games/l
 resume="${RESUME_CHECKPOINT:?Set RESUME_CHECKPOINT (e.g. run 383 complete_17364025344.pth)}"
 test -f "$resume"
 extra_args=()
+launch_args=(--headless)
+if [[ "${BACKEND:-isaac}" == mjlab ]]; then
+    # MuJoCo Warp port (dextrah_lab/mj, fixed_body=True): separate venv, no Kit.
+    export PATH="/data1/users/konstantin.smirnov/venvs/mjlab/bin:$PATH"
+    launch_args=(--backend mjlab --headless)
+    if [[ -n "${MJ_NCONMAX:-}" ]]; then extra_args+=(--mj-nconmax "$MJ_NCONMAX"); fi
+    if [[ -n "${MJ_NJMAX:-}" ]]; then extra_args+=(--mj-njmax "$MJ_NJMAX"); fi
+    if [[ "${MJ_NAN_CAPTURE:-0}" == 1 ]]; then extra_args+=(--mj-nan-capture); fi
+    if [[ "${MJ_CONE_HESSIAN_FIX:-0}" == 1 ]]; then
+        export PYTHONPATH="$source_snapshot/third_party/mujoco_warp_cone_fix:$PYTHONPATH"
+        extra_args+=(--mj-cone-hessian-fix)
+    fi
+fi
 if [[ "${PER_ENV_OBJECT_PHYSICS:-0}" == 1 ]]; then extra_args+=(--per-env-object-physics); fi
 if [[ "${WANDB:-1}" == 1 ]]; then extra_args+=(--wandb); fi
 training_pid=''
 trap 'if [[ -n "$training_pid" ]]; then kill -USR1 "$training_pid"; fi' USR1 TERM
-python scripts/train_g1_touch_continuation.py --headless --device cuda:0 \
+python scripts/train_g1_touch_continuation.py "${launch_args[@]}" --device cuda:0 \
     --source-run "$source_run" \
     --source-checkpoint "$source_run/nn/last_g1_sapg_bps128_warmstart_frame_8000372736_rew__7400.633_.pth" \
     --resume "$resume" --continuous --touch-sensor-hz 70 --touch-publish-hz 70 \

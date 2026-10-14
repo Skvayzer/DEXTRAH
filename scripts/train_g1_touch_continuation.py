@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Checked SAPG continuation: BPS-128 + capacitive-compatible fingertip forces."""
+"""Checked SAPG continuation: BPS-128 + capacitive-compatible fingertip forces.
+
+--backend mjlab runs the same fixed-body task on MuJoCo Warp (dextrah_lab/mj,
+fixed_body=True), configured exactly as the Isaac fixed-body run RUN_FIXED
+resolved it (per-env object physics there; per-world object geometry and
+inertials in mjlab).
+"""
 import argparse
 import copy
 import json
@@ -14,8 +20,18 @@ import traceback
 def main():
     if not os.environ.get('SLURM_JOB_ID'):
         raise RuntimeError('Training must run inside a Slurm GPU allocation')
-    from isaaclab.app import AppLauncher
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--backend', choices=['isaac', 'mjlab'], default='isaac')
+    backend = pre.parse_known_args()[0].backend
+    if backend == 'isaac':
+        from isaaclab.app import AppLauncher
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--backend', choices=['isaac', 'mjlab'], default='isaac')
+    p.add_argument('--mj-nconmax', type=int, help='mjlab: contacts allocated per world (pooled)')
+    p.add_argument('--mj-njmax', type=int, help='mjlab: constraint rows per world')
+    p.add_argument('--mj-nan-capture', action='store_true', help='mjlab: record the first non-finite world')
+    p.add_argument('--mj-cone-hessian-fix', action='store_true',
+                   help='mjlab: require the vendored mujoco_warp with the elliptic cone Hessian fix')
     p.add_argument('--source-run', type=Path, required=True)
     p.add_argument('--source-checkpoint', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
@@ -35,7 +51,11 @@ def main():
                         'simulated env 0\'s object); verified against URDF masses at startup')
     p.add_argument('--snapshot-epochs', type=int, default=1024,
                    help='Continuous mode: immutable snapshot every N epochs (0 = none; latest.pth and best stay)')
-    AppLauncher.add_app_launcher_args(p)
+    if backend == 'isaac':
+        AppLauncher.add_app_launcher_args(p)
+    else:
+        p.add_argument('--device', default='cuda:0')
+        p.add_argument('--headless', action='store_true')
     args = p.parse_args()
     if args.num_envs % 6 or args.num_envs < 6 or not args.output.name.startswith('0_'):
         raise ValueError('Require six SAPG groups and a numeric policy-index run name')
@@ -47,35 +67,65 @@ def main():
         args.max_frames = args.max_epochs = -1
     new_run = not args.output.exists()
     args.headless = True
-    app = AppLauncher(args).app
+    app = AppLauncher(args).app if backend == 'isaac' else None
     env = None
     try:
         import torch
         import wandb
-        from isaaclab.utils import replace_strings_with_slices
-        from isaaclab.utils.io import dump_yaml
-        from isaacsimenvs.utils.rlgames_utils import register_rlgames_env, EnvStatsAlgoObserver, MultiObserver
+        if backend == 'mjlab':
+            from dextrah_lab.mj.compat import install
+            install()
+            import yaml
+            import mujoco_warp
+            from dextrah_lab.mj.rlgames import register_mj_rlgames_env as register_rlgames_env
+            from dextrah_lab.mj.env import G1SonicTouchMjEnv, Cfg, load_run_cfg, RUN_FIXED
+            from dextrah_lab.mj.factory import DEFAULT_MUJOCO, DEFAULT_NCONMAX, DEFAULT_NJMAX
+            def dump_yaml(path, data):
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(yaml.dump(data.to_dict() if hasattr(data, 'to_dict') else data))
+            vendored = 'mujoco_warp_cone_fix' in Path(mujoco_warp.__file__).parts
+            if args.mj_cone_hessian_fix != vendored:
+                raise RuntimeError(f'--mj-cone-hessian-fix={args.mj_cone_hessian_fix} but mujoco_warp is {mujoco_warp.__file__}')
+        else:
+            from isaaclab.utils import replace_strings_with_slices
+            from isaaclab.utils.io import dump_yaml
+            from isaacsimenvs.utils.rlgames_utils import register_rlgames_env
+        from isaacsimenvs.utils.rlgames_utils import EnvStatsAlgoObserver, MultiObserver
         from rl_games.torch_runner import Runner
         from dextrah_lab.g1_adept.touch_policy import register_models
         from dextrah_lab.g1_adept.touch_continuation import (load_yaml, verify_source_mdp,
             TouchContinuationObserver, install_complete_checkpoint, resume_at_episode_boundary,
             install_atomic_checkpoint_saves, inherit_resume_artifacts,
             SOURCE_FRAMES, SOURCE_SHA, BANK_SHA)
-        from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_bps_env import G1Revo2BpsEnv, G1Revo2BpsEnvCfg
-        from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
+        if backend == 'isaac':
+            from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_bps_env import G1Revo2BpsEnv, G1Revo2BpsEnvCfg
+            from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
+        elif args.control:
+            raise ValueError('The mjlab backend implements the tactile task only')
         torch.set_num_threads(4)
         register_models()
         saved = load_yaml(args.source_run/'params/env_resolved.yaml')
         agent = load_yaml(args.source_run/'params/agent.yaml')
-        cfg = G1Revo2BpsEnvCfg() if args.control else G1Revo2TouchEnvCfg()
-        cfg.seed = saved['seed']
-        cfg.from_dict(replace_strings_with_slices(copy.deepcopy(saved)))
+        if backend == 'mjlab':
+            # The Isaac fixed-body run's resolved task (per-env object physics).
+            cfg = load_run_cfg(RUN_FIXED)
+            mj_settings = dict(task_config=str(RUN_FIXED/'params/env_resolved.yaml'),
+                               nconmax=args.mj_nconmax or DEFAULT_NCONMAX, njmax=args.mj_njmax or DEFAULT_NJMAX,
+                               mujoco_options=DEFAULT_MUJOCO, mujoco_warp=str(Path(mujoco_warp.__file__).parent),
+                               cone_hessian_fix=args.mj_cone_hessian_fix, nan_capture=args.mj_nan_capture)
+        else:
+            cfg = G1Revo2BpsEnvCfg() if args.control else G1Revo2TouchEnvCfg()
+            cfg.seed = saved['seed']
+            cfg.from_dict(replace_strings_with_slices(copy.deepcopy(saved)))
         provenance = None
         if args.resume:
             provenance = inherit_resume_artifacts(args.output,args.resume,args.control)
             parent_cfg = load_yaml(Path(provenance['parent_run'])/'params/env_resolved.yaml')
             if not args.control:
-                cfg.touch.from_dict(parent_cfg['touch'])
+                if backend == 'isaac':
+                    cfg.touch.from_dict(parent_cfg['touch'])
+                elif parent_cfg['touch'] != cfg.touch.to_dict():
+                    raise ValueError('RUN_FIXED touch settings differ from the resumed run')
         cfg.scene.num_envs = args.num_envs
         cfg.sim.device = args.device
         for key in ('success_tolerance','target_success_tolerance','eval_success_tolerance'):
@@ -89,16 +139,27 @@ def main():
                 cfg.touch.sensor_hz = args.touch_sensor_hz
             if args.touch_publish_hz is not None:
                 cfg.touch.publish_hz = args.touch_publish_hz
-            cfg.touch.observation_config().validate(cfg.sim.dt)
-        if args.num_envs <= 1200:
+            if backend == 'isaac':
+                cfg.touch.observation_config().validate(cfg.sim.dt)
+        if args.num_envs <= 1200 and backend == 'isaac':
             for key,value in dict(gpu_found_lost_pairs_capacity=2**20,
                 gpu_found_lost_aggregate_pairs_capacity=2**21,gpu_total_aggregate_pairs_capacity=2**20,
                 gpu_max_rigid_contact_count=2**20,gpu_max_rigid_patch_count=2**18,
                 gpu_collision_stack_size=2**26).items():
                 setattr(cfg.sim.physx,key,value)
         assert not cfg.fabric.enabled and not cfg.fabric.pca_enabled
-        verify_source_mdp(saved,cfg)
-        if args.per_env_object_physics:
+        if backend == 'mjlab':
+            # RUN_FIXED differs from the source only by the per-env replication flags.
+            data = cfg.to_dict()
+            for key, value in saved['assets'].items():
+                if key.startswith('replicate_'):
+                    data['assets'][key] = value
+            verify_source_mdp(saved, Cfg(data))
+            if not args.per_env_object_physics:
+                raise ValueError('mjlab always simulates per-env objects; pass --per-env-object-physics')
+        else:
+            verify_source_mdp(saved,cfg)
+        if args.per_env_object_physics and backend == 'isaac':
             # Explicit scene change after the MDP check: per-env distinct object physics.
             from dextrah_lab.wholebody import per_env_objects
             per_env_objects.configure(cfg)
@@ -109,7 +170,8 @@ def main():
                 sensor_hz=None if args.control else cfg.touch.sensor_hz,
                 publish_hz=None if args.control else cfg.touch.publish_hz,
                 parent_sensor_hz=parent_cfg.get('touch',{}).get('sensor_hz'),
-                parent_publish_hz=parent_cfg.get('touch',{}).get('publish_hz'))
+                parent_publish_hz=parent_cfg.get('touch',{}).get('publish_hz'), backend=backend,
+                simulator=mj_settings if backend == 'mjlab' else 'isaac')
             (args.output/'resume_provenance.json').write_text(json.dumps(provenance,indent=2))
         if args.wandb:
             # Make startup visible without implying that optimizer updates have
@@ -120,18 +182,28 @@ def main():
                 sync_tensorboard=True,tags=['sapg','g1','revo2','bps128',
                     'control' if args.control else 'tactile-normal-shear','warmstart-8B',
                     'strict-tolerance','no-fabrics','no-pca','no-arm-torques']
-                    +(['per-env-object-physics'] if args.per_env_object_physics else []))
+                    +(['per-env-object-physics'] if args.per_env_object_physics else [])+['backend-'+backend])
             if wandb.run is None or wandb.run.settings.mode != 'online':
                 raise RuntimeError('Requested online W&B logging is not active')
             wandb.run.summary.update(dict(experiment_status='initializing_simulation',
                 optimizer_updates_started=False,num_envs=args.num_envs))
             (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))
             print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url,flush=True)
-        env_class = G1Revo2BpsEnv if args.control else G1Revo2TouchEnv
-        if args.per_env_object_physics:
-            env_class = per_env_objects.with_per_env_objects(env_class)
-        env = env_class(cfg)
-        object_physics = per_env_objects.verify(env) if args.per_env_object_physics else None
+        if backend == 'mjlab':
+            env = G1SonicTouchMjEnv(cfg, sonic=None, num_envs=args.num_envs, device=args.device,
+                                    nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
+                                    mujoco_cfg=mj_settings['mujoco_options'], fixed_body=True)
+            if args.mj_nan_capture:
+                env.enable_nan_capture(args.output/'nan_capture')
+            masses = env.sim.model.body_mass[:, env.object.entity.indexing.root_body_id]
+            object_physics = dict(backend='mjlab per-world object geometry and inertials', envs=env.num_envs,
+                                  unique_masses=int(torch.unique(masses).numel()))
+        else:
+            env_class = G1Revo2BpsEnv if args.control else G1Revo2TouchEnv
+            if args.per_env_object_physics:
+                env_class = per_env_objects.with_per_env_objects(env_class)
+            env = env_class(cfg)
+            object_physics = per_env_objects.verify(env) if args.per_env_object_physics else None
         if object_physics:
             (args.output/'per_env_object_physics.json').write_text(json.dumps(object_physics,indent=2))
         ac = agent['params']['config']
@@ -215,7 +287,7 @@ def main():
         summary = dict(checkpoint=str(checkpoint),frame=int(algo.frame),epoch=int(algo.epoch_num),
             segment_start_frame=start_frame,segment_wall_seconds=time.monotonic()-start_time,
             transitions_per_second=(algo.frame-start_frame)/(time.monotonic()-start_time),
-            num_envs=env.num_envs,resume=resume_info,control=args.control,
+            num_envs=env.num_envs,resume=resume_info,control=args.control,backend=backend,
             cuda_peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30,
             device_free_gib=torch.cuda.mem_get_info()[0]/2**30)
         (args.output/'segment_complete.json').write_text(json.dumps(summary,indent=2))
@@ -226,7 +298,8 @@ def main():
             status = ('checkpointed_stop' if observer.stop_requested else 'training_complete') if args.continuous else 'awaiting_evaluation'
             wandb.run.summary.update(dict(summary,experiment_status=status))
             wandb.finish(exit_code=0)
-        env.close()
+        if hasattr(env, 'close'):
+            env.close()
         env = None
     except Exception:
         traceback.print_exc()
@@ -239,9 +312,10 @@ def main():
             sys.stdout.flush(); sys.stderr.flush()
             os._exit(1)
     finally:
-        if env is not None:
+        if env is not None and hasattr(env, 'close'):
             env.close()
-        app.close()
+        if app is not None:
+            app.close()
 
 
 if __name__ == '__main__':

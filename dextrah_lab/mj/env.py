@@ -167,6 +167,7 @@ class G1SonicTouchMjEnv:
         bank, manifest = build_bank(self._object_urdf_paths, cfg.bps_cache_dir)
         indices = self._object_asset_index_per_env.cpu().numpy()
         self._bps_features = torch.as_tensor(map_features(bank, indices), device=device)
+        self._bps_bank = bank
         self._bps_manifest = manifest
         cfg.observation_space += SHAPE_DIM
         cfg.state_space += SHAPE_DIM
