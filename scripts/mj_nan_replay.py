@@ -273,7 +273,7 @@ def main():
         def c_bad():
             names = ('qacc_smooth', 'qfrc_smooth', 'qacc', 'qfrc_constraint', 'efc_force', 'efc_J', 'efc_D',
                      'efc_aref', 'actuator_force', 'qfrc_actuator', 'qfrc_bias', 'xpos', 'xquat', 'cinert', 'qM')
-            out_ = [n for n in names if np.size(getattr(mjd, n)) and not np.isfinite(getattr(mjd, n)).all()]
+            out_ = [n for n in names if np.size(getattr(mjd, n, ())) and not np.isfinite(getattr(mjd, n)).all()]
             if mjd.ncon and not (np.isfinite(mjd.contact.dist).all() and np.isfinite(mjd.contact.frame).all()):
                 out_.append('contact')
             return out_
