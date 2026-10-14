@@ -24,6 +24,9 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=1200)
     p.add_argument('--step-response', action='store_true')
+    p.add_argument('--fixed-body-run', type=Path,
+                   help='Dump the fixed-body touch task (G1Revo2TouchEnv) exactly as this run resolved it '
+                        '(params/env_resolved.yaml) instead of the run-1105 SONIC task')
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     if args.output.exists():
@@ -39,12 +42,31 @@ def main():
         from dextrah_lab.wholebody.source_config import source_task_config
         from dextrah_lab.tasks.g1_revo2_adept.g1_sonic_touch_env import G1SonicTouchEnv
         workspace = Path('/data1/users/konstantin.smirnov')
-        cfg, _ = source_task_config(args.output, args.num_envs, args.device)
-        cfg.seed = 42
-        contract = json.loads((workspace/'DEXTRAH-G1-WholeBody/outputs/0_frozen_sonic_sapg_touch_dexterous_1105/task_contract.json').read_text())
-        cfg.sonic_body.from_dict(contract['body_termination'])
-        sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
-        env = G1SonicTouchEnv(cfg, sonic=sonic)
+        if args.fixed_body_run:
+            import copy
+            from isaaclab.utils import replace_strings_with_slices
+            from dextrah_lab.g1_adept.touch_continuation import load_yaml
+            from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
+            from dextrah_lab.wholebody import per_env_objects
+            resolved = load_yaml(args.fixed_body_run/'params/env_resolved.yaml')
+            cfg = G1Revo2TouchEnvCfg()
+            cfg.from_dict(replace_strings_with_slices(copy.deepcopy(resolved)))
+            cfg.scene.num_envs = args.num_envs
+            cfg.sim.device = args.device
+            cfg.bps_artifact_dir = str(args.output/'bps')
+            env_class = G1Revo2TouchEnv
+            if not cfg.scene.replicate_physics:
+                env_class = per_env_objects.with_per_env_objects(env_class)
+            env = env_class(cfg)
+            report['fixed_body_run'] = str(args.fixed_body_run)
+            report['per_env_object_physics'] = per_env_objects.verify(env) if not cfg.scene.replicate_physics else None
+        else:
+            cfg, _ = source_task_config(args.output, args.num_envs, args.device)
+            cfg.seed = 42
+            contract = json.loads((workspace/'DEXTRAH-G1-WholeBody/outputs/0_frozen_sonic_sapg_touch_dexterous_1105/task_contract.json').read_text())
+            cfg.sonic_body.from_dict(contract['body_termination'])
+            sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
+            env = G1SonicTouchEnv(cfg, sonic=sonic)
         r, o, t = env.robot, env.object, env.table
         view = r.root_physx_view
         arr = lambda x: x.detach().cpu().numpy() if torch.is_tensor(x) else np.asarray(x)
