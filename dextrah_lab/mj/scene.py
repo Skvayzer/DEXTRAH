@@ -5,7 +5,7 @@ import mujoco
 import numpy as np
 
 from .objects import SLOTS, SLOT_TYPES, PLACEHOLDER
-from .robot import ContactParams, WORLD_CONAFFINITY, WORLD_CONTYPE, build_robot_spec
+from .robot import ContactParams, WORLD_CONAFFINITY, WORLD_CONTYPE, build_fixed_robot_spec, build_robot_spec
 
 # play2perfect/assets/urdf/table_narrow.urdf: one box, kinematic in Isaac.
 TABLE_SIZE = (0.475, 0.4, 0.3)
@@ -63,13 +63,22 @@ def add_ground(contact):
     return edit
 
 
-def build_scene_cfg(num_envs, params=SceneParams()):
+def build_scene_cfg(num_envs, params=SceneParams(), fixed_body_reference=None, robot_pose=None):
+    """fixed_body_reference: Isaac dump of the fixed-body task -> welded right-arm
+    robot at robot_pose = (pos, wxyz rot) from the task config; else the floating
+    whole-body robot (pose written at reset)."""
     from mjlab.entity import EntityCfg
     from mjlab.scene import SceneCfg
     contact = params.contact
+    if fixed_body_reference is None:
+        robot = EntityCfg(spec_fn=lambda: build_robot_spec(contact),
+                          init_state=EntityCfg.InitialStateCfg(pos=(0., 0.42, 0.75)))
+    else:
+        pos, rot = robot_pose
+        robot = EntityCfg(spec_fn=lambda: build_fixed_robot_spec(fixed_body_reference, contact),
+                          init_state=EntityCfg.InitialStateCfg(pos=tuple(pos), rot=tuple(rot)))
     return SceneCfg(num_envs=num_envs, env_spacing=0., spec_fn=add_ground(contact), entities={
-        'robot': EntityCfg(spec_fn=lambda: build_robot_spec(contact),
-                           init_state=EntityCfg.InitialStateCfg(pos=(0., 0.42, 0.75))),
+        'robot': robot,
         'object': EntityCfg(spec_fn=lambda: object_spec(contact)),
         'table': EntityCfg(spec_fn=lambda: table_spec(contact), init_state=EntityCfg.InitialStateCfg(pos=(0., 0., 0.65))),
     })

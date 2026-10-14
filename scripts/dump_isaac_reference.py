@@ -50,8 +50,19 @@ def main():
             from dextrah_lab.wholebody import per_env_objects
             resolved = load_yaml(args.fixed_body_run/'params/env_resolved.yaml')
             cfg = G1Revo2TouchEnvCfg()
-            cfg.seed = resolved['seed']   # None-typed default: set before from_dict, as the trainer does
-            cfg.from_dict(replace_strings_with_slices(copy.deepcopy(resolved)))
+
+            def fill_none(obj, data):
+                # from_dict rejects values for None-typed defaults (seed, tolerances):
+                # set those directly first (the trainer sets them by hand).
+                for key, value in data.items():
+                    current = getattr(obj, key, 'missing')
+                    if current is None and value is not None:
+                        setattr(obj, key, value)
+                    elif isinstance(value, dict) and hasattr(current, 'to_dict'):
+                        fill_none(current, value)
+            data = replace_strings_with_slices(copy.deepcopy(resolved))
+            fill_none(cfg, data)
+            cfg.from_dict(data)
             cfg.scene.num_envs = args.num_envs
             cfg.sim.device = args.device
             cfg.bps_artifact_dir = str(args.output/'bps')
