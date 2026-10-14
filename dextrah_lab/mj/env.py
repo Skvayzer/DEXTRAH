@@ -259,7 +259,7 @@ class G1SonicTouchMjEnv:
             self.robot.configure_velocity_limits(torch.as_tensor(reference['joint_vel_limits'], device=device), self.physics_dt)
         self.contact_stats = dict(max_active=0)
         print(f'MJ_SONIC_TOUCH_READY envs={num_envs} actor={cfg.observation_space} critic={cfg.state_space} '
-              f'actions=70 nconmax={nconmax} njmax={njmax} naconmax={self.sim.wp_data.naconmax} '
+              f'actions={self.single_action_space.shape[0]} nconmax={nconmax} njmax={njmax} naconmax={self.sim.wp_data.naconmax} '
               f'graphs={self.sim.use_cuda_graph}', flush=True)
 
     # ======================================================================

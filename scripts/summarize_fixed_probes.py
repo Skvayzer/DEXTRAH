@@ -34,6 +34,9 @@ def main():
     p.add_argument('--job', required=True, help='Slurm job id (the log prints the literal $SLURM_JOB_ID)')
     p.add_argument('--last', type=int, default=8, help='epochs for the steady-state median')
     args = p.parse_args()
+    import subprocess, datetime
+    start = subprocess.run(['sacct', '-j', str(args.job), '-o', 'Start', '-P', '-n'], capture_output=True, text=True).stdout.split()
+    previous_end = datetime.datetime.fromisoformat(start[0]).timestamp() if start else None
     rows = []
     for out, text in log_sections(args.log).items():
         d = Path(out.replace('$SLURM_JOB_ID', str(args.job))) if out else None
@@ -49,10 +52,14 @@ def main():
                        seconds_per_epoch=statistics.median(ep[-args.last:]))
         if d and d.is_dir():
             try:
-                start = d.stat().st_ctime
+                # Startup: previous probe's end (or job start) -> resume_validation.json,
+                # written just before the first training epoch.
                 resume = d/'resume_validation.json'
-                if resume.exists():
-                    row['startup_s'] = round(resume.stat().st_mtime-start, 1)
+                if resume.exists() and previous_end:
+                    row['startup_s'] = round(resume.stat().st_mtime-previous_end, 1)
+                done = d/'segment_complete.json'
+                if done.exists():
+                    previous_end = done.stat().st_mtime
                 prog = json.loads((d/'progress.json').read_text())
                 non_torch = prog['device_used_gib']-prog.get('cuda_reserved_gib', prog['cuda_peak_reserved_gib'])
                 row.update(non_torch_gib=round(non_torch, 2), torch_peak_reserved_gib=round(prog['cuda_peak_reserved_gib'], 2),
