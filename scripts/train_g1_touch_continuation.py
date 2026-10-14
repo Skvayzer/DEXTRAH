@@ -30,6 +30,11 @@ def main():
     p.add_argument('--continuous', action='store_true', help='No evaluation orchestration or transition cap')
     p.add_argument('--touch-sensor-hz', type=float)
     p.add_argument('--touch-publish-hz', type=float)
+    p.add_argument('--per-env-object-physics', action='store_true',
+                   help='Each env simulates its own assigned object (fixes the replicated-template bug: all envs '
+                        'simulated env 0\'s object); verified against URDF masses at startup')
+    p.add_argument('--snapshot-epochs', type=int, default=1024,
+                   help='Continuous mode: immutable snapshot every N epochs (0 = none; latest.pth and best stay)')
     AppLauncher.add_app_launcher_args(p)
     args = p.parse_args()
     if args.num_envs % 6 or args.num_envs < 6 or not args.output.name.startswith('0_'):
@@ -93,9 +98,14 @@ def main():
                 setattr(cfg.sim.physx,key,value)
         assert not cfg.fabric.enabled and not cfg.fabric.pca_enabled
         verify_source_mdp(saved,cfg)
+        if args.per_env_object_physics:
+            # Explicit scene change after the MDP check: per-env distinct object physics.
+            from dextrah_lab.wholebody import per_env_objects
+            per_env_objects.configure(cfg)
         args.output.mkdir(parents=True,exist_ok=bool(args.resume))
         if provenance:
             provenance.update(continuous=args.continuous, fresh_physics_at_initial_resume=True,
+                per_env_object_physics=args.per_env_object_physics, snapshot_epochs=args.snapshot_epochs,
                 sensor_hz=None if args.control else cfg.touch.sensor_hz,
                 publish_hz=None if args.control else cfg.touch.publish_hz,
                 parent_sensor_hz=parent_cfg.get('touch',{}).get('sensor_hz'),
@@ -109,14 +119,21 @@ def main():
                 id='unique_id_'+args.output.name,resume='allow',dir=str(args.output),
                 sync_tensorboard=True,tags=['sapg','g1','revo2','bps128',
                     'control' if args.control else 'tactile-normal-shear','warmstart-8B',
-                    'strict-tolerance','no-fabrics','no-pca','no-arm-torques'])
+                    'strict-tolerance','no-fabrics','no-pca','no-arm-torques']
+                    +(['per-env-object-physics'] if args.per_env_object_physics else []))
             if wandb.run is None or wandb.run.settings.mode != 'online':
                 raise RuntimeError('Requested online W&B logging is not active')
             wandb.run.summary.update(dict(experiment_status='initializing_simulation',
                 optimizer_updates_started=False,num_envs=args.num_envs))
             (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))
             print('WANDB_INITIALIZING_SIMULATION '+wandb.run.url,flush=True)
-        env = (G1Revo2BpsEnv if args.control else G1Revo2TouchEnv)(cfg)
+        env_class = G1Revo2BpsEnv if args.control else G1Revo2TouchEnv
+        if args.per_env_object_physics:
+            env_class = per_env_objects.with_per_env_objects(env_class)
+        env = env_class(cfg)
+        object_physics = per_env_objects.verify(env) if args.per_env_object_physics else None
+        if object_physics:
+            (args.output/'per_env_object_physics.json').write_text(json.dumps(object_physics,indent=2))
         ac = agent['params']['config']
         ac.update(name='g1_sapg_bps128_control' if args.control else 'g1_sapg_bps128_touch',
             num_actors=args.num_envs,expl_coef_block_size=args.num_envs//6,
@@ -141,6 +158,7 @@ def main():
             clip_obs=agent['params']['env']['clip_observations'],clip_actions=agent['params']['env']['clip_actions'])
         observer = TouchContinuationObserver(env,args.source_run,args.source_checkpoint,args.output,
             args.calibration,args.calibration_steps,bool(args.resume),args.control,args.continuous)
+        observer.snapshot_epochs = args.snapshot_epochs
         observers = [EnvStatsAlgoObserver(),observer]
         if args.wandb:
             class ExistingWandbObserver:
@@ -184,6 +202,7 @@ def main():
                 tactile_sensor_hz=None if args.control else cfg.touch.sensor_hz,
                 tactile_publish_hz=None if args.control else cfg.touch.publish_hz,
                 best_checkpoint_metric='SAPG leader rolling mean training episode reward; not evaluation success',
+                per_env_object_physics=object_physics,snapshot_epochs=args.snapshot_epochs,
                 material_override=False,arm_torques=False),allow_val_change=True)
             wandb.run.summary.update(dict(warmstart_verified=True,experiment_status='training'))
             (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))

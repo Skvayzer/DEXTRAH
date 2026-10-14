@@ -229,6 +229,7 @@ class TouchContinuationObserver:
         self.continuous = continuous
         self.run_start_frame = 0
         self.stop_requested = None
+        self.snapshot_epochs = 1024
 
     def before_init(self,*args):
         pass
@@ -371,7 +372,7 @@ class TouchContinuationObserver:
                 latest = dict(checkpoint=str(self.output/'nn/latest.pth'), frame=int(a.frame),
                               epoch=int(epoch_num), stop_requested=self.stop_requested)
                 (self.output/'latest_checkpoint.json').write_text(json.dumps(latest,indent=2))
-            if epoch_num % 1024 == 0:
+            if self.snapshot_epochs and epoch_num % self.snapshot_epochs == 0:
                 a.save(str(self.output/'nn'/f'snapshot_{a.frame}'))
             if self.stop_requested:
                 # Let the existing loop exit normally at this update boundary.
