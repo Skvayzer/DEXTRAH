@@ -80,9 +80,11 @@ class MjArticulation:
         ent_joints = list(entity.joint_names)
         ent_bodies = list(entity.body_names)
         missing = set(self.joint_names) ^ set(ent_joints)
-        if missing or set(self.body_names) != set(ent_bodies):
+        # mjlab parents a fixed-base entity to a world 'mocap_base' handle; it is not an Isaac link.
+        extra = {'mocap_base'} if entity.is_fixed_base else set()
+        if missing or set(self.body_names) != set(ent_bodies)-extra:
             raise RuntimeError(f'Isaac/MuJoCo robot mismatch: joints {sorted(missing)}, '
-                               f'bodies {sorted(set(self.body_names) ^ set(ent_bodies))}')
+                               f'bodies {sorted(set(self.body_names) ^ (set(ent_bodies)-extra))}')
         self.joint_perm = torch.tensor([ent_joints.index(j) for j in self.joint_names], device=device)
         self.body_perm = torch.tensor([ent_bodies.index(b) for b in self.body_names], device=device)
         # Position actuators are authored in the spec (one per joint, named
