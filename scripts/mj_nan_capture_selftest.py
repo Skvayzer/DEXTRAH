@@ -6,7 +6,9 @@ sizes. After a few policy steps a NaN is injected into one world's actuator
 command right before a physics step; the capture must fire on that step,
 dump the world, and `mj_nan_replay.py` must (a) replay the earlier buffered
 steps with small error and (b) place the first non-finite stage at
-actuation.
+actuation. The NaN goes into a Revo2 velocity servo: the body position
+actuators are force-limited and CUDA's fmin/fmax inside the force clamp
+turn a NaN command into the limit, so it would never propagate.
 """
 import argparse
 import json
@@ -34,12 +36,13 @@ def main():
     action = torch.zeros(env.num_envs, 70, device='cuda:0')
     action[:, 64:] = -1.
     original = env._write_data_to_sim
+    servo_ctrl = int(env.robot._ctrl_ids[env.robot._servo_ids[0]])
     state = dict(policy_step=0)
 
     def write(advance=True):
         original(advance)
         if advance and state['policy_step'] == args.inject_policy_step:
-            env.sim.data.ctrl[args.inject_world, 0] = float('nan')
+            env.sim.data.ctrl[args.inject_world, servo_ctrl] = float('nan')
     env._write_data_to_sim = write
     raised = None
     with torch.inference_mode():
