@@ -14,6 +14,7 @@ src="$(mktemp -d "$project/outputs/mj_source.XXXXXX")"
 git -C "$project" archive "$FULLBODY_SOURCE_COMMIT" | tar -x -C "$src"
 export PATH="/data1/users/konstantin.smirnov/venvs/mjlab/bin:$PATH"
 export PYTHONPATH="$src" OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 PYTHONUNBUFFERED=1 WANDB_MODE=disabled
+if [[ "${MJ_CONE_HESSIAN_FIX:-0}" == 1 ]]; then export PYTHONPATH="$src/third_party/mujoco_warp_cone_fix:$PYTHONPATH"; fi
 export MUJOCO_GL=egl
 cd "$src"
 nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv

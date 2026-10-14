@@ -337,6 +337,8 @@ class TouchContinuationObserver:
             run_transitions=max(0, int(a.frame)-self.run_start_frame),
             cuda_allocated_gib=torch.cuda.memory_allocated()/2**30,
             cuda_peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30,
+            cuda_reserved_gib=torch.cuda.memory_reserved()/2**30,
+            cuda_peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
             tolerance=e._current_success_tolerance)
         free,total = torch.cuda.mem_get_info()
         data.update(device_used_gib=(total-free)/2**30,device_free_gib=free/2**30)

@@ -49,6 +49,8 @@ def main():
     p.add_argument('--per-env-object-physics', action='store_true',
                    help='Each env simulates its own assigned object (fixes the replicated-template bug: all envs '
                         'simulated env 0\'s object); verified against URDF masses at startup')
+    p.add_argument('--stop-after-seconds', type=float, default=0,
+                   help='Continuous mode: checkpointed stop after this many training seconds (probes)')
     p.add_argument('--snapshot-epochs', type=int, default=1024,
                    help='Continuous mode: immutable snapshot every N epochs (0 = none; latest.pth and best stay)')
     if backend == 'isaac':
@@ -280,6 +282,14 @@ def main():
             (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))
         start_frame,start_time = int(algo.frame),time.monotonic()
         torch.cuda.reset_peak_memory_stats()
+        if args.stop_after_seconds and args.continuous:
+            import threading
+            def timed_stop():
+                observer.stop_requested = 'TIME_LIMIT'
+                print('CHECKPOINTED_STOP_REQUESTED TIME_LIMIT',flush=True)
+            timer = threading.Timer(args.stop_after_seconds,timed_stop)
+            timer.daemon = True
+            timer.start()
         algo.train()
         torch.cuda.synchronize()
         checkpoint = args.output/'nn'/f'complete_{algo.frame}.pth'
