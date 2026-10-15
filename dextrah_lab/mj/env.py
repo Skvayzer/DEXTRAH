@@ -145,6 +145,7 @@ class G1SonicTouchMjEnv:
         self._sim_step_counter = 0
         self.common_step_counter = 0
         self._nan_capture = None
+        self._sgs = None
         self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
         self.reset_terminated = torch.zeros(num_envs, device=device, dtype=torch.bool)
         self.reset_time_outs = torch.zeros_like(self.reset_terminated)
@@ -368,6 +369,8 @@ class G1SonicTouchMjEnv:
         self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
         self.reset_buf = self.reset_terminated | self.reset_time_outs
         self.reward_buf = self._get_rewards()
+        if self._sgs is not None:
+            self._sgs.after_step()
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
             self._reset_idx(reset_env_ids)
@@ -375,6 +378,14 @@ class G1SonicTouchMjEnv:
             self.sim.forward()
         self.obs_buf = self._get_observations()
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
+
+    def enable_sgs(self, settings, state=None):
+        """Opt-in Success Guided Sampling of episode configurations (dextrah_lab/sgs)."""
+        from dextrah_lab.sgs.mj_task import MjSgsTask
+        self._sgs = MjSgsTask(self, settings)
+        if state is not None:
+            self._sgs.load_state_dict(state)
+        return self._sgs
 
     def enable_nan_capture(self, out_dir, depth=4, max_abs_qvel=None):
         """Diagnostic only: record the first non-finite (or, with max_abs_qvel,
@@ -401,6 +412,9 @@ class G1SonicTouchMjEnv:
     def _reset_idx(self, env_ids):
         # DirectRLEnv: scene.reset, episode length
         self.episode_length_buf[env_ids] = 0
+        if self._sgs is not None:
+            # SGS: record finished episodes, pick configurations and objects.
+            self._sgs.before_reset(torch.as_tensor(env_ids, device=self.device, dtype=torch.long))
         # PlayEnv
         reset_utils.reset_env_state(self, torch.as_tensor(env_ids, device=self.device, dtype=torch.long))
         # Drive setpoints restart at the reset joint targets (as PhysX drives do).
@@ -411,6 +425,9 @@ class G1SonicTouchMjEnv:
         if self._touch_ready:
             self.touch_model.reset(env_ids)
             self.touch_raw[env_ids] = 0
+        if self._sgs is not None:
+            # SGS: replace the rho reset of training envs by their configuration.
+            self._sgs.after_reset(torch.as_tensor(env_ids, device=self.device, dtype=torch.long))
         # G1SonicTouchEnv
         if not self._wholebody_ready:
             return

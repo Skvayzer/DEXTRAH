@@ -38,6 +38,12 @@ if [[ "${BACKEND:-isaac}" == mjlab ]]; then
     if [[ "${MJ_NAN_CAPTURE:-0}" == 1 ]]; then extra_args+=(--mj-nan-capture); fi
     if [[ -n "${MJ_NAN_CAPTURE_MAX_QVEL:-}" ]]; then extra_args+=(--mj-nan-capture-max-qvel "$MJ_NAN_CAPTURE_MAX_QVEL"); fi
     if [[ "${MJ_ARM_ARMATURE:-0}" == 1 ]]; then extra_args+=(--mj-arm-armature); fi
+    # Success Guided Sampling (arXiv:2610.12465, dextrah_lab/sgs): SGS=1 plus optional overrides.
+    if [[ "${SGS:-0}" == 1 ]]; then extra_args+=(--sgs); fi
+    if [[ -n "${SGS_FAMILIES:-}" ]]; then extra_args+=(--sgs-families "$SGS_FAMILIES"); fi
+    if [[ -n "${SGS_NUM_CONFIGS:-}" ]]; then extra_args+=(--sgs-num-configs "$SGS_NUM_CONFIGS"); fi
+    if [[ -n "${SGS_EVAL_EVERY:-}" ]]; then extra_args+=(--sgs-eval-every "$SGS_EVAL_EVERY"); fi
+    if [[ -n "${SGS_HARVEST_MAX_STEPS:-}" ]]; then extra_args+=(--sgs-harvest-max-steps "$SGS_HARVEST_MAX_STEPS"); fi
     if [[ "${MJ_CONE_HESSIAN_FIX:-0}" == 1 ]]; then
         export PYTHONPATH="$source_snapshot/third_party/mujoco_warp_cone_fix:$PYTHONPATH"
         extra_args+=(--mj-cone-hessian-fix)

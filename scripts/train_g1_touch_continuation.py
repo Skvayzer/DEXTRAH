@@ -61,6 +61,19 @@ def main():
     p.add_argument('--minibatch-size', type=int,
                    help='PPO minibatch for actor and critic (default 4*num_envs: 4 minibatches per epoch). '
                         'More minibatches = more gradient steps per epoch on the same rollout')
+    p.add_argument('--sgs', action='store_true',
+                   help='mjlab: Success Guided Sampling of episode configurations (arXiv:2610.12465, dextrah_lab/sgs); '
+                        'changes the training reset distribution (reaching / stable-grasp / near-goal families)')
+    p.add_argument('--sgs-num-configs', type=int, default=32768)
+    p.add_argument('--sgs-history', type=int, default=100)
+    p.add_argument('--sgs-temperature', type=float, default=2.)
+    p.add_argument('--sgs-target', type=float, default=.5)
+    p.add_argument('--sgs-kappa', type=float, default=1.)
+    p.add_argument('--sgs-eps', type=float, default=1e-4)
+    p.add_argument('--sgs-families', default='reaching,stable_grasp,near_goal')
+    p.add_argument('--sgs-eval-every', type=int, default=16,
+                   help='Every Nth env resets from fresh rho samples (Reaching) and is logged as sgs/eval_*')
+    p.add_argument('--sgs-harvest-max-steps', type=int, default=6000)
     p.add_argument('--best-delay-epochs', type=int, default=0,
                    help='New continuous run: start best-checkpoint tracking this many epochs after the resume '
                         '(0 = from the first epoch)')
@@ -115,6 +128,9 @@ def main():
             from dextrah_lab.tasks.g1_revo2_adept.g1_revo2_touch_env import G1Revo2TouchEnv, G1Revo2TouchEnvCfg
         elif args.control:
             raise ValueError('The mjlab backend implements the tactile task only')
+        if args.sgs and (backend != 'mjlab' or not args.continuous):
+            raise ValueError('--sgs is implemented for the continuous mjlab fixed-body task')
+        sgs_report = None
         torch.set_num_threads(4)
         register_models()
         saved = load_yaml(args.source_run/'params/env_resolved.yaml')
@@ -196,7 +212,8 @@ def main():
                 sync_tensorboard=True,tags=['sapg','g1','revo2','bps128',
                     'control' if args.control else 'tactile-normal-shear','warmstart-8B',
                     'strict-tolerance','no-fabrics','no-pca','no-arm-torques']
-                    +(['per-env-object-physics'] if args.per_env_object_physics else [])+['backend-'+backend])
+                    +(['per-env-object-physics'] if args.per_env_object_physics else [])+['backend-'+backend]
+                    +(['sgs'] if args.sgs else []))
             if wandb.run is None or wandb.run.settings.mode != 'online':
                 raise RuntimeError('Requested online W&B logging is not active')
             wandb.run.summary.update(dict(experiment_status='initializing_simulation',
@@ -212,6 +229,20 @@ def main():
                                     scene_params=SceneParams(contact=ContactParams(g1_arm_armature=args.mj_arm_armature)))
             if args.mj_nan_capture:
                 env.enable_nan_capture(args.output/'nan_capture', max_abs_qvel=args.mj_nan_capture_max_qvel)
+            if args.sgs:
+                from dataclasses import asdict
+                from dextrah_lab.sgs.mj_task import SgsSettings
+                sgs_settings = SgsSettings(num_configs=args.sgs_num_configs, history=args.sgs_history,
+                    temperature=args.sgs_temperature, target=args.sgs_target, kappa=args.sgs_kappa, eps=args.sgs_eps,
+                    families=tuple(args.sgs_families.split(',')), eval_every=args.sgs_eval_every,
+                    harvest_max_steps=args.sgs_harvest_max_steps)
+                # A resumed SGS run continues its configuration set and outcome windows.
+                sgs_file = args.resume.with_suffix('.sgs.pt') if args.resume else None
+                sgs_state = torch.load(sgs_file, map_location='cpu', weights_only=False) if sgs_file and sgs_file.exists() else None
+                env.enable_sgs(sgs_settings, sgs_state)
+                sgs_report = dict(settings=asdict(sgs_settings), resumed_from=str(sgs_file) if sgs_state else None,
+                                  paper='arXiv:2610.12465')
+                print('SGS_ENABLED '+json.dumps(sgs_report),flush=True)
             masses = env.sim.model.body_mass[:, env.object.entity.indexing.root_body_id]
             object_physics = dict(backend='mjlab per-world object geometry and inertials', envs=env.num_envs,
                                   unique_masses=int(torch.unique(masses).numel()))
@@ -270,6 +301,15 @@ def main():
         algo = runner.algo_factory.create(runner.algo_name,base_name='run',params=runner.params)
         install_complete_checkpoint(algo)
         install_atomic_checkpoint_saves(algo)
+        if args.sgs:
+            # Every network checkpoint X.pth gets the SGS state beside it (X.sgs.pt).
+            network_save = algo.save
+            def save_with_sgs(filename, override_state=None):
+                network_save(filename, override_state)
+                target = Path(str(filename)+'.sgs.pt')
+                torch.save(env._sgs.state_dict(), str(target)+'.pending')
+                os.replace(str(target)+'.pending', target)
+            algo.save = save_with_sgs
         resume_info = resume_at_episode_boundary(algo,args.resume) if args.resume else None
         observer.run_start_frame = int(algo.frame)
         if args.continuous and new_run:
@@ -290,6 +330,7 @@ def main():
             signal.signal(signal.SIGTERM,request_checkpointed_stop)
         if provenance:
             provenance['optimization'] = optimization
+            provenance['sgs'] = sgs_report
             (args.output/'resume_provenance.json').write_text(json.dumps(provenance,indent=2))
         if resume_info:
             (args.output/'resume_validation.json').write_text(json.dumps(resume_info,indent=2))
@@ -308,7 +349,7 @@ def main():
                 tactile_publish_hz=None if args.control else cfg.touch.publish_hz,
                 best_checkpoint_metric='SAPG leader rolling mean training episode reward; not evaluation success',
                 per_env_object_physics=object_physics,snapshot_epochs=args.snapshot_epochs,
-                material_override=False,arm_torques=False,optimization=optimization),allow_val_change=True)
+                material_override=False,arm_torques=False,optimization=optimization,sgs=sgs_report),allow_val_change=True)
             wandb.run.summary.update(dict(warmstart_verified=True,experiment_status='training'))
             (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))
         start_frame,start_time = int(algo.frame),time.monotonic()

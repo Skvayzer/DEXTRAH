@@ -1,0 +1,520 @@
+"""SGS on the mjlab fixed-body G1 + Revo2 reposing task (opt-in: train --sgs).
+
+Task configuration tau = (s0, g, e) (paper Sec. 3.1): the object asset (e), the
+robot joint state, table pose and object state (s0) and the first goal (g).
+Episode outcome = the Boolean task success of the episode: at least one goal
+reached (``any_goal_success``; the reward is unchanged).
+
+Reset families, balanced in the configuration set as in the paper's
+manipulation buffer (Appendix A.2, after OmniReset):
+
+* ``reaching``: this task's own reset distribution rho (object dropped above
+  the table at a random pose, robot near its default pose, absolute goal),
+  drawn by calling the task's reset functions with their writes captured, so
+  rho itself is unchanged.
+* ``stable_grasp``: the object held in the hand above the table, fresh goal
+  from rho's goal distribution.
+* ``near_goal``: the object held in the hand inside the goal volume, goal =
+  the object pose moved by a fraction f ~ U[0, f_max] (paper: [0, 1.1] of the
+  assembly path) of one of this task's own goal steps (delta_goal_distance,
+  delta_rotation_degrees, clamped to the goal volume).
+
+The paper creates Stable Grasp / Near-Goal states with IK around task grasp
+points of a parallel-jaw gripper. The dexterous hand has no such generator, so
+those states are collected from the policy's own rollouts at the start of the
+run (complete MuJoCo qpos/qvel of the world, so each grasp is physically exact)
+and then frozen; until a family is complete it has zero probability.
+
+The object is part of the configuration: mjlab keeps each world's object as
+per-world model fields (geometry, mass, inertia), rewritten here when an
+episode starts with another asset. Derived solver constants (invweight0,
+subtree mass) are shared and were computed once from world 0 at build; they
+are not recomputed, so every world simulates exactly as in the fixed
+assignment.
+
+Evaluation (Sec. 4.3: "Evaluation resets are freshly sampled from the training
+distribution"): every ``eval_every``-th env always resets from a fresh sample
+of rho with a uniformly random asset and is logged separately (sgs/eval_*).
+Unlike the paper's separate evaluation runs, these episodes also feed PPO.
+"""
+from dataclasses import asdict, dataclass, field
+import inspect
+import math
+
+import numpy as np
+import torch
+
+from dextrah_lab.mj.compat import p2p
+from dextrah_lab.mj.scene import TABLE_SIZE, object_indices
+from dextrah_lab.object_shape.bank import map_features
+from .sampler import MANIPULATION, SuccessGuidedSampler
+
+FAMILIES = ('reaching', 'stable_grasp', 'near_goal')
+HARVESTED = ('stable_grasp', 'near_goal')
+THUMB = 0   # dextrah_lab.g1_adept.contact.FINGERS order
+
+
+@dataclass
+class SgsSettings:
+    num_configs: int = MANIPULATION['num_configs']
+    history: int = MANIPULATION['history']
+    temperature: float = MANIPULATION['temperature']
+    target: float = MANIPULATION['target']
+    kappa: float = MANIPULATION['kappa']
+    eps: float = MANIPULATION['eps']
+    families: tuple = FAMILIES
+    eval_every: int = 16                 # env i is an evaluation env when i % eval_every == eval_every-1 (0: none)
+    harvest_per_step: int = 32           # new held states per family per env step while collecting
+    harvest_max_steps: int = 6000        # then freeze whatever was collected
+    harvest_asset_cap: float = 2.        # per asset at most cap * (family size / assets) states
+    near_goal_max_fraction: float = 1.1  # f ~ U[0, f_max] of one goal step
+    grasp_force_n: float = .25           # thumb + another pad above this force
+    table_clearance_m: float = .05       # object origin above the table top
+    max_object_speed: float = .5         # m/s, centre of mass
+    max_object_spin: float = 5.          # rad/s
+    stats_window: int = 3000             # episodes per rolling statistic (rl_games games_to_track)
+
+    def __post_init__(self):
+        self.families = tuple(self.families)
+        unknown = set(self.families)-set(FAMILIES)
+        if unknown or not self.families or len(set(self.families)) != len(self.families):
+            raise ValueError(f'SGS families must be distinct members of {FAMILIES}, got {self.families}')
+        if self.num_configs < len(self.families):
+            raise ValueError('Fewer configurations than families')
+        if set(self.families) & set(HARVESTED) and 'reaching' not in self.families:
+            raise ValueError('Held states are collected from reaching episodes: keep the reaching family')
+
+    def layout(self):
+        """Fields that fix the saved configuration set and outcome windows."""
+        return dict(num_configs=self.num_configs, history=self.history, families=tuple(self.families))
+
+
+class _Rolling:
+    """Mean of the last ``capacity`` values (device ring buffer)."""
+
+    def __init__(self, capacity, device):
+        self.values = torch.zeros(capacity, device=device)
+        self.head, self.size = 0, 0
+
+    def add(self, values):
+        values = values.reshape(-1).float()[-len(self.values):]
+        n, cap = values.numel(), len(self.values)
+        if n == 0:
+            return
+        idx = (self.head+torch.arange(n, device=values.device)) % cap
+        self.values[idx] = values
+        self.head, self.size = (self.head+n) % cap, min(self.size+n, cap)
+
+    def mean(self):
+        return self.values[:self.size].mean() if self.size else torch.zeros((), device=self.values.device)
+
+
+class MjSgsTask:
+    def __init__(self, env, settings=SgsSettings(), generator=None):
+        if not getattr(env, '_fixed_body', False):
+            raise NotImplementedError('SGS is implemented for the fixed-body mjlab task')
+        rc = env.cfg.reset
+        if (rc.fixed_start_pose is not None or rc.fixed_goal_pose is not None or rc.fixed_trajectory_file
+                or tuple(rc.table_reset_xy_range_m) != (0., 0.) or float(rc.table_reset_yaw_range_deg) != 0.):
+            raise NotImplementedError('SGS expects the run-383 reset setup (random start and goal, table moves in z only)')
+        self.env, self.settings, self.device = env, settings, env.device
+        self.generator = generator
+        # Swapping objects rewrites only primary per-world fields. Derived
+        # constants must be shared (computed once from world 0), otherwise a
+        # swapped world would keep its previous object's values.
+        per_world = [f for f in ('body_subtreemass', 'body_invweight0', 'dof_invweight0')
+                     if getattr(env.sim.wp_model, f).shape[0] != 1]
+        if per_world:
+            raise NotImplementedError(f'SGS object swaps would need recomputed per-world {per_world}')
+        self.reset_utils, self.goal_sampling = p2p('reset_utils'), p2p('goal_sampling')
+        self._check_reset_order()
+        n_env = env.num_envs
+        self.sampler = SuccessGuidedSampler(settings.num_configs, settings.history, settings.temperature,
+                                            settings.target, settings.kappa, settings.eps, self.device)
+        # Balanced family blocks: [start, stop) per family.
+        sizes = [settings.num_configs//len(settings.families)+(i < settings.num_configs % len(settings.families))
+                 for i in range(len(settings.families))]
+        bounds = np.cumsum([0]+sizes)
+        self.blocks = {f: (int(bounds[i]), int(bounds[i+1])) for i, f in enumerate(settings.families)}
+        self.family = torch.empty(settings.num_configs, dtype=torch.long, device=self.device)
+        for i, f in enumerate(settings.families):
+            self.family[slice(*self.blocks[f])] = FAMILIES.index(f)
+        self._build_asset_tables()
+        # Configuration storage.
+        N, nj = settings.num_configs, env.robot.data.joint_pos.shape[1]
+        nq, nv = env.sim.data.qpos.shape[1], env.sim.data.qvel.shape[1]
+        self.na = int(env.sim.mj_model.na)
+        z = lambda *shape, dtype=torch.float32: torch.zeros(*shape, dtype=dtype, device=self.device)
+        self.cfg = dict(asset=z(N, dtype=torch.long), table_z=z(N), joint_pos=z(N, nj), joint_vel=z(N, nj),
+                        targets=z(N, nj), setpoint=z(N, nj), object_pose=z(N, 7), object_init_z=z(N),
+                        goal_pose=z(N, 7), qpos=z(N, nq), qvel=z(N, nv), act=z(N, max(self.na, 1)))
+        self.filled = torch.zeros(N, dtype=torch.bool, device=self.device)
+        self.fill_count = {f: 0 for f in settings.families}
+        self.harvest_steps, self.harvest_done = 0, not any(f in HARVESTED for f in settings.families)
+        self.asset_harvest = {f: torch.zeros(self.n_assets, dtype=torch.long, device=self.device) for f in HARVESTED}
+        # Per-env bookkeeping.
+        self.current = torch.full((n_env,), -1, dtype=torch.long, device=self.device)
+        ids = torch.arange(n_env, device=self.device)
+        e = settings.eval_every
+        self.eval_mask = (ids % e == e-1) if e > 0 else torch.zeros(n_env, dtype=torch.bool, device=self.device)
+        if bool(self.eval_mask.all()):
+            raise ValueError('SGS needs training envs besides the evaluation envs')
+        self.eval_started = torch.zeros(n_env, dtype=torch.bool, device=self.device)
+        w = settings.stats_window
+        self.eval_stats = {k: _Rolling(w, self.device) for k in ('any_goal_success_rate', 'goals_reached_count', 'ever_lifted_rate')}
+        self.train_stats = {f: _Rolling(w, self.device) for f in settings.families}
+        self.fall_stats = {f: _Rolling(w, self.device) for f in settings.families}
+        self.steps = 0
+        if 'reaching' in settings.families:
+            self._fill_reaching()
+        self._sync_available()
+
+    # ------------------------------------------------------------------ setup
+    def _check_reset_order(self):
+        """The reaching capture replays reset_env_state's sampling calls."""
+        src = inspect.getsource(self.reset_utils.reset_env_state)
+        calls = ['_randomize_robot_dof_state(env, env_ids)', '_reset_table_pose(env, env_ids)',
+                 '_reset_object_pose(env, env_ids)', '_reset_goal_pose(env, env_ids, mode="absolute")']
+        where = [src.find(c) for c in calls]
+        if min(where) < 0 or where != sorted(where):
+            raise RuntimeError('reset_env_state no longer samples robot, table, object, goal in this order')
+
+    def _build_asset_tables(self):
+        env, t = self.env, (lambda x: torch.as_tensor(np.asarray(x), device=self.device, dtype=torch.float32))
+        bank = env.object_bank
+        self.n_assets = len(env._object_urdf_paths)
+        self.body, geoms = object_indices(env.sim.mj_model)
+        self.geoms = torch.as_tensor(geoms, device=self.device, dtype=torch.long)
+        self.tab = dict(size=t(bank.size), quat=t(bank.quat), rbound=t(bank.rbound),
+                        aabb=t(bank.aabb).view(self.n_assets, 4, 2, 3), mass=t(bank.mass), com=t(bank.com),
+                        inertia=t(bank.inertia))
+        self.tab['pos'] = t(bank.pos)-self.tab['com'][:, None]
+        self.tab['bps'] = torch.as_tensor(map_features(env._bps_bank, np.arange(self.n_assets)), device=self.device,
+                                          dtype=env._bps_features.dtype)
+        # Per-asset scale: recovered from the initial assignment (every asset is assigned).
+        asset = env._object_asset_index_per_env
+        if int(torch.unique(asset).numel()) != self.n_assets:
+            raise RuntimeError('SGS needs every asset in the initial assignment (num_envs >= assets)')
+        scale = torch.zeros(self.n_assets, env._object_scale_per_env.shape[1], device=self.device)
+        scale[asset] = env._object_scale_per_env
+        self.tab['scale'] = scale
+        rew = env.cfg.reward
+        corners = torch.tensor(p2p('obs_utils').KEYPOINT_CORNERS, device=self.device, dtype=torch.float32)
+        self.tab['keypoints'] = corners[None]*(scale*rew.object_base_size*rew.keypoint_scale*.5)[:, None]
+        self._verify_tables()
+
+    def _verify_tables(self):
+        """The tables must reproduce the current per-world state exactly (at
+        startup, and periodically after object swaps)."""
+        env, a, m = self.env, self.env._object_asset_index_per_env, self.env.sim.model
+        g = self.geoms
+        checks = dict(geom_size=(m.geom_size[:, g], self.tab['size'][a]), geom_pos=(m.geom_pos[:, g], self.tab['pos'][a]),
+                      geom_quat=(m.geom_quat[:, g], self.tab['quat'][a]), geom_rbound=(m.geom_rbound[:, g], self.tab['rbound'][a]),
+                      geom_aabb=(m.geom_aabb[:, g], self.tab['aabb'][a]), body_mass=(m.body_mass[:, self.body], self.tab['mass'][a]),
+                      body_inertia=(m.body_inertia[:, self.body], self.tab['inertia'][a]),
+                      com_offset=(env.object.com_offset, self.tab['com'][a]), default_mass=(env.object.default_mass[:, 0], self.tab['mass'][a]),
+                      scale=(env._object_scale_per_env, self.tab['scale'][a]), keypoints=(env._keypoint_offsets, self.tab['keypoints'][a]),
+                      bps=(env._bps_features, self.tab['bps'][a]))
+        bad = [k for k, (x, y) in checks.items() if x.shape != y.shape or not torch.equal(x.float(), y.float())]
+        if bad:
+            raise RuntimeError(f'SGS asset tables do not reproduce the scene: {bad}')
+
+    def _fill_reaching(self):
+        """Draw the reaching configurations from the task's own reset functions,
+        capturing (not applying) their writes."""
+        env, ru = self.env, self.reset_utils
+        start, stop = self.blocks['reaching']
+        saved = {k: getattr(env, k).clone() for k in ('_prev_targets', '_cur_targets', '_table_z_per_env', '_object_init_z')}
+        rec = {}
+        patches = {(env.robot, 'write_joint_state_to_sim'): lambda pos, vel, joint_ids=None, env_ids=None: rec.update(joint_pos=pos.clone(), joint_vel=vel.clone()),
+                   (env.table, 'write_root_pose_to_sim'): lambda pose, env_ids=None: rec.update(table=pose.clone()),
+                   (env.object, 'write_root_pose_to_sim'): lambda pose, env_ids=None: rec.update(object=pose.clone()),
+                   (env.object, 'write_root_velocity_to_sim'): lambda vel, env_ids=None: rec.update(object_vel=vel.clone()),
+                   (env.goal_viz, 'write_root_pose_to_sim'): lambda pose, env_ids=None: rec.update(goal=pose.clone())}
+        for (obj, name), fn in patches.items():
+            setattr(obj, name, fn)
+        try:
+            k = start
+            while k < stop:
+                ids = torch.arange(min(stop-k, env.num_envs), device=self.device)
+                rec.clear()
+                ru._randomize_robot_dof_state(env, ids)
+                ru._reset_table_pose(env, ids)
+                ru._reset_object_pose(env, ids)
+                ru._reset_goal_pose(env, ids, mode='absolute')
+                if bool(rec['object_vel'].abs().max() > 0):
+                    raise RuntimeError('Reaching resets are expected to start the object at rest')
+                origin = env.scene.env_origins[ids]
+                s = slice(k, k+len(ids))
+                c = self.cfg
+                c['joint_pos'][s], c['joint_vel'][s] = rec['joint_pos'], rec['joint_vel']
+                c['targets'][s] = c['setpoint'][s] = env._cur_targets[ids]
+                c['table_z'][s] = rec['table'][:, 2]-origin[:, 2]
+                c['object_pose'][s] = torch.cat((rec['object'][:, :3]-origin, rec['object'][:, 3:]), -1)
+                c['object_init_z'][s] = env._object_init_z[ids]
+                c['goal_pose'][s] = torch.cat((rec['goal'][:, :3]-origin, rec['goal'][:, 3:]), -1)
+                k += len(ids)
+        finally:
+            for obj, name in patches:
+                delattr(obj, name)
+            for key, value in saved.items():
+                getattr(env, key).copy_(value)
+        # Balanced assets, independent of the sampled poses (rho does not couple them).
+        n = stop-start
+        perm = torch.randperm(n, device=self.device, generator=self.generator)
+        self.cfg['asset'][start:stop] = perm % self.n_assets
+        self.filled[start:stop] = True
+        self.fill_count['reaching'] = n
+
+    def _sync_available(self):
+        """A family takes part once complete (or once collection stops)."""
+        available = torch.zeros_like(self.filled)
+        for f in self.settings.families:
+            a, b = self.blocks[f]
+            if f not in HARVESTED or self.harvest_done or self.fill_count[f] == b-a:
+                available[a:b] = self.filled[a:b]
+        if not bool(available.any()):
+            raise RuntimeError('SGS: no configuration available (harvested families only, collection not finished?)')
+        self.sampler.available.copy_(available)
+
+    # -------------------------------------------------------------- objects
+    def assign_objects(self, env_ids, assets):
+        """Rewrite the per-world object (model fields + per-env task buffers)."""
+        env, tab, m = self.env, self.tab, self.env.sim.model
+        if env_ids.numel() == 0:
+            return
+        rows, cols = env_ids[:, None], self.geoms[None, :]
+        m.geom_size[rows, cols] = tab['size'][assets]
+        m.geom_pos[rows, cols] = tab['pos'][assets]
+        m.geom_quat[rows, cols] = tab['quat'][assets]
+        m.geom_rbound[rows, cols] = tab['rbound'][assets]
+        m.geom_aabb[rows, cols] = tab['aabb'][assets]
+        m.body_mass[env_ids, self.body] = tab['mass'][assets]
+        m.body_inertia[env_ids, self.body] = tab['inertia'][assets]
+        env.object.com_offset[env_ids] = tab['com'][assets]
+        env.object.default_mass[env_ids, 0] = tab['mass'][assets]
+        env._object_mass[env_ids, 0] = tab['mass'][assets]
+        env._object_asset_index_per_env[env_ids] = assets
+        env._object_scale_per_env[env_ids] = tab['scale'][assets]
+        env._keypoint_offsets[env_ids] = tab['keypoints'][assets]
+        env._bps_features[env_ids] = tab['bps'][assets]
+
+    # ---------------------------------------------------------- env hooks
+    def before_reset(self, env_ids):
+        """Record finished episodes, choose the next configurations and objects
+        (before the task's reset writes poses with the new object's COM)."""
+        env, s = self.env, self.settings
+        env_ids = env_ids.reshape(-1)
+        cfg_ids = self.current[env_ids]
+        active = cfg_ids >= 0
+        if bool(active.any()):
+            success = env._successes[env_ids[active]] > 0
+            self.sampler.record(cfg_ids[active], success)
+            fam = self.family[cfg_ids[active]]
+            fall = env._termination_reasons['fall'][env_ids[active]]
+            for i, f in enumerate(FAMILIES):
+                if f in self.train_stats:
+                    self.train_stats[f].add(success[fam == i])
+                    self.fall_stats[f].add(fall[fam == i])
+        is_eval = self.eval_mask[env_ids]
+        finished_eval = env_ids[is_eval & self.eval_started[env_ids]]
+        if finished_eval.numel():
+            self.eval_stats['any_goal_success_rate'].add(env._successes[finished_eval] > 0)
+            self.eval_stats['goals_reached_count'].add(env._successes[finished_eval])
+            self.eval_stats['ever_lifted_rate'].add(env._episode_ever_lifted[finished_eval])
+        # Evaluation: fresh rho sample, uniformly random asset.
+        eval_ids = env_ids[is_eval]
+        self.assign_objects(eval_ids, torch.randint(0, self.n_assets, (eval_ids.numel(),), device=self.device,
+                                                    generator=self.generator))
+        self.eval_started[eval_ids] = True
+        self.current[eval_ids] = -1
+        train_ids = env_ids[~is_eval]
+        chosen = self.sampler.sample(train_ids.numel(), generator=self.generator)
+        self.current[train_ids] = chosen
+        self.assign_objects(train_ids, self.cfg['asset'][chosen])
+
+    def after_reset(self, env_ids):
+        """Overwrite the task's rho reset with the chosen configurations."""
+        env, c = self.env, self.cfg
+        env_ids = env_ids.reshape(-1)
+        ids = env_ids[~self.eval_mask[env_ids]]
+        if ids.numel() == 0:
+            return
+        k = self.current[ids]
+        origin = env.scene.env_origins[ids]
+        table = torch.zeros(len(ids), 7, device=self.device)
+        table[:, 2], table[:, 3] = c['table_z'][k], 1.
+        env.table.write_root_pose_to_sim(table+torch.cat((origin, torch.zeros_like(table[:, 3:])), -1), env_ids=ids)
+        env._table_z_per_env[ids] = c['table_z'][k]
+        reach = self.family[k] == FAMILIES.index('reaching')
+        if bool(reach.any()):
+            r, kr = ids[reach], k[reach]
+            env.robot.write_joint_state_to_sim(c['joint_pos'][kr], c['joint_vel'][kr], env_ids=r)
+            pose = c['object_pose'][kr].clone()
+            pose[:, :3] += env.scene.env_origins[r]
+            env.object.write_root_pose_to_sim(pose, env_ids=r)
+            env.object.write_root_velocity_to_sim(torch.zeros(len(r), 6, device=self.device), env_ids=r)
+        held = ~reach
+        if bool(held.any()):
+            h, kh = ids[held], k[held]
+            env.sim.data.qpos[h] = c['qpos'][kh]
+            env.sim.data.qvel[h] = c['qvel'][kh]
+            if self.na:
+                env.sim.data.act[h] = c['act'][kh]
+            env._lifted_object[h] = True
+            env._episode_ever_lifted[h] = True
+        env._prev_targets[ids] = c['targets'][k]
+        env._cur_targets[ids] = c['targets'][k]
+        env.robot.reset_setpoint(ids, c['setpoint'][k])
+        env._object_init_z[ids] = c['object_init_z'][k]
+        goal = c['goal_pose'][k].clone()
+        goal[:, :3] += origin
+        env.goal_viz.write_root_pose_to_sim(goal, env_ids=ids)
+
+    @torch.no_grad()
+    def after_step(self):
+        """Collect held states (until the families are full) and publish metrics.
+        Called after rewards/dones, before done envs are reset."""
+        if not self.harvest_done:
+            self._harvest()
+        self.steps += 1
+        if self.steps % 2000 == 0:
+            self._verify_tables()
+        self._publish()
+
+    # ------------------------------------------------------------ harvest
+    def held_mask(self):
+        env, s = self.env, self.settings
+        origin = env.scene.env_origins
+        obj = env.object.data
+        z = obj.root_pos_w[:, 2]-origin[:, 2]
+        table_top = env._table_z_per_env+TABLE_SIZE[2]/2
+        force = env.touch_force_w.norm(dim=-1)                      # (n, 5) pad forces this step
+        grasp = (force[:, THUMB] > s.grasp_force_n) & (torch.cat((force[:, :THUMB], force[:, THUMB+1:]), 1) > s.grasp_force_n).any(1)
+        slow = (obj.root_lin_vel_w.norm(dim=-1) < s.max_object_speed) & (obj.root_ang_vel_w.norm(dim=-1) < s.max_object_spin)
+        finite = torch.isfinite(env.sim.data.qpos).all(1) & torch.isfinite(env.sim.data.qvel).all(1)
+        return env._lifted_object & grasp & slow & finite & (z > table_top+s.table_clearance_m) & ~env.reset_buf & ~self.eval_mask
+
+    def in_goal_volume(self):
+        rc = self.env.cfg.reset
+        lo = torch.tensor(rc.target_volume_mins, device=self.device)
+        hi = torch.tensor(rc.target_volume_maxs, device=self.device)
+        center, half = (lo+hi)/2, (hi-lo)/2*rc.target_volume_region_scale
+        pos = self.env.object.data.root_pos_w-self.env.scene.env_origins
+        return ((pos >= center-half) & (pos <= center+half)).all(1)
+
+    def _harvest(self):
+        s, env = self.settings, self.env
+        self.harvest_steps += 1
+        held = self.held_mask()
+        for f in HARVESTED:
+            if f not in self.blocks:
+                continue
+            a, b = self.blocks[f]
+            need = b-a-self.fill_count[f]
+            if need <= 0:
+                continue
+            cand = held & self.in_goal_volume() if f == 'near_goal' else held
+            ids = cand.nonzero().squeeze(-1)
+            if ids.numel() == 0:
+                continue
+            ids = ids[torch.randperm(ids.numel(), device=self.device, generator=self.generator)[:4*s.harvest_per_step]]
+            assets = env._object_asset_index_per_env[ids]
+            cap = max(1, math.ceil(s.harvest_asset_cap*(b-a)/self.n_assets))
+            order = torch.argsort(assets, stable=True)
+            sorted_assets = assets[order]
+            _, counts = torch.unique_consecutive(sorted_assets, return_counts=True)
+            rank = torch.empty_like(order)
+            rank[order] = torch.arange(len(order), device=self.device)-torch.repeat_interleave(torch.cumsum(counts, 0)-counts, counts)
+            ok = self.asset_harvest[f][assets]+rank < cap
+            ids, assets = ids[ok][:min(s.harvest_per_step, need)], assets[ok][:min(s.harvest_per_step, need)]
+            if ids.numel():
+                self._store_held(f, ids, assets)
+        if self.harvest_steps >= s.harvest_max_steps or all(
+                self.fill_count[f] == self.blocks[f][1]-self.blocks[f][0] for f in HARVESTED if f in self.blocks):
+            self.harvest_done = True
+            print('SGS_HARVEST_DONE '+' '.join(f'{f}={self.fill_count[f]}/{self.blocks[f][1]-self.blocks[f][0]}'
+                                                for f in HARVESTED if f in self.blocks)+f' steps={self.harvest_steps}', flush=True)
+        self._sync_available()
+
+    def _store_held(self, family, ids, assets):
+        env, c, rc = self.env, self.cfg, self.env.cfg.reset
+        a, _ = self.blocks[family]
+        slots = torch.arange(a+self.fill_count[family], a+self.fill_count[family]+len(ids), device=self.device)
+        origin = env.scene.env_origins[ids]
+        obj_pos = env.object.data.root_pos_w[ids]-origin
+        obj_quat = env.object.data.root_quat_w[ids]
+        c['asset'][slots] = assets
+        c['qpos'][slots], c['qvel'][slots] = env.sim.data.qpos[ids], env.sim.data.qvel[ids]
+        if self.na:
+            c['act'][slots] = env.sim.data.act[ids]
+        c['targets'][slots] = env._cur_targets[ids]
+        setpoint = getattr(env.robot, '_setpoint', None)
+        c['setpoint'][slots] = (setpoint if setpoint is not None else env._cur_targets)[ids]
+        c['table_z'][slots] = env._table_z_per_env[ids]
+        c['object_init_z'][slots] = env._object_init_z[ids]
+        c['object_pose'][slots] = torch.cat((obj_pos, obj_quat), -1)
+        c['joint_pos'][slots], c['joint_vel'][slots] = env.robot.data.joint_pos[ids], env.robot.data.joint_vel[ids]
+        n = len(ids)
+        if family == 'stable_grasp':
+            pos, quat = self.goal_sampling.sample_absolute_goal_pose(
+                mins=rc.target_volume_mins, maxs=rc.target_volume_maxs, scale=rc.target_volume_region_scale,
+                n_envs=n, device=self.device)
+        else:
+            frac = torch.rand(n, device=self.device, generator=self.generator)*self.settings.near_goal_max_fraction
+            pos, quat = self.goal_sampling.sample_delta_goal_pose(
+                prev_pos=obj_pos, prev_quat_wxyz=obj_quat, delta_distance=frac[:, None]*rc.delta_goal_distance,
+                delta_rotation_degrees=frac*rc.delta_rotation_degrees, mins=rc.target_volume_mins,
+                maxs=rc.target_volume_maxs, scale=rc.target_volume_region_scale)
+        c['goal_pose'][slots] = torch.cat((pos, quat), -1)
+        self.filled[slots] = True
+        self.fill_count[family] += n
+        self.asset_harvest[family].index_add_(0, assets, torch.ones_like(assets))
+
+    # ------------------------------------------------------------ metrics
+    def _publish(self):
+        """Scalars for the rl_games observer (0-d tensors, no host sync)."""
+        x, p = self.env.extras, self.sampler.success_rate()
+        avail = self.sampler.available.float()
+        masked_mean = lambda v, m: (v*m).sum()/m.sum().clamp_min(1.)
+        for k, r in self.eval_stats.items():
+            x[f'sgs/eval_{k}'] = r.mean()
+        x['sgs/eval_episodes_in_window'] = float(self.eval_stats['any_goal_success_rate'].size)
+        prob = self.sampler.probabilities()
+        x['sgs/effective_configs_fraction'] = 1./(prob.square().sum()*avail.sum().clamp_min(1.))
+        x['sgs/available_configs'] = avail.sum()
+        x['sgs/success_rate_mean'] = masked_mean(p, avail)
+        x['sgs/configs_p0_fraction'] = masked_mean((p == 0).float(), avail)
+        x['sgs/configs_p1_fraction'] = masked_mean((p == 1).float(), avail)
+        for f in self.settings.families:
+            a, b = self.blocks[f]
+            x[f'sgs/{f}/success_rate_mean'] = masked_mean(p[a:b], avail[a:b])
+            x[f'sgs/{f}/sampling_share'] = prob[a:b].sum()
+            x[f'sgs/{f}/train_any_goal_success_rate'] = self.train_stats[f].mean()
+            x[f'sgs/{f}/train_fall_rate'] = self.fall_stats[f].mean()
+            x[f'sgs/{f}/configs'] = float(self.fill_count[f])
+        x['sgs/harvest_done'] = float(self.harvest_done)
+
+    # ------------------------------------------------------------ state
+    def state_dict(self):
+        return dict(settings=asdict(self.settings), sampler=self.sampler.state_dict(),
+                    cfg={k: v.cpu() for k, v in self.cfg.items()}, filled=self.filled.cpu(),
+                    fill_count=dict(self.fill_count), harvest_steps=self.harvest_steps, harvest_done=self.harvest_done,
+                    asset_harvest={k: v.cpu() for k, v in self.asset_harvest.items()},
+                    n_assets=self.n_assets, nq=self.cfg['qpos'].shape[1], nv=self.cfg['qvel'].shape[1])
+
+    def load_state_dict(self, state):
+        saved = SgsSettings(**state['settings']).layout()
+        if saved != self.settings.layout():
+            raise ValueError(f'SGS configuration layout changed since the checkpoint: {saved} vs {self.settings.layout()}')
+        if (state['n_assets'], state['nq'], state['nv']) != (self.n_assets, self.cfg['qpos'].shape[1], self.cfg['qvel'].shape[1]):
+            raise ValueError('SGS checkpoint is for another scene')
+        self.sampler.load_state_dict(state['sampler'])
+        for k, v in state['cfg'].items():
+            self.cfg[k].copy_(v.to(self.device))
+        self.filled.copy_(state['filled'].to(self.device))
+        self.fill_count = dict(state['fill_count'])
+        self.harvest_steps, self.harvest_done = state['harvest_steps'], state['harvest_done']
+        for k, v in state['asset_harvest'].items():
+            self.asset_harvest[k].copy_(v.to(self.device))
+        self._sync_available()
