@@ -58,6 +58,12 @@ def main():
                    help='Continuous mode: checkpointed stop after this many training seconds (probes)')
     p.add_argument('--snapshot-epochs', type=int, default=1024,
                    help='Continuous mode: immutable snapshot every N epochs (0 = none; latest.pth and best stay)')
+    p.add_argument('--minibatch-size', type=int,
+                   help='PPO minibatch for actor and critic (default 4*num_envs: 4 minibatches per epoch). '
+                        'More minibatches = more gradient steps per epoch on the same rollout')
+    p.add_argument('--best-delay-epochs', type=int, default=0,
+                   help='New continuous run: start best-checkpoint tracking this many epochs after the resume '
+                        '(0 = from the first epoch)')
     if backend == 'isaac':
         AppLauncher.add_app_launcher_args(p)
     else:
@@ -218,13 +224,22 @@ def main():
         if object_physics:
             (args.output/'per_env_object_physics.json').write_text(json.dumps(object_physics,indent=2))
         ac = agent['params']['config']
+        minibatch_size = args.minibatch_size or 4*args.num_envs
+        if (ac['horizon_length']*args.num_envs) % minibatch_size:
+            raise ValueError(f'--minibatch-size {minibatch_size} must divide the rollout '
+                             f'{ac["horizon_length"]}x{args.num_envs}')
         ac.update(name='g1_sapg_bps128_control' if args.control else 'g1_sapg_bps128_touch',
             num_actors=args.num_envs,expl_coef_block_size=args.num_envs//6,
             device=args.device,device_name=args.device,multi_gpu=False,
-            minibatch_size=4*args.num_envs,max_frames=args.max_frames,max_epochs=args.max_epochs,
+            minibatch_size=minibatch_size,max_frames=args.max_frames,max_epochs=args.max_epochs,
             learning_rate=1e-5,lr_schedule='constant',save_frequency=0,
             train_dir=str(args.output.parent),full_experiment_name=args.output.name)
-        ac['central_value_config'].update(minibatch_size=4*args.num_envs,learning_rate=1e-4)
+        ac['central_value_config'].update(minibatch_size=minibatch_size,learning_rate=1e-4)
+        optimization = dict(minibatch_size=minibatch_size,
+            minibatches_per_epoch=ac['horizon_length']*args.num_envs//minibatch_size,
+            actor_gradient_steps_per_epoch=ac['mini_epochs']*ac['horizon_length']*args.num_envs//minibatch_size,
+            critic_gradient_steps_per_epoch=ac['central_value_config']['mini_epochs']*ac['horizon_length']*args.num_envs//minibatch_size)
+        print('OPTIMIZATION '+json.dumps(optimization),flush=True)
         if args.continuous:
             ac.pop('score_to_win',None)
         if not args.control:
@@ -263,12 +278,19 @@ def main():
             for meter in (algo.game_rewards,algo.game_shaped_rewards,algo.game_lengths):
                 meter.clear()
             algo.last_mean_rewards = -1e9
+            if args.best_delay_epochs:
+                # Fresh episodes finish short (failures) first; skip that transient.
+                from dextrah_lab.wholebody.carry_training import install_delayed_best
+                optimization['best_tracking'] = install_delayed_best(algo, args.best_delay_epochs)
         if args.continuous:
             def request_checkpointed_stop(signum, frame):
                 observer.stop_requested = signal.Signals(signum).name
                 print('CHECKPOINTED_STOP_REQUESTED '+observer.stop_requested,flush=True)
             signal.signal(signal.SIGUSR1,request_checkpointed_stop)
             signal.signal(signal.SIGTERM,request_checkpointed_stop)
+        if provenance:
+            provenance['optimization'] = optimization
+            (args.output/'resume_provenance.json').write_text(json.dumps(provenance,indent=2))
         if resume_info:
             (args.output/'resume_validation.json').write_text(json.dumps(resume_info,indent=2))
             print('CONTINUATION_RESUMED '+json.dumps(resume_info),flush=True)
@@ -286,7 +308,7 @@ def main():
                 tactile_publish_hz=None if args.control else cfg.touch.publish_hz,
                 best_checkpoint_metric='SAPG leader rolling mean training episode reward; not evaluation success',
                 per_env_object_physics=object_physics,snapshot_epochs=args.snapshot_epochs,
-                material_override=False,arm_torques=False),allow_val_change=True)
+                material_override=False,arm_torques=False,optimization=optimization),allow_val_change=True)
             wandb.run.summary.update(dict(warmstart_verified=True,experiment_status='training'))
             (args.output/'wandb.json').write_text(json.dumps(dict(url=wandb.run.url,id=wandb.run.id),indent=2))
         start_frame,start_time = int(algo.frame),time.monotonic()
