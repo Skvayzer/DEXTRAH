@@ -52,6 +52,7 @@ fi
 if [[ "${PER_ENV_OBJECT_PHYSICS:-0}" == 1 ]]; then extra_args+=(--per-env-object-physics); fi
 if [[ -n "${MINIBATCH_SIZE:-}" ]]; then extra_args+=(--minibatch-size "$MINIBATCH_SIZE"); fi
 if [[ -n "${BEST_DELAY_EPOCHS:-}" ]]; then extra_args+=(--best-delay-epochs "$BEST_DELAY_EPOCHS"); fi
+if [[ -n "${BEST_METRIC:-}" ]]; then extra_args+=(--best-metric "$BEST_METRIC"); fi
 if [[ "${WANDB:-1}" == 1 ]]; then extra_args+=(--wandb); fi
 training_pid=''
 trap 'if [[ -n "$training_pid" ]]; then kill -USR1 "$training_pid"; fi' USR1 TERM

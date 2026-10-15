@@ -89,3 +89,13 @@ A held family gets sampling probability once it is complete (or after
 Each network checkpoint `X.pth` gets `X.sgs.pt` (configuration set + outcome windows).
 `--resume X.pth --sgs` continues them when `X.sgs.pt` exists (window shape and family
 layout must match; kernel hyperparameters may be retuned).
+
+## Best checkpoint
+
+Under SGS the training reward describes the reset mix and falls when SGS moves to harder
+configurations (run 1301: best 2261 at hour 2, reward 1577 at hour 8 while eval success
+rose 5.5% -> 7%). `--best-metric sgs_eval_goals` (sbatch `BEST_METRIC=sgs_eval_goals`;
+or `sgs_eval_success`) disables rl_games' reward best and saves `nn/<name>.pth` +
+`best/model.pth` when the full 3000-episode window of the evaluation envs reaches a new
+maximum, after `--best-delay-epochs`; `best/best_eval.json` records the values
+(`dextrah_lab/sgs/best.py`).

@@ -74,6 +74,9 @@ def main():
     p.add_argument('--sgs-eval-every', type=int, default=16,
                    help='Every Nth env resets from fresh rho samples (Reaching) and is logged as sgs/eval_*')
     p.add_argument('--sgs-harvest-max-steps', type=int, default=6000)
+    p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success'], default='reward',
+                   help='Best checkpoint by training reward (rl_games) or, with --sgs, by the rolling statistic of '
+                        'the fresh-rho evaluation envs (sgs/eval_goals_reached_count or sgs/eval_any_goal_success_rate)')
     p.add_argument('--best-delay-epochs', type=int, default=0,
                    help='New continuous run: start best-checkpoint tracking this many epochs after the resume '
                         '(0 = from the first epoch)')
@@ -130,6 +133,8 @@ def main():
             raise ValueError('The mjlab backend implements the tactile task only')
         if args.sgs and (backend != 'mjlab' or not args.continuous):
             raise ValueError('--sgs is implemented for the continuous mjlab fixed-body task')
+        if args.best_metric != 'reward' and not args.sgs:
+            raise ValueError(f'--best-metric {args.best_metric} needs --sgs (its evaluation envs)')
         sgs_report = None
         torch.set_num_threads(4)
         register_models()
@@ -289,6 +294,11 @@ def main():
             args.calibration,args.calibration_steps,bool(args.resume),args.control,args.continuous)
         observer.snapshot_epochs = args.snapshot_epochs
         observers = [EnvStatsAlgoObserver(),observer]
+        eval_best = None
+        if args.best_metric != 'reward':
+            from dextrah_lab.sgs.best import SgsEvalBest
+            eval_best = SgsEvalBest(env, args.best_metric, args.best_delay_epochs)
+            observers.append(eval_best)
         if args.wandb:
             class ExistingWandbObserver:
                 def before_init(self,base_name,config,experiment_name):
@@ -318,10 +328,13 @@ def main():
             for meter in (algo.game_rewards,algo.game_shaped_rewards,algo.game_lengths):
                 meter.clear()
             algo.last_mean_rewards = -1e9
-            if args.best_delay_epochs:
+            if args.best_delay_epochs and eval_best is None:
                 # Fresh episodes finish short (failures) first; skip that transient.
                 from dextrah_lab.wholebody.carry_training import install_delayed_best
                 optimization['best_tracking'] = install_delayed_best(algo, args.best_delay_epochs)
+        if eval_best is not None:
+            # After resume: rl_games' reward-based best never saves; best follows the eval envs.
+            optimization['best_tracking'] = eval_best.disable_reward_best()
         if args.continuous:
             def request_checkpointed_stop(signum, frame):
                 observer.stop_requested = signal.Signals(signum).name
