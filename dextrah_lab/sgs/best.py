@@ -5,7 +5,8 @@ included) and falls when SGS moves to harder configurations, so rl_games'
 reward-based "best" stops tracking task quality. This observer saves the best
 checkpoint (same file and best/model.pth link as rl_games) when a rolling
 evaluation statistic of the fresh-rho evaluation envs (MjSgsTask.eval_stats,
-full window only) reaches a new maximum.
+full window only) reaches a new maximum, at most once per ``min_interval_epochs`` (after a restart the window
+refills with short episodes first, so the statistic climbs for a while).
 """
 import json
 import os
@@ -18,11 +19,12 @@ METRICS = {'sgs_eval_goals': 'goals_reached_count', 'sgs_eval_success': 'any_goa
 
 
 class SgsEvalBest:
-    def __init__(self, env, metric, delay_epochs=0):
+    def __init__(self, env, metric, delay_epochs=0, min_interval_epochs=25):
         if metric not in METRICS:
             raise ValueError(f'Unknown SGS best metric {metric}; choose from {sorted(METRICS)}')
         self.env, self.metric, self.key, self.delay = env, metric, METRICS[metric], int(delay_epochs)
         self.algo, self.best, self.start_epoch = None, float('-inf'), None
+        self.min_interval, self.last_save_epoch = int(min_interval_epochs), None
 
     def after_init(self, algo):
         self.algo = algo
@@ -41,7 +43,8 @@ class SgsEvalBest:
         algo.update_epoch = MethodType(update_epoch, algo)
         self.start_epoch = int(algo.epoch_num)
         return dict(metric=self.metric, statistic=f'sgs/eval_{self.key}', delay_epochs=self.delay,
-                    starts_after_epoch=self.start_epoch+self.delay, reward_best_disabled=True)
+                    starts_after_epoch=self.start_epoch+self.delay, min_interval_epochs=self.min_interval,
+                    reward_best_disabled=True)
 
     def after_print_stats(self, frame, epoch_num, total_time):
         if self.start_epoch is None or epoch_num < self.start_epoch+self.delay:
@@ -50,10 +53,12 @@ class SgsEvalBest:
         window = stats[self.key]
         if window.size < len(window.values):          # rolling window not yet refilled
             return
+        if self.last_save_epoch is not None and epoch_num < self.last_save_epoch+self.min_interval:
+            return
         value = float(window.mean())
         if value <= self.best:
             return
-        self.best = value
+        self.best, self.last_save_epoch = value, int(epoch_num)
         algo = self.algo
         path = os.path.join(algo.nn_dir, algo.config['name'])
         algo.save(path)

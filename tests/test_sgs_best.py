@@ -41,7 +41,7 @@ class SgsEvalBestTests(unittest.TestCase):
             stats = {k: _Rolling(4, 'cpu') for k in ('any_goal_success_rate', 'goals_reached_count', 'ever_lifted_rate')}
             env = SimpleNamespace(_sgs=SimpleNamespace(eval_stats=stats))
             algo = Algo(root)
-            best = SgsEvalBest(env, 'sgs_eval_goals', delay_epochs=2)
+            best = SgsEvalBest(env, 'sgs_eval_goals', delay_epochs=2, min_interval_epochs=2)
             best.after_init(algo)
             report = best.disable_reward_best()
             self.assertEqual(report['starts_after_epoch'], 102)
@@ -61,8 +61,10 @@ class SgsEvalBestTests(unittest.TestCase):
             stats['goals_reached_count'].add(torch.tensor([0.]))        # mean 1.75: not better
             best.after_print_stats(40, 104, 0.)
             self.assertEqual(len(algo.saved), 1)
-            stats['goals_reached_count'].add(torch.tensor([9.]))        # new best
-            best.after_print_stats(50, 105, 0.)
+            stats['goals_reached_count'].add(torch.tensor([9.]))        # better, but too soon after the last save
+            best.after_print_stats(45, 104, 0.)
+            self.assertEqual(len(algo.saved), 1)
+            best.after_print_stats(50, 105, 0.)                         # new best
             self.assertEqual(len(algo.saved), 2)
             record = json.loads(open(os.path.join(root, 'best', 'best_eval.json')).read())
             self.assertEqual((record['epoch'], record['frame']), (105, 50))
