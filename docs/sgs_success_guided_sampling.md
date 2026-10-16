@@ -102,10 +102,15 @@ maximum, after `--best-delay-epochs`; `best/best_eval.json` records the values
 
 ## Spawn validation (opt-in: `--sgs-validate-spawns`, sbatch `SGS_VALIDATE_SPAWNS=1`)
 
-rho sometimes produces starts the policy cannot influence: the object spawned inside
-the robot hand/arm (1.25% of draws, median 3 cm overlap) or inside the table (1.43%,
-median 8 cm; mostly upright hammers), which MuJoCo ejects, and objects that tip or
-slide off the table edge after the 10 cm drop. With this flag every reaching
+rho often produces starts the policy cannot influence. The object link origin spawns
+only 10 cm above the table at a uniformly random orientation, so long tools tilted
+towards vertical start inside the table, and spawns at hand height start inside the
+robot. MuJoCo Warp (the training simulator) finds such first-step penetrations
+(> 2 mm robot / > 5 mm table) in 27 of 120 sampled draws (22%; the depths match the
+analytic lowest point of the object, e.g. 66 mm into the table); the objects are pushed
+out and often tumble off (job 1328's check: 18% of draws end off the table). C MuJoCo
+copies of the scene miss most of these contacts (stale compile-time data for the
+per-world object slots), so earlier C-MuJoCo estimates (1-4%) were wrong. With this flag every reaching
 configuration and every evaluation start is a rho draw that passed a settle check:
 simulated for `settle_s` = 1.5 s with the robot holding its reset joint targets (no
 policy), the object must not start inside the robot (> 2 mm first-step penetration) or
