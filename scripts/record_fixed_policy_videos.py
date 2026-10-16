@@ -146,6 +146,18 @@ def record(args):
     return env.sim.mj_model, meta
 
 
+def compile_scene():
+    """The single-world MuJoCo model of the fixed-body scene (CPU compile)."""
+    from mjlab.scene import Scene
+    from dextrah_lab.mj import env as E
+    from dextrah_lab.mj.robot import ContactParams
+    from dextrah_lab.mj.scene import SceneParams, build_scene_cfg
+    ref = json.loads(E.REFERENCE_FIXED.read_text())
+    cfg = E.load_run_cfg(E.RUN_FIXED)
+    return Scene(build_scene_cfg(1, SceneParams(contact=ContactParams(g1_arm_armature=True)), fixed_body_reference=ref,
+                                 robot_pose=(cfg.assets.robot_init_pos, cfg.assets.robot_init_rot)), 'cpu').compile()
+
+
 def quat_mat(q):
     import numpy as np
     w, x, y, z = q
@@ -181,6 +193,11 @@ def render(args, mj_model, meta):
             m.geom_pos[g] = ob['pos'][a, s]-ob['com'][a]
             m.geom_quat[g] = ob['quat'][a, s]
             m.geom_rgba[g] = (.95, .55, .1, 1.) if ob['used'][a, s] else (0, 0, 0, 0)
+            # The template compiled every slot at the body origin, so C MuJoCo
+            # flagged it "same frame as body" and would ignore the pose written
+            # here (collapsing the parts onto the COM). MuJoCo Warp has no such
+            # shortcut; clear the flag so the render matches the simulation.
+            m.geom_sameframe[g] = 0
         d = mujoco.MjData(m)
         renderer = mujoco.Renderer(m, H, W)
         opt = mujoco.MjvOption()
@@ -233,9 +250,9 @@ def render(args, mj_model, meta):
 
 def main():
     if not os.environ.get('SLURM_JOB_ID'):
-        raise RuntimeError('Run inside a Slurm GPU allocation')
+        raise RuntimeError('Run inside a Slurm GPU allocation (EGL)')
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--checkpoint', type=Path, required=True)
+    p.add_argument('--checkpoint', type=Path, help='Required unless --render-only')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=1200, help='>= assets: one env per asset')
     p.add_argument('--per-type', type=int, default=2)
@@ -243,9 +260,12 @@ def main():
     p.add_argument('--fps', type=int, default=30)
     p.add_argument('--width', type=int, default=640)
     p.add_argument('--height', type=int, default=480)
+    p.add_argument('--render-only', type=Path, help='Re-render an existing recording directory (no simulation)')
     p.add_argument('--nconmax', type=int, default=16)
     p.add_argument('--njmax', type=int, default=160)
     args = p.parse_args()
+    if not args.render_only and args.checkpoint is None:
+        p.error('--checkpoint is required unless --render-only')
     if args.output.exists():
         raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
@@ -253,7 +273,14 @@ def main():
     try:
         from dextrah_lab.mj.compat import install
         install()
-        mj_model, meta = record(args)
+        if args.render_only:
+            import shutil
+            for name in ('trajectories.npz', 'objects.npz', 'recording.json'):
+                shutil.copy2(args.render_only/name, args.output/name)
+            meta = json.loads((args.output/'recording.json').read_text())
+            mj_model = compile_scene()
+        else:
+            mj_model, meta = record(args)
         render(args, mj_model, meta)
         report.update(completed=True, videos=sorted(str(p) for p in (args.output/'videos').glob('*.mp4')))
         print('FIXED_VIDEOS_COMPLETE '+json.dumps(report), flush=True)
