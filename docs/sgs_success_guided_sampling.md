@@ -99,3 +99,21 @@ or `sgs_eval_success`) disables rl_games' reward best and saves `nn/<name>.pth` 
 `best/model.pth` when the full 3000-episode window of the evaluation envs reaches a new
 maximum, after `--best-delay-epochs`; `best/best_eval.json` records the values
 (`dextrah_lab/sgs/best.py`).
+
+## Spawn validation (opt-in: `--sgs-validate-spawns`, sbatch `SGS_VALIDATE_SPAWNS=1`)
+
+rho sometimes produces starts the policy cannot influence: the object spawned inside
+the robot hand/arm (1.25% of draws, median 3 cm overlap) or inside the table (1.43%,
+median 8 cm; mostly upright hammers), which MuJoCo ejects, and objects that tip or
+slide off the table edge after the 10 cm drop. With this flag every reaching
+configuration and every evaluation start is a rho draw that passed a settle check:
+simulated for `settle_s` = 1.5 s with the robot holding its reset joint targets (no
+policy), the object must never touch the robot, never exceed 2 m/s (a 10 cm drop lands
+at 1.4 m/s; faster means an overlap ejection), and end at rest (< 5 cm/s) on the table
+top at least 3 cm inside its edges. Failing draws are redrawn (same asset). The episode
+still starts from the original pre-drop state. Evaluation envs then draw uniformly from
+a pool of `--sgs-eval-pool` (16384) validated fresh draws, so `sgs/eval_*` measures the
+validated distribution (expect a small upward step at the switch). On resume, saved
+reaching configurations that were never checked are checked once; replaced ones start
+with empty outcome windows. Counts by reason: `SGS_SPAWN_CHECK` / `SGS_REVALIDATED`
+log lines and `resume_provenance.json` (`sgs.spawn_check`).

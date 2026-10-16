@@ -103,7 +103,64 @@ def make_task(env=None, **kw):
         return env, MjSgsTask(env, settings)
 
 
+def make_validating(reject, env=None, state=None, **kw):
+    """Task with validate_spawns; the settle check is replaced by `reject(call, n)`
+    returning a bool mask of rejected candidates (physics is not simulated here)."""
+    env = env or make_env()
+    calls = []
+    def fake_check(self, cand, assets):
+        calls.append(len(assets))
+        return ~reject(len(calls), len(assets))
+    settings = SgsSettings(**dict(dict(num_configs=30, history=4, eval_every=4, harvest_per_step=3, stats_window=50,
+                                       validate_spawns=True, eval_pool_size=8), **kw))
+    with mock.patch.object(mj_task, 'object_indices', lambda m: (1, np.arange(4))), \
+            mock.patch.object(MjSgsTask, '_spawn_check', fake_check):
+        return env, MjSgsTask(env, settings, state=state), calls
+
+
 class MjSgsTaskTests(unittest.TestCase):
+    def test_validation_redraws_rejected_starts(self):
+        torch.manual_seed(7)
+        # First round rejects every other candidate; later rounds accept all.
+        env, task, calls = make_validating(lambda call, n: (torch.arange(n) % 2 == 0) if call == 1 else torch.zeros(n, dtype=torch.bool))
+        self.assertEqual(calls[:2], [10, 5])                 # 10 reaching slots, 5 redrawn
+        self.assertTrue(bool(task.validated[:10].all()) and not bool(task.validated[10:].any()))
+        self.assertEqual(sorted(torch.bincount(task.cfg['asset'][:10], minlength=N_ASSET).tolist()), [1, 1, 2, 2, 2, 2])
+        self.assertIsNotNone(task.eval_pool)
+        self.assertEqual(len(task.eval_pool['asset']), 8)
+        # Evaluation envs start from the validated pool.
+        ids = torch.arange(N_ENV)
+        task.before_reset(ids)
+        task.after_reset(ids)
+        e = ids[ids % 4 == 3]
+        k = task.eval_current[e]
+        self.assertTrue(torch.equal(env.goal_viz.data.root_pos_w[e], task.eval_pool['goal_pose'][k, :3]))
+        self.assertTrue(torch.equal(env._object_asset_index_per_env[e], task.eval_pool['asset'][k]))
+        self.assertTrue(torch.equal(env.robot.data.joint_pos[e], task.eval_pool['joint_pos'][k]))
+
+    def test_validation_gives_up(self):
+        with self.assertRaises(RuntimeError):
+            make_validating(lambda call, n: torch.ones(n, dtype=torch.bool), spawn_max_rounds=3)
+
+    def test_resume_revalidates_unchecked_reaching(self):
+        torch.manual_seed(8)
+        env, old = make_task()                               # saved without validation
+        ids = torch.arange(N_ENV)
+        old.before_reset(ids); old.after_reset(ids)
+        env._successes[:] = 1
+        old.before_reset(ids)
+        state = old.state_dict()
+        before = state['cfg']['object_pose'].clone()
+        # The check rejects reaching slots 0 and 1 once.
+        env2, new, calls = make_validating(lambda call, n: (torch.arange(n) < 2) if call == 1 else torch.zeros(n, dtype=torch.bool), state=state)
+        self.assertEqual(calls[:2], [10, 2])
+        self.assertTrue(bool(new.validated[:10].all()))
+        self.assertFalse(torch.equal(new.cfg['object_pose'][:2], before[:2].to(new.device)))
+        self.assertTrue(torch.equal(new.cfg['object_pose'][2:10], before[2:10].to(new.device)))
+        self.assertEqual(new.sampler.count[:2].tolist(), [0, 0])
+        self.assertFalse(bool(new.sampler.outcomes[:2].any()))
+        self.assertTrue(torch.equal(new.sampler.outcomes[2:], old.sampler.outcomes[2:]))
+
     def test_blocks_and_reaching_capture(self):
         torch.manual_seed(3)
         env, task = make_task()

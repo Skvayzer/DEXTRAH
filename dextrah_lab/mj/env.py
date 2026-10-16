@@ -382,9 +382,7 @@ class G1SonicTouchMjEnv:
     def enable_sgs(self, settings, state=None):
         """Opt-in Success Guided Sampling of episode configurations (dextrah_lab/sgs)."""
         from dextrah_lab.sgs.mj_task import MjSgsTask
-        self._sgs = MjSgsTask(self, settings)
-        if state is not None:
-            self._sgs.load_state_dict(state)
+        self._sgs = MjSgsTask(self, settings, state=state)
         return self._sgs
 
     def enable_nan_capture(self, out_dir, depth=4, max_abs_qvel=None):

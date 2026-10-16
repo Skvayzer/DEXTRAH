@@ -39,6 +39,7 @@ Unlike the paper's separate evaluation runs, these episodes also feed PPO.
 """
 from dataclasses import asdict, dataclass, field
 import inspect
+import json
 import math
 
 import numpy as np
@@ -50,6 +51,7 @@ from dextrah_lab.object_shape.bank import map_features
 from .sampler import MANIPULATION, SuccessGuidedSampler
 
 FAMILIES = ('reaching', 'stable_grasp', 'near_goal')
+RHO_FIELDS = ('joint_pos', 'joint_vel', 'targets', 'setpoint', 'table_z', 'object_pose', 'object_init_z', 'goal_pose')
 HARVESTED = ('stable_grasp', 'near_goal')
 THUMB = 0   # dextrah_lab.g1_adept.contact.FINGERS order
 
@@ -73,6 +75,15 @@ class SgsSettings:
     max_object_speed: float = .5         # m/s, centre of mass
     max_object_spin: float = 5.          # rad/s
     stats_window: int = 3000             # episodes per rolling statistic (rl_games games_to_track)
+    # Spawn validation (opt-in): reaching configurations and evaluation starts must pass a
+    # passive settle check (robot holding its reset targets, no policy).
+    validate_spawns: bool = False
+    eval_pool_size: int = 16384          # validated fresh rho starts the evaluation envs draw from
+    settle_s: float = 1.5                # simulated settling time per candidate
+    spawn_max_speed: float = 2.         # m/s, COM, during settling (a 10 cm drop lands at 1.4 m/s)
+    spawn_rest_speed: float = .05        # m/s, COM, at the end of settling
+    spawn_edge_margin: float = .03       # settled COM at least this far inside the table top edges
+    spawn_max_rounds: int = 20           # redraws per slot before giving up
 
     def __post_init__(self):
         self.families = tuple(self.families)
@@ -110,7 +121,7 @@ class _Rolling:
 
 
 class MjSgsTask:
-    def __init__(self, env, settings=SgsSettings(), generator=None):
+    def __init__(self, env, settings=SgsSettings(), generator=None, state=None):
         if not getattr(env, '_fixed_body', False):
             raise NotImplementedError('SGS is implemented for the fixed-body mjlab task')
         rc = env.cfg.reset
@@ -165,8 +176,23 @@ class MjSgsTask:
         self.train_stats = {f: _Rolling(w, self.device) for f in settings.families}
         self.fall_stats = {f: _Rolling(w, self.device) for f in settings.families}
         self.steps = 0
-        if 'reaching' in settings.families:
+        self.validated = torch.zeros(N, dtype=torch.bool, device=self.device)
+        self.spawn_stats = dict(checked=0, valid=0, robot_contact=0, ejected=0, off_table=0, not_at_rest=0)
+        if state is not None:
+            self.load_state_dict(state)
+        elif 'reaching' in settings.families:
             self._fill_reaching()
+        # Evaluation starts: fresh rho (default) or a validated pool of fresh rho draws.
+        self.eval_pool = None
+        self.eval_current = torch.zeros(n_env, dtype=torch.long, device=self.device)
+        if settings.validate_spawns and settings.eval_pool_size > 0 and bool(self.eval_mask.any()):
+            P = settings.eval_pool_size
+            self.eval_pool = {k: torch.zeros(P, *v.shape[1:], dtype=v.dtype, device=self.device) for k, v in self.cfg.items()
+                              if k in RHO_FIELDS+('asset',)}
+            self.eval_pool['asset'] = torch.randint(0, self.n_assets, (P,), device=self.device, generator=self.generator)
+            self._draw_valid(torch.arange(P, device=self.device), self.eval_pool)
+        if settings.validate_spawns:
+            print('SGS_SPAWN_CHECK '+json.dumps(self.spawn_stats), flush=True)
         self._sync_available()
 
     # ------------------------------------------------------------------ setup
@@ -219,11 +245,10 @@ class MjSgsTask:
         if bad:
             raise RuntimeError(f'SGS asset tables do not reproduce the scene: {bad}')
 
-    def _fill_reaching(self):
-        """Draw the reaching configurations from the task's own reset functions,
-        capturing (not applying) their writes."""
+    def _capture_reaching(self, n):
+        """n draws of the task's reset distribution rho (robot, table, object, absolute
+        goal) from the task's own reset functions, writes captured, not applied."""
         env, ru = self.env, self.reset_utils
-        start, stop = self.blocks['reaching']
         saved = {k: getattr(env, k).clone() for k in ('_prev_targets', '_cur_targets', '_table_z_per_env', '_object_init_z')}
         rec = {}
         patches = {(env.robot, 'write_joint_state_to_sim'): lambda pos, vel, joint_ids=None, env_ids=None: rec.update(joint_pos=pos.clone(), joint_vel=vel.clone()),
@@ -233,10 +258,11 @@ class MjSgsTask:
                    (env.goal_viz, 'write_root_pose_to_sim'): lambda pose, env_ids=None: rec.update(goal=pose.clone())}
         for (obj, name), fn in patches.items():
             setattr(obj, name, fn)
+        out = {k: [] for k in RHO_FIELDS}
         try:
-            k = start
-            while k < stop:
-                ids = torch.arange(min(stop-k, env.num_envs), device=self.device)
+            k = 0
+            while k < n:
+                ids = torch.arange(min(n-k, env.num_envs), device=self.device)
                 rec.clear()
                 ru._randomize_robot_dof_state(env, ids)
                 ru._reset_table_pose(env, ids)
@@ -245,26 +271,143 @@ class MjSgsTask:
                 if bool(rec['object_vel'].abs().max() > 0):
                     raise RuntimeError('Reaching resets are expected to start the object at rest')
                 origin = env.scene.env_origins[ids]
-                s = slice(k, k+len(ids))
-                c = self.cfg
-                c['joint_pos'][s], c['joint_vel'][s] = rec['joint_pos'], rec['joint_vel']
-                c['targets'][s] = c['setpoint'][s] = env._cur_targets[ids]
-                c['table_z'][s] = rec['table'][:, 2]-origin[:, 2]
-                c['object_pose'][s] = torch.cat((rec['object'][:, :3]-origin, rec['object'][:, 3:]), -1)
-                c['object_init_z'][s] = env._object_init_z[ids]
-                c['goal_pose'][s] = torch.cat((rec['goal'][:, :3]-origin, rec['goal'][:, 3:]), -1)
+                out['joint_pos'].append(rec['joint_pos'])
+                out['joint_vel'].append(rec['joint_vel'])
+                out['targets'].append(env._cur_targets[ids].clone())
+                out['setpoint'].append(env._cur_targets[ids].clone())
+                out['table_z'].append(rec['table'][:, 2]-origin[:, 2])
+                out['object_pose'].append(torch.cat((rec['object'][:, :3]-origin, rec['object'][:, 3:]), -1))
+                out['object_init_z'].append(env._object_init_z[ids].clone())
+                out['goal_pose'].append(torch.cat((rec['goal'][:, :3]-origin, rec['goal'][:, 3:]), -1))
                 k += len(ids)
         finally:
             for obj, name in patches:
                 delattr(obj, name)
             for key, value in saved.items():
                 getattr(env, key).copy_(value)
-        # Balanced assets, independent of the sampled poses (rho does not couple them).
+        return {k: torch.cat(v) for k, v in out.items()}
+
+    def _draw_valid(self, slots, store):
+        """Fill store[...][slots] (assets already set) with rho draws; with
+        validate_spawns, redraw each slot until its draw passes the settle check."""
+        s = self.settings
+        todo = slots
+        for _ in range(s.spawn_max_rounds if s.validate_spawns else 1):
+            cand = self._capture_reaching(len(todo))
+            ok = self._spawn_check(cand, store['asset'][todo]) if s.validate_spawns else \
+                torch.ones(len(todo), dtype=torch.bool, device=self.device)
+            keep = todo[ok]
+            for key, value in cand.items():
+                store[key][keep] = value[ok]
+            todo = todo[~ok]
+            if todo.numel() == 0:
+                return
+        raise RuntimeError(f'{todo.numel()} starts failed the settle check {s.spawn_max_rounds} times')
+
+    def _fill_reaching(self):
+        """Reaching configurations: rho draws (validated with validate_spawns), assets
+        balanced and independent of the poses (rho does not couple them)."""
+        start, stop = self.blocks['reaching']
         n = stop-start
         perm = torch.randperm(n, device=self.device, generator=self.generator)
         self.cfg['asset'][start:stop] = perm % self.n_assets
+        self._draw_valid(torch.arange(start, stop, device=self.device), self.cfg)
         self.filled[start:stop] = True
+        self.validated[start:stop] = self.settings.validate_spawns
         self.fill_count['reaching'] = n
+
+    # ------------------------------------------------------- spawn check
+    def _write_rho(self, ids, store, k):
+        """Write rho-type starts store[k] (robot, table, object at rest, goal) into envs ids."""
+        env = self.env
+        origin = env.scene.env_origins[ids]
+        table = torch.zeros(len(ids), 7, device=self.device)
+        table[:, :3] = origin
+        table[:, 2] += store['table_z'][k]
+        table[:, 3] = 1.
+        env.table.write_root_pose_to_sim(table, env_ids=ids)
+        env._table_z_per_env[ids] = store['table_z'][k]
+        env.robot.write_joint_state_to_sim(store['joint_pos'][k], store['joint_vel'][k], env_ids=ids)
+        pose = store['object_pose'][k].clone()
+        pose[:, :3] += origin
+        env.object.write_root_pose_to_sim(pose, env_ids=ids)
+        env.object.write_root_velocity_to_sim(torch.zeros(len(ids), 6, device=self.device), env_ids=ids)
+        env._prev_targets[ids] = store['targets'][k]
+        env._cur_targets[ids] = store['targets'][k]
+        env.robot.reset_setpoint(ids, store['setpoint'][k])
+        env._object_init_z[ids] = store['object_init_z'][k]
+        goal = store['goal_pose'][k].clone()
+        goal[:, :3] += origin
+        env.goal_viz.write_root_pose_to_sim(goal, env_ids=ids)
+
+    def _object_robot_contact(self):
+        """(num_envs,) bool: the object touches any robot geom in the last step's contacts."""
+        import warp as wp
+        from dextrah_lab.mj.tactile import OBJECT, ROBOT
+        env = self.env
+        d = env.sim.wp_data
+        c = d.contact
+        geom = wp.to_torch(c.geom).long()
+        world = wp.to_torch(c.worldid).long()
+        partner = env.contacts.partner
+        active = torch.arange(geom.shape[0], device=self.device) < wp.to_torch(d.nacon)
+        active &= (wp.to_torch(c.type) & 1) > 0
+        active &= (geom >= 0).all(-1) & (geom < partner.numel()).all(-1) & (world >= 0) & (world < env.num_envs)
+        g0, g1 = torch.where(active, geom[:, 0], 0), torch.where(active, geom[:, 1], 0)
+        p0, p1 = partner[g0], partner[g1]
+        hit = active & (((p0 == OBJECT) & (p1 == ROBOT)) | ((p1 == OBJECT) & (p0 == ROBOT)))
+        out = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
+        out[world[hit]] = True
+        return out
+
+    @torch.no_grad()
+    def _spawn_check(self, cand, assets):
+        """Simulate each candidate start for settle_s with the robot holding its
+        reset targets (no policy). Valid: the object never touches the robot, is
+        never faster than spawn_max_speed (not ejected from an overlap), and ends
+        at rest on the table top, spawn_edge_margin inside its edges. Uses the
+        env's worlds (state is overwritten; the env is reset before training)."""
+        env, s = self.env, self.settings
+        if not hasattr(env, 'contacts'):
+            env._init_contacts()
+        n_env = env.num_envs
+        free, qadr = env.object._free_dof, env.object._free_qadr
+        half = torch.tensor((TABLE_SIZE[0]/2-s.spawn_edge_margin, TABLE_SIZE[1]/2-s.spawn_edge_margin), device=self.device)
+        result = []
+        for start in range(0, len(assets), n_env):
+            m = min(n_env, len(assets)-start)
+            ids = torch.arange(m, device=self.device)
+            sub = {k: v[start:start+m] for k, v in cand.items()}
+            self.assign_objects(ids, assets[start:start+m])
+            self._write_rho(ids, sub, torch.arange(m, device=self.device))
+            env.robot.set_joint_position_target(sub['targets'][:, env._position_target_joint_ids],
+                                                joint_ids=env._position_target_joint_ids_list, env_ids=ids)
+            env.object._wrench = None
+            env.sim.data.xfrc_applied.zero_()
+            env.sim.forward()
+            touched = torch.zeros(n_env, dtype=torch.bool, device=self.device)
+            vmax = torch.zeros(n_env, device=self.device)
+            for _ in range(max(1, round(s.settle_s/env.physics_dt))):
+                env._write_data_to_sim()
+                env.sim.step()
+                env.object.limit_angular_velocity(env.PHYSX_MAX_ANGULAR_VELOCITY)
+                touched |= self._object_robot_contact()
+                vmax = torch.maximum(vmax, env.sim.data.qvel[:, free:free+3].norm(dim=-1))
+            pos = (env.sim.data.qpos[:, qadr:qadr+3]-env.scene.env_origins)[:m]      # COM (body frame at the COM)
+            speed = env.sim.data.qvel[:m, free:free+3].norm(dim=-1)
+            top = sub['table_z']+TABLE_SIZE[2]/2
+            on_table = (pos[:, 2] > top-.005) & (pos[:, 0].abs() < half[0]) & (pos[:, 1].abs() < half[1])
+            touched, vmax = touched[:m], vmax[:m]
+            ejected = ~touched & (vmax >= s.spawn_max_speed)
+            off = ~touched & ~ejected & ~on_table
+            rest = ~touched & ~ejected & on_table & (speed >= s.spawn_rest_speed)
+            ok = ~touched & ~ejected & on_table & (speed < s.spawn_rest_speed)
+            st = self.spawn_stats
+            st['checked'] += m
+            for key, mask in (('valid', ok), ('robot_contact', touched), ('ejected', ejected), ('off_table', off), ('not_at_rest', rest)):
+                st[key] += int(mask.sum())
+            result.append(ok)
+        return torch.cat(result)
 
     def _sync_available(self):
         """A family takes part once complete (or once collection stops)."""
@@ -322,10 +465,17 @@ class MjSgsTask:
             self.eval_stats['any_goal_success_rate'].add(env._successes[finished_eval] > 0)
             self.eval_stats['goals_reached_count'].add(env._successes[finished_eval])
             self.eval_stats['ever_lifted_rate'].add(env._episode_ever_lifted[finished_eval])
-        # Evaluation: fresh rho sample, uniformly random asset.
+        # Evaluation: fresh rho sample with a uniformly random asset, or a uniform
+        # draw from the pool of validated fresh rho starts.
         eval_ids = env_ids[is_eval]
-        self.assign_objects(eval_ids, torch.randint(0, self.n_assets, (eval_ids.numel(),), device=self.device,
-                                                    generator=self.generator))
+        if self.eval_pool is None:
+            self.assign_objects(eval_ids, torch.randint(0, self.n_assets, (eval_ids.numel(),), device=self.device,
+                                                        generator=self.generator))
+        else:
+            pick = torch.randint(0, len(self.eval_pool['asset']), (eval_ids.numel(),), device=self.device,
+                                 generator=self.generator)
+            self.eval_current[eval_ids] = pick
+            self.assign_objects(eval_ids, self.eval_pool['asset'][pick])
         self.eval_started[eval_ids] = True
         self.current[eval_ids] = -1
         train_ids = env_ids[~is_eval]
@@ -337,6 +487,10 @@ class MjSgsTask:
         """Overwrite the task's rho reset with the chosen configurations."""
         env, c = self.env, self.cfg
         env_ids = env_ids.reshape(-1)
+        if self.eval_pool is not None:
+            e = env_ids[self.eval_mask[env_ids]]
+            if e.numel():
+                self._write_rho(e, self.eval_pool, self.eval_current[e])
         ids = env_ids[~self.eval_mask[env_ids]]
         if ids.numel() == 0:
             return
@@ -501,7 +655,8 @@ class MjSgsTask:
                     cfg={k: v.cpu() for k, v in self.cfg.items()}, filled=self.filled.cpu(),
                     fill_count=dict(self.fill_count), harvest_steps=self.harvest_steps, harvest_done=self.harvest_done,
                     asset_harvest={k: v.cpu() for k, v in self.asset_harvest.items()},
-                    n_assets=self.n_assets, nq=self.cfg['qpos'].shape[1], nv=self.cfg['qvel'].shape[1])
+                    n_assets=self.n_assets, nq=self.cfg['qpos'].shape[1], nv=self.cfg['qvel'].shape[1],
+                    validated=self.validated.cpu())
 
     def load_state_dict(self, state):
         saved = SgsSettings(**state['settings']).layout()
@@ -517,4 +672,25 @@ class MjSgsTask:
         self.harvest_steps, self.harvest_done = state['harvest_steps'], state['harvest_done']
         for k, v in state['asset_harvest'].items():
             self.asset_harvest[k].copy_(v.to(self.device))
+        if 'validated' in state:
+            self.validated.copy_(state['validated'].to(self.device))
+        if self.settings.validate_spawns and 'reaching' in self.blocks:
+            self._revalidate_reaching()
         self._sync_available()
+
+    def _revalidate_reaching(self):
+        """Check saved reaching configurations not validated yet; redraw (same asset)
+        the ones that fail and clear their outcome windows."""
+        a, b = self.blocks['reaching']
+        slots = torch.arange(a, b, device=self.device)[~self.validated[a:b]]
+        if slots.numel() == 0:
+            return
+        ok = self._spawn_check({k: self.cfg[k][slots] for k in RHO_FIELDS}, self.cfg['asset'][slots])
+        bad = slots[~ok]
+        if bad.numel():
+            self._draw_valid(bad, self.cfg)
+            self.sampler.outcomes[bad] = False
+            self.sampler.head[bad] = 0
+            self.sampler.count[bad] = 0
+        self.validated[slots] = True
+        print(f'SGS_REVALIDATED reaching={slots.numel()} replaced={bad.numel()}', flush=True)

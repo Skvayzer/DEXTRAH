@@ -44,6 +44,8 @@ if [[ "${BACKEND:-isaac}" == mjlab ]]; then
     if [[ -n "${SGS_NUM_CONFIGS:-}" ]]; then extra_args+=(--sgs-num-configs "$SGS_NUM_CONFIGS"); fi
     if [[ -n "${SGS_EVAL_EVERY:-}" ]]; then extra_args+=(--sgs-eval-every "$SGS_EVAL_EVERY"); fi
     if [[ -n "${SGS_HARVEST_MAX_STEPS:-}" ]]; then extra_args+=(--sgs-harvest-max-steps "$SGS_HARVEST_MAX_STEPS"); fi
+    if [[ "${SGS_VALIDATE_SPAWNS:-0}" == 1 ]]; then extra_args+=(--sgs-validate-spawns); fi
+    if [[ -n "${SGS_EVAL_POOL:-}" ]]; then extra_args+=(--sgs-eval-pool "$SGS_EVAL_POOL"); fi
     if [[ "${MJ_CONE_HESSIAN_FIX:-0}" == 1 ]]; then
         export PYTHONPATH="$source_snapshot/third_party/mujoco_warp_cone_fix:$PYTHONPATH"
         extra_args+=(--mj-cone-hessian-fix)

@@ -74,6 +74,11 @@ def main():
     p.add_argument('--sgs-eval-every', type=int, default=16,
                    help='Every Nth env resets from fresh rho samples (Reaching) and is logged as sgs/eval_*')
     p.add_argument('--sgs-harvest-max-steps', type=int, default=6000)
+    p.add_argument('--sgs-validate-spawns', action='store_true',
+                   help='Reaching configurations and evaluation starts must pass a passive settle check (object never '
+                        'touches the robot, is not ejected, ends at rest on the table); changes the reset distribution')
+    p.add_argument('--sgs-eval-pool', type=int, default=16384,
+                   help='With --sgs-validate-spawns: validated fresh rho starts the evaluation envs draw from')
     p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success'], default='reward',
                    help='Best checkpoint by training reward (rl_games) or, with --sgs, by the rolling statistic of '
                         'the fresh-rho evaluation envs (sgs/eval_goals_reached_count or sgs/eval_any_goal_success_rate)')
@@ -240,13 +245,14 @@ def main():
                 sgs_settings = SgsSettings(num_configs=args.sgs_num_configs, history=args.sgs_history,
                     temperature=args.sgs_temperature, target=args.sgs_target, kappa=args.sgs_kappa, eps=args.sgs_eps,
                     families=tuple(args.sgs_families.split(',')), eval_every=args.sgs_eval_every,
-                    harvest_max_steps=args.sgs_harvest_max_steps)
+                    harvest_max_steps=args.sgs_harvest_max_steps, validate_spawns=args.sgs_validate_spawns,
+                    eval_pool_size=args.sgs_eval_pool)
                 # A resumed SGS run continues its configuration set and outcome windows.
                 sgs_file = args.resume.with_suffix('.sgs.pt') if args.resume else None
                 sgs_state = torch.load(sgs_file, map_location='cpu', weights_only=False) if sgs_file and sgs_file.exists() else None
                 env.enable_sgs(sgs_settings, sgs_state)
                 sgs_report = dict(settings=asdict(sgs_settings), resumed_from=str(sgs_file) if sgs_state else None,
-                                  paper='arXiv:2610.12465')
+                                  paper='arXiv:2610.12465', spawn_check=dict(env._sgs.spawn_stats))
                 print('SGS_ENABLED '+json.dumps(sgs_report),flush=True)
             masses = env.sim.model.body_mass[:, env.object.entity.indexing.root_body_id]
             object_physics = dict(backend='mjlab per-world object geometry and inertials', envs=env.num_envs,
