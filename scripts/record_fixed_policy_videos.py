@@ -171,6 +171,11 @@ def render(args, mj_model, meta):
         m = copy.copy(mj_model)
         a = e['asset']
         m.vis.global_.offwidth, m.vis.global_.offheight = max(W, 640), max(H, 480)
+        # The scene has no lights: with the headlight alone the table top is
+        # nearly as dark as the background. Brighter ambient + a coloured table.
+        m.vis.headlight.ambient[:] = (.45, .45, .45)
+        m.vis.headlight.diffuse[:] = (.55, .55, .55)
+        m.geom_rgba[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, 'table/table')] = (.62, .48, .33, 1.)
         for s, g in enumerate(slot_geoms):
             m.geom_size[g] = ob['size'][a, s]
             m.geom_pos[g] = ob['pos'][a, s]-ob['com'][a]
