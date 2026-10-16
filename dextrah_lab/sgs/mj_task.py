@@ -289,7 +289,9 @@ class MjSgsTask:
 
     def _draw_valid(self, slots, store):
         """Fill store[...][slots] (assets already set) with rho draws; with
-        validate_spawns, redraw each slot until its draw passes the settle check."""
+        validate_spawns, redraw each slot until its draw passes the settle check.
+        Returns the slots that never passed in spawn_max_rounds: they keep their
+        last (unvalidated) rho draw and are logged with the last failure reason."""
         s = self.settings
         todo = slots
         for _ in range(s.spawn_max_rounds if s.validate_spawns else 1):
@@ -299,10 +301,19 @@ class MjSgsTask:
             keep = todo[ok]
             for key, value in cand.items():
                 store[key][keep] = value[ok]
+            if bool(ok.all()):
+                return todo[:0]
+            last = {key: value[~ok] for key, value in cand.items()}
+            reasons = self._last_reasons[~ok] if hasattr(self, '_last_reasons') else None
             todo = todo[~ok]
-            if todo.numel() == 0:
-                return
-        raise RuntimeError(f'{todo.numel()} starts failed the settle check {s.spawn_max_rounds} times')
+        for key, value in last.items():
+            store[key][todo] = value
+        names = ('valid', 'robot_contact', 'ejected', 'off_table', 'not_at_rest')
+        unresolved = [dict(asset=int(a), reason=names[int(r)] if reasons is not None else 'unknown')
+                      for a, r in zip(store['asset'][todo].tolist(), (reasons if reasons is not None else todo).tolist())]
+        self.spawn_stats.setdefault('unresolved', []).extend(unresolved)
+        print(f'SGS_SPAWN_UNRESOLVED {len(unresolved)} after {s.spawn_max_rounds} rounds: {unresolved}', flush=True)
+        return todo
 
     def _fill_reaching(self):
         """Reaching configurations: rho draws (validated with validate_spawns), assets
@@ -311,9 +322,10 @@ class MjSgsTask:
         n = stop-start
         perm = torch.randperm(n, device=self.device, generator=self.generator)
         self.cfg['asset'][start:stop] = perm % self.n_assets
-        self._draw_valid(torch.arange(start, stop, device=self.device), self.cfg)
+        failed = self._draw_valid(torch.arange(start, stop, device=self.device), self.cfg)
         self.filled[start:stop] = True
         self.validated[start:stop] = self.settings.validate_spawns
+        self.validated[failed] = False
         self.fill_count['reaching'] = n
 
     # ------------------------------------------------------- spawn check
@@ -373,7 +385,7 @@ class MjSgsTask:
         n_env = env.num_envs
         free, qadr = env.object._free_dof, env.object._free_qadr
         half = torch.tensor((TABLE_SIZE[0]/2-s.spawn_edge_margin, TABLE_SIZE[1]/2-s.spawn_edge_margin), device=self.device)
-        result = []
+        result, codes = [], []
         for start in range(0, len(assets), n_env):
             m = min(n_env, len(assets)-start)
             ids = torch.arange(m, device=self.device)
@@ -402,11 +414,16 @@ class MjSgsTask:
             off = ~touched & ~ejected & ~on_table
             rest = ~touched & ~ejected & on_table & (speed >= s.spawn_rest_speed)
             ok = ~touched & ~ejected & on_table & (speed < s.spawn_rest_speed)
+            code = torch.zeros(m, dtype=torch.long, device=self.device)
+            for c, mask in ((1, touched), (2, ejected), (3, off), (4, rest)):
+                code[mask] = c
+            codes.append(code)
             st = self.spawn_stats
             st['checked'] += m
             for key, mask in (('valid', ok), ('robot_contact', touched), ('ejected', ejected), ('off_table', off), ('not_at_rest', rest)):
                 st[key] += int(mask.sum())
             result.append(ok)
+        self._last_reasons = torch.cat(codes)
         return torch.cat(result)
 
     def _sync_available(self):
@@ -687,10 +704,12 @@ class MjSgsTask:
             return
         ok = self._spawn_check({k: self.cfg[k][slots] for k in RHO_FIELDS}, self.cfg['asset'][slots])
         bad = slots[~ok]
+        failed = bad[:0]
         if bad.numel():
-            self._draw_valid(bad, self.cfg)
+            failed = self._draw_valid(bad, self.cfg)
             self.sampler.outcomes[bad] = False
             self.sampler.head[bad] = 0
             self.sampler.count[bad] = 0
         self.validated[slots] = True
+        self.validated[failed] = False
         print(f'SGS_REVALIDATED reaching={slots.numel()} replaced={bad.numel()}', flush=True)

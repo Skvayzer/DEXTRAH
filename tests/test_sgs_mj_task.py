@@ -138,9 +138,14 @@ class MjSgsTaskTests(unittest.TestCase):
         self.assertTrue(torch.equal(env._object_asset_index_per_env[e], task.eval_pool['asset'][k]))
         self.assertTrue(torch.equal(env.robot.data.joint_pos[e], task.eval_pool['joint_pos'][k]))
 
-    def test_validation_gives_up(self):
-        with self.assertRaises(RuntimeError):
-            make_validating(lambda call, n: torch.ones(n, dtype=torch.bool), spawn_max_rounds=3)
+    def test_validation_gives_up_gracefully(self):
+        # Slot 0 never passes; it keeps an unvalidated rho draw and is logged.
+        env, task, calls = make_validating(lambda call, n: torch.arange(n) == 0, spawn_max_rounds=3)
+        self.assertEqual(calls[:3], [10, 1, 1])
+        self.assertFalse(bool(task.validated[0]))
+        self.assertTrue(bool(task.validated[1:10].all()))
+        self.assertEqual(len(task.spawn_stats['unresolved']), 2)       # reaching slot 0 + eval pool slot 0
+        self.assertTrue(bool(task.filled[:10].all()))
 
     def test_resume_revalidates_unchecked_reaching(self):
         torch.manual_seed(8)
