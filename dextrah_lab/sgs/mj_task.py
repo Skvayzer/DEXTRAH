@@ -80,7 +80,9 @@ class SgsSettings:
     validate_spawns: bool = False
     eval_pool_size: int = 16384          # validated fresh rho starts the evaluation envs draw from
     settle_s: float = 1.5                # simulated settling time per candidate
-    spawn_max_speed: float = 2.         # m/s, COM, during settling (a 10 cm drop lands at 1.4 m/s)
+    spawn_overlap_robot_m: float = .002  # first-step penetration into the robot that counts as an overlap spawn
+    spawn_overlap_table_m: float = .005  # ... into the table
+    spawn_max_speed: float = 4.          # m/s, COM, during settling (safety net for violent ejections)
     spawn_rest_speed: float = .05        # m/s, COM, at the end of settling
     spawn_edge_margin: float = .03       # settled COM at least this far inside the table top edges
     spawn_max_rounds: int = 20           # redraws per slot before giving up
@@ -177,7 +179,7 @@ class MjSgsTask:
         self.fall_stats = {f: _Rolling(w, self.device) for f in settings.families}
         self.steps = 0
         self.validated = torch.zeros(N, dtype=torch.bool, device=self.device)
-        self.spawn_stats = dict(checked=0, valid=0, robot_contact=0, ejected=0, off_table=0, not_at_rest=0)
+        self.spawn_stats = dict(checked=0, valid=0, spawn_overlap=0, ejected=0, off_table=0, not_at_rest=0)
         if state is not None:
             self.load_state_dict(state)
         elif 'reaching' in settings.families:
@@ -308,7 +310,7 @@ class MjSgsTask:
             todo = todo[~ok]
         for key, value in last.items():
             store[key][todo] = value
-        names = ('valid', 'robot_contact', 'ejected', 'off_table', 'not_at_rest')
+        names = ('valid', 'spawn_overlap', 'ejected', 'off_table', 'not_at_rest')
         unresolved = [dict(asset=int(a), reason=names[int(r)] if reasons is not None else 'unknown')
                       for a, r in zip(store['asset'][todo].tolist(), (reasons if reasons is not None else todo).tolist())]
         self.spawn_stats.setdefault('unresolved', []).extend(unresolved)
@@ -352,33 +354,41 @@ class MjSgsTask:
         goal[:, :3] += origin
         env.goal_viz.write_root_pose_to_sim(goal, env_ids=ids)
 
-    def _object_robot_contact(self):
-        """(num_envs,) bool: the object touches any robot geom in the last step's contacts."""
+    def _object_contact_depth(self):
+        """Per world, the deepest object-robot and object-table contact distance of
+        the last step (+inf without contact)."""
         import warp as wp
-        from dextrah_lab.mj.tactile import OBJECT, ROBOT
+        from dextrah_lab.mj.tactile import OBJECT, ROBOT, TABLE
         env = self.env
         d = env.sim.wp_data
         c = d.contact
         geom = wp.to_torch(c.geom).long()
         world = wp.to_torch(c.worldid).long()
+        dist = wp.to_torch(c.dist)
         partner = env.contacts.partner
         active = torch.arange(geom.shape[0], device=self.device) < wp.to_torch(d.nacon)
         active &= (wp.to_torch(c.type) & 1) > 0
         active &= (geom >= 0).all(-1) & (geom < partner.numel()).all(-1) & (world >= 0) & (world < env.num_envs)
         g0, g1 = torch.where(active, geom[:, 0], 0), torch.where(active, geom[:, 1], 0)
         p0, p1 = partner[g0], partner[g1]
-        hit = active & (((p0 == OBJECT) & (p1 == ROBOT)) | ((p1 == OBJECT) & (p0 == ROBOT)))
-        out = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
-        out[world[hit]] = True
+        out = []
+        for other in (ROBOT, TABLE):
+            hit = active & (((p0 == OBJECT) & (p1 == other)) | ((p1 == OBJECT) & (p0 == other)))
+            depth = torch.full((env.num_envs,), float('inf'), device=self.device)
+            depth.scatter_reduce_(0, world[hit], dist[hit], reduce='amin')
+            out.append(depth)
         return out
 
     @torch.no_grad()
     def _spawn_check(self, cand, assets):
         """Simulate each candidate start for settle_s with the robot holding its
-        reset targets (no policy). Valid: the object never touches the robot, is
-        never faster than spawn_max_speed (not ejected from an overlap), and ends
-        at rest on the table top, spawn_edge_margin inside its edges. Uses the
-        env's worlds (state is overwritten; the env is reset before training)."""
+        reset targets (no policy). Invalid: the object starts inside the robot or
+        the table (first-step penetration beyond spawn_overlap_*_m; MuJoCo ejects
+        it), exceeds spawn_max_speed, or does not end at rest on the table top
+        spawn_edge_margin inside its edges (fell or rolled off). Touching the
+        resting hand while landing is allowed. Uses the env's worlds; the whole
+        simulation state is reset afterwards (a world that diverged here must not
+        leave e.g. a non-finite solver warm start behind)."""
         env, s = self.env, self.settings
         if not hasattr(env, 'contacts'):
             env._init_contacts()
@@ -397,16 +407,17 @@ class MjSgsTask:
             env.object._wrench = None
             env.sim.data.xfrc_applied.zero_()
             env.sim.forward()
-            touched = torch.zeros(n_env, dtype=torch.bool, device=self.device)
             vmax = torch.zeros(n_env, device=self.device)
-            for _ in range(max(1, round(s.settle_s/env.physics_dt))):
+            for step in range(max(1, round(s.settle_s/env.physics_dt))):
                 env._write_data_to_sim()
                 env.sim.step()
                 env.object.limit_angular_velocity(env.PHYSX_MAX_ANGULAR_VELOCITY)
-                touched |= self._object_robot_contact()
-                vmax = torch.maximum(vmax, env.sim.data.qvel[:, free:free+3].norm(dim=-1))
+                if step == 0:
+                    robot_depth, table_depth = self._object_contact_depth()
+                    touched = (robot_depth < -s.spawn_overlap_robot_m) | (table_depth < -s.spawn_overlap_table_m)
+                vmax = torch.maximum(vmax, torch.nan_to_num(env.sim.data.qvel[:, free:free+3].norm(dim=-1), nan=float('inf')))
             pos = (env.sim.data.qpos[:, qadr:qadr+3]-env.scene.env_origins)[:m]      # COM (body frame at the COM)
-            speed = env.sim.data.qvel[:m, free:free+3].norm(dim=-1)
+            speed = torch.nan_to_num(env.sim.data.qvel[:m, free:free+3].norm(dim=-1), nan=float('inf'))
             top = sub['table_z']+TABLE_SIZE[2]/2
             on_table = (pos[:, 2] > top-.005) & (pos[:, 0].abs() < half[0]) & (pos[:, 1].abs() < half[1])
             touched, vmax = touched[:m], vmax[:m]
@@ -420,9 +431,10 @@ class MjSgsTask:
             codes.append(code)
             st = self.spawn_stats
             st['checked'] += m
-            for key, mask in (('valid', ok), ('robot_contact', touched), ('ejected', ejected), ('off_table', off), ('not_at_rest', rest)):
+            for key, mask in (('valid', ok), ('spawn_overlap', touched), ('ejected', ejected), ('off_table', off), ('not_at_rest', rest)):
                 st[key] += int(mask.sum())
             result.append(ok)
+        env.sim.reset()             # clear all simulation state (warm starts, contacts) before training
         self._last_reasons = torch.cat(codes)
         return torch.cat(result)
 

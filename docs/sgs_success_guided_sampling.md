@@ -108,9 +108,12 @@ median 8 cm; mostly upright hammers), which MuJoCo ejects, and objects that tip 
 slide off the table edge after the 10 cm drop. With this flag every reaching
 configuration and every evaluation start is a rho draw that passed a settle check:
 simulated for `settle_s` = 1.5 s with the robot holding its reset joint targets (no
-policy), the object must never touch the robot, never exceed 2 m/s (a 10 cm drop lands
-at 1.4 m/s; faster means an overlap ejection), and end at rest (< 5 cm/s) on the table
-top at least 3 cm inside its edges. Failing draws are redrawn (same asset). The episode
+policy), the object must not start inside the robot (> 2 mm first-step penetration) or
+the table (> 5 mm), never exceed 4 m/s, and end at rest (< 5 cm/s) on the table top at
+least 3 cm inside its edges. Touching the resting hand while landing is allowed (the
+first version rejected any robot contact: 35% of draws, a large bias; job 1327). The
+simulation state is reset after the checks (job 1327 crashed on a non-finite warm start
+left by a world that diverged during the check). Failing draws are redrawn (same asset). The episode
 still starts from the original pre-drop state. Evaluation envs then draw uniformly from
 a pool of `--sgs-eval-pool` (16384) validated fresh draws, so `sgs/eval_*` measures the
 validated distribution (expect a small upward step at the switch). On resume, saved
