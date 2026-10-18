@@ -9,6 +9,14 @@ the original reset distribution (no SGS). The SAPG zero-entropy leader
 Selection: the first ``--per-type`` envs of each object type by env index,
 before the rollout (no outcome filtering).
 
+``--starts validated`` (opt-in) starts every episode from a spawn-validated
+reaching configuration of the env's own object, taken from the checkpoint's SGS
+state (X.sgs.pt next to X.pth) and written with the training code path
+(MjSgsTask._write_rho), so videos match what SGS training and its evaluation
+envs use (no penetrating spawns). The configuration is drawn uniformly among
+the object's validated ones (no outcome filtering); its training success rate
+is recorded per episode.
+
 Rendering shows what MuJoCo simulates: the compiled scene with each world's
 object primitives, plus the goal pose as a translucent green copy of the object.
 Two views (front, side) per frame, with episode/goal overlays.
@@ -73,6 +81,56 @@ def build_policy(checkpoint, run, n, device):
     return model.eval().requires_grad_(False), int(payload['epoch']), int(payload['frame'])
 
 
+class ValidatedStarts:
+    """Recording-only reset hook (env._sgs interface): every reset of every env
+    starts from a validated reaching configuration of that env's own object."""
+
+    def __init__(self, env, state_path, selected, seed=0):
+        import torch
+        from dextrah_lab.sgs.mj_task import RHO_FIELDS
+        self.env, self.device = env, env.device
+        st = torch.load(state_path, map_location='cpu', weights_only=False)
+        fams, outcomes = st['settings']['families'], st['sampler']['outcomes']
+        N = outcomes.shape[0]
+        sizes = [N//len(fams)+(i < N % len(fams)) for i in range(len(fams))]       # MjSgsTask family blocks
+        a = sum(sizes[:fams.index('reaching')])
+        b = a+sizes[fams.index('reaching')]
+        keep = torch.arange(a, b)[st['validated'][a:b]]
+        self.ids = keep
+        self.cfg = {k: st['cfg'][k][keep].to(self.device) for k in RHO_FIELDS+('asset',)}
+        self.p = outcomes[keep].float().mean(1).tolist()                          # SGS success rate (window mean)
+        n_assets = len(env._object_urdf_paths)
+        asset = self.cfg['asset']
+        self.count = torch.bincount(asset, minlength=n_assets)
+        self.order = torch.argsort(asset, stable=True)
+        self.start = torch.cumsum(self.count, 0)-self.count
+        if bool((self.count[env._object_asset_index_per_env] == 0).any()):
+            raise RuntimeError('Some recorded objects have no validated reaching configuration')
+        self.generator = torch.Generator(device=self.device).manual_seed(seed)
+        self.selected = set(selected)
+        self.log = {i: [] for i in selected}
+        self.report = dict(state=str(state_path), validated_reaching_configs=int(keep.numel()),
+                           reaching_configs=int(b-a))
+
+    def before_reset(self, env_ids):
+        pass
+
+    def after_reset(self, env_ids):
+        import torch
+        from dextrah_lab.sgs.mj_task import MjSgsTask
+        env_ids = env_ids.reshape(-1)
+        assets = self.env._object_asset_index_per_env[env_ids]
+        r = (torch.rand(len(env_ids), device=self.device, generator=self.generator)*self.count[assets]).long()
+        k = self.order[self.start[assets]+r]
+        MjSgsTask._write_rho(self, env_ids, self.cfg, k)
+        for i, j in zip(env_ids.tolist(), k.tolist()):
+            if i in self.selected:
+                self.log[i].append(dict(config=int(self.ids[j]), train_success_rate=round(self.p[j], 3)))
+
+    def after_step(self):
+        pass
+
+
 def record(args):
     import numpy as np
     import torch
@@ -88,6 +146,11 @@ def record(args):
     kind = [Path(paths[a]).stem.split('_')[1] for a in asset]
     selected = [i for t in TYPES for i in [j for j in range(env.num_envs) if kind[j] == t][:args.per_type]]
     ids = torch.tensor(selected, device=device)
+    starts = None
+    if args.starts == 'validated':
+        starts = ValidatedStarts(env, args.checkpoint.with_suffix('.sgs.pt'), selected)
+        env._sgs = starts
+        print('VALIDATED_STARTS '+json.dumps(starts.report), flush=True)
     obs, _ = env.reset()
     states = tuple(s.to(device) for s in model.get_default_rnn_state())
     stride = max(1, round(1/(args.fps*env.step_dt)))
@@ -135,8 +198,11 @@ def record(args):
     np.savez_compressed(args.output/'trajectories.npz', **stacked)
     meta = dict(checkpoint=str(args.checkpoint), run=str(run), epoch=epoch, frame=frame, fps=args.fps,
                 step_dt=env.step_dt, seconds=args.seconds, selected=selected, coefficient_id=LEADER,
-                policy='SAPG zero-entropy leader, deterministic mean actions; original resets (no SGS)',
-                envs=[dict(env=i, asset=int(asset[i]), type=kind[i], urdf=paths[asset[i]], events=events[i]) for i in selected])
+                policy='SAPG zero-entropy leader, deterministic mean actions; '
+                       +('validated SGS reaching starts' if starts else 'original resets (no SGS)'),
+                starts=starts.report if starts else 'original',
+                envs=[dict(env=i, asset=int(asset[i]), type=kind[i], urdf=paths[asset[i]], events=events[i],
+                           **(dict(starts=starts.log[i]) if starts else {})) for i in selected])
     (args.output/'recording.json').write_text(json.dumps(meta, indent=2))
     from dextrah_lab.mj.scene import object_indices
     body, slot_geoms = object_indices(env.sim.mj_model)
@@ -263,6 +329,8 @@ def main():
     p.add_argument('--render-only', type=Path, help='Re-render an existing recording directory (no simulation)')
     p.add_argument('--nconmax', type=int, default=16)
     p.add_argument('--njmax', type=int, default=160)
+    p.add_argument('--starts', choices=('original', 'validated'), default='original',
+                   help='validated: spawn-validated SGS reaching starts from the checkpoint\'s .sgs.pt')
     args = p.parse_args()
     if not args.render_only and args.checkpoint is None:
         p.error('--checkpoint is required unless --render-only')
