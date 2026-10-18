@@ -19,8 +19,10 @@ class ValidatedStartsTests(unittest.TestCase):
     def test_resets_write_validated_configs_of_the_own_object(self):
         env, task, _ = make_validating(lambda call, n: torch.zeros(n, dtype=torch.bool))
         a, b = task.blocks['reaching']
-        task.validated[a] = False                                   # an unresolved slot must never be used
-        task.sampler.outcomes[a+1:b, :2] = True
+        assets = task.cfg['asset'][a:b]
+        bad = a+int(next(j for j in range(b-a) if int((assets == assets[j]).sum()) > 1))
+        task.validated[bad] = False                                 # an unresolved slot must never be used
+        task.sampler.outcomes[a:b, :2] = True
         with tempfile.TemporaryDirectory() as d:
             path = Path(d)/'x.sgs.pt'
             torch.save(task.state_dict(), path)
@@ -31,7 +33,7 @@ class ValidatedStartsTests(unittest.TestCase):
             starts.after_reset(ids)
             for i in (0, 5):
                 c = starts.log[i][-1]['config']
-                self.assertTrue(a+1 <= c < b)
+                self.assertTrue(a <= c < b and c != bad)
                 self.assertEqual(int(task.cfg['asset'][c]), int(env._object_asset_index_per_env[i]))
                 self.assertTrue(torch.allclose(env.object.data.root_pos_w[i], task.cfg['object_pose'][c, :3]))
                 self.assertTrue(torch.allclose(env.goal_viz.data.root_pos_w[i], task.cfg['goal_pose'][c, :3]))

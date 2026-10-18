@@ -48,12 +48,14 @@ class TableSpawn:
         self.asset = asset_per_env.to(device)
         self.clearance, self.margin = clearance, margin
 
-    def place(self, quat, table_z, spawn_min, spawn_max, env_ids):
-        """Return env-local object positions (n, 3) for the given orientations."""
-        pts = self.points[self.asset[env_ids]]
+    def place(self, quat, table_z, spawn_min, spawn_max, env_ids, assets=None):
+        """Return env-local object positions (n, 3) for the given orientations
+        (objects: the envs' assigned assets, or ``assets`` when given)."""
+        assets = self.asset[env_ids] if assets is None else assets
+        pts = self.points[assets]
         n, k, _ = pts.shape
         world = _rotate(quat[:, None].expand(n, k, 4).reshape(-1, 4), pts.reshape(-1, 3)).reshape(n, k, 3)
-        r = self.radius[self.asset[env_ids]][..., None]
+        r = self.radius[assets][..., None]
         low, high = (world-r).amin(1), (world+r).amax(1)                          # extents about the origin
         hx, hy, hz = TABLE_HALF
         lo = torch.stack((-hx+self.margin-low[:, 0], -hy+self.margin-low[:, 1]), -1)

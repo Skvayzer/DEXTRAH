@@ -36,6 +36,16 @@ Evaluation (Sec. 4.3: "Evaluation resets are freshly sampled from the training
 distribution"): every ``eval_every``-th env always resets from a fresh sample
 of rho with a uniformly random asset and is logged separately (sgs/eval_*).
 Unlike the paper's separate evaluation runs, these episodes also feed PPO.
+
+Whole-body (frozen SONIC) task: the same families on the floating G1. Reaching
+starts are that task's rho (standing reset: base at its default root, plus the
+opt-in table spawn when enabled, applied to the drawn asset). Held states also
+restore the floating base (part of qpos) and SONIC's proprioceptive history up
+to the stored step, so the frozen controller sees the motion that led there.
+As in the fixed-body port, the action delay queue refills from the episode's
+first action (source behaviour) and the touch filter restarts. The spawn check
+holds the base at its standing reset pose (as the fixed-body teacher's welded
+base) while the joints hold their reset targets.
 """
 from dataclasses import asdict, dataclass, field
 import inspect
@@ -124,8 +134,9 @@ class _Rolling:
 
 class MjSgsTask:
     def __init__(self, env, settings=SgsSettings(), generator=None, state=None):
-        if not getattr(env, '_fixed_body', False):
-            raise NotImplementedError('SGS is implemented for the fixed-body mjlab task')
+        self.wholebody = not getattr(env, '_fixed_body', False)
+        if self.wholebody and not getattr(env, '_wholebody_ready', False):
+            raise NotImplementedError('SGS supports the fixed-body task and the frozen-SONIC whole-body task')
         rc = env.cfg.reset
         if (rc.fixed_start_pose is not None or rc.fixed_goal_pose is not None or rc.fixed_trajectory_file
                 or tuple(rc.table_reset_xy_range_m) != (0., 0.) or float(rc.table_reset_yaw_range_deg) != 0.):
@@ -161,6 +172,11 @@ class MjSgsTask:
         self.cfg = dict(asset=z(N, dtype=torch.long), table_z=z(N), joint_pos=z(N, nj), joint_vel=z(N, nj),
                         targets=z(N, nj), setpoint=z(N, nj), object_pose=z(N, 7), object_init_z=z(N),
                         goal_pose=z(N, 7), qpos=z(N, nq), qvel=z(N, nv), act=z(N, max(self.na, 1)))
+        if self.wholebody:
+            # SONIC proprioceptive history frames (oldest..newest, newest = the stored step).
+            hist = env._body_history.buffers
+            self.hist_dims = [b.shape[2] for b in hist]
+            self.cfg['history'] = z(N, hist[0].shape[1], sum(self.hist_dims))
         self.filled = torch.zeros(N, dtype=torch.bool, device=self.device)
         self.fill_count = {f: 0 for f in settings.families}
         self.harvest_steps, self.harvest_done = 0, not any(f in HARVESTED for f in settings.families)
@@ -174,9 +190,11 @@ class MjSgsTask:
             raise ValueError('SGS needs training envs besides the evaluation envs')
         self.eval_started = torch.zeros(n_env, dtype=torch.bool, device=self.device)
         w = settings.stats_window
-        self.eval_stats = {k: _Rolling(w, self.device) for k in ('any_goal_success_rate', 'goals_reached_count', 'ever_lifted_rate')}
+        self.eval_stats = {k: _Rolling(w, self.device) for k in ('any_goal_success_rate', 'goals_reached_count', 'ever_lifted_rate')
+                           +(('robot_fall_rate',) if self.wholebody else ())}
         self.train_stats = {f: _Rolling(w, self.device) for f in settings.families}
         self.fall_stats = {f: _Rolling(w, self.device) for f in settings.families}
+        self.robot_fall_stats = {f: _Rolling(w, self.device) for f in settings.families} if self.wholebody else {}
         self.steps = 0
         self.validated = torch.zeros(N, dtype=torch.bool, device=self.device)
         self.spawn_stats = dict(checked=0, valid=0, spawn_overlap=0, ejected=0, off_table=0, not_at_rest=0)
@@ -247,9 +265,10 @@ class MjSgsTask:
         if bad:
             raise RuntimeError(f'SGS asset tables do not reproduce the scene: {bad}')
 
-    def _capture_reaching(self, n):
+    def _capture_reaching(self, n, assets=None):
         """n draws of the task's reset distribution rho (robot, table, object, absolute
-        goal) from the task's own reset functions, writes captured, not applied."""
+        goal) from the task's own reset functions, writes captured, not applied.
+        ``assets``: the draws' objects (used only by the whole-body table spawn)."""
         env, ru = self.env, self.reset_utils
         saved = {k: getattr(env, k).clone() for k in ('_prev_targets', '_cur_targets', '_table_z_per_env', '_object_init_z')}
         rec = {}
@@ -270,6 +289,16 @@ class MjSgsTask:
                 ru._reset_table_pose(env, ids)
                 ru._reset_object_pose(env, ids)
                 ru._reset_goal_pose(env, ids, mode='absolute')
+                if self.wholebody and getattr(env, '_table_spawn', None) is not None:
+                    # Opt-in whole-body table spawn (wholebody/spawn.py, applied after the
+                    # source reset in env._reset_idx): part of rho; depends on the asset.
+                    if assets is None:
+                        raise ValueError('The table spawn needs the assets of the draws')
+                    rc = env.cfg.reset
+                    pos = env._table_spawn.place(rec['object'][:, 3:7], env._table_z_per_env[ids], rc.object_spawn_xy_mins,
+                                                 rc.object_spawn_xy_maxs, ids, assets=assets[k:k+len(ids)])
+                    rec['object'] = torch.cat((pos+env.scene.env_origins[ids], rec['object'][:, 3:7]), -1)
+                    env._object_init_z[ids] = pos[:, 2]
                 if bool(rec['object_vel'].abs().max() > 0):
                     raise RuntimeError('Reaching resets are expected to start the object at rest')
                 origin = env.scene.env_origins[ids]
@@ -297,7 +326,7 @@ class MjSgsTask:
         s = self.settings
         todo = slots
         for _ in range(s.spawn_max_rounds if s.validate_spawns else 1):
-            cand = self._capture_reaching(len(todo))
+            cand = self._capture_reaching(len(todo), store['asset'][todo])
             ok = self._spawn_check(cand, store['asset'][todo]) if s.validate_spawns else \
                 torch.ones(len(todo), dtype=torch.bool, device=self.device)
             keep = todo[ok]
@@ -353,6 +382,43 @@ class MjSgsTask:
         goal = store['goal_pose'][k].clone()
         goal[:, :3] += origin
         env.goal_viz.write_root_pose_to_sim(goal, env_ids=ids)
+        if self.wholebody:
+            self._standing_body(ids, store['targets'][k])
+
+    def _standing_root(self, ids):
+        env = self.env
+        root = env.robot.data.default_root_state[ids].clone()
+        root[:, :3] += env.scene.env_origins[ids]
+        root[:, 7:] = 0
+        return root
+
+    def _standing_body(self, ids, targets):
+        """Whole-body reset of envs ids as env._reset_idx does it: floating base at its
+        default root at rest, fresh SONIC history, executed body action from the targets."""
+        env = self.env
+        env.robot.write_root_state_to_sim(self._standing_root(ids), env_ids=ids)
+        env._body_history.reset(ids)
+        env._last_body_action[ids] = (targets[:, env._body_ids]-env._body_nominal)/env._body_scales
+
+    def _history_now(self, ids):
+        """SONIC history of envs ids including the current step's frame (the frame this
+        step's observation pushes, unless a terminal observation already pushed it)."""
+        env = self.env
+        bufs = [b[ids] for b in env._body_history.buffers]
+        if env._body_extra_step != env._sim_step_counter:
+            terms = env._body_terms()
+            bufs = [torch.cat((b[:, 1:], t[ids, None]), 1) for b, t in zip(bufs, terms)]
+        return torch.cat(bufs, -1)
+
+    def _restore_history(self, ids, history):
+        """Restore stored histories (newest frame = the restored state). The next
+        observation pushes the restored state's frame unless this step already pushed."""
+        env = self.env
+        if env._body_extra_step != env._sim_step_counter:
+            history = torch.cat((history[:, :1], history[:, :-1]), 1)      # the oldest copy is dropped by that push
+        for buf, part in zip(env._body_history.buffers, torch.split(history, self.hist_dims, -1)):
+            buf[ids] = part
+        env._body_history.fresh[ids] = False
 
     def _object_contact_depth(self):
         """Per world, the deepest object-robot and object-table contact distance of
@@ -386,7 +452,8 @@ class MjSgsTask:
         the table (first-step penetration beyond spawn_overlap_*_m; MuJoCo ejects
         it), exceeds spawn_max_speed, or does not end at rest on the table top
         spawn_edge_margin inside its edges (fell or rolled off). Touching the
-        resting hand while landing is allowed. Uses the env's worlds; the whole
+        resting hand while landing is allowed. Whole body: the floating base is held
+        at its standing reset pose (welded, as in the fixed-body task). Uses the env's worlds; the whole
         simulation state is reset afterwards (a world that diverged here must not
         leave e.g. a non-finite solver warm start behind)."""
         env, s = self.env, self.settings
@@ -408,7 +475,10 @@ class MjSgsTask:
             env.sim.data.xfrc_applied.zero_()
             env.sim.forward()
             vmax = torch.zeros(n_env, device=self.device)
+            root = self._standing_root(ids) if self.wholebody else None
             for step in range(max(1, round(s.settle_s/env.physics_dt))):
+                if root is not None:
+                    env.robot.write_root_state_to_sim(root, env_ids=ids)
                 env._write_data_to_sim()
                 env.sim.step()
                 env.object.limit_angular_velocity(env.PHYSX_MAX_ANGULAR_VELOCITY)
@@ -484,16 +554,21 @@ class MjSgsTask:
             self.sampler.record(cfg_ids[active], success)
             fam = self.family[cfg_ids[active]]
             fall = env._termination_reasons['fall'][env_ids[active]]
+            robot_fall = env._body_fallen[env_ids[active]] if self.wholebody else None
             for i, f in enumerate(FAMILIES):
                 if f in self.train_stats:
                     self.train_stats[f].add(success[fam == i])
                     self.fall_stats[f].add(fall[fam == i])
+                    if robot_fall is not None:
+                        self.robot_fall_stats[f].add(robot_fall[fam == i])
         is_eval = self.eval_mask[env_ids]
         finished_eval = env_ids[is_eval & self.eval_started[env_ids]]
         if finished_eval.numel():
             self.eval_stats['any_goal_success_rate'].add(env._successes[finished_eval] > 0)
             self.eval_stats['goals_reached_count'].add(env._successes[finished_eval])
             self.eval_stats['ever_lifted_rate'].add(env._episode_ever_lifted[finished_eval])
+            if self.wholebody:
+                self.eval_stats['robot_fall_rate'].add(env._body_fallen[finished_eval])
         # Evaluation: fresh rho sample with a uniformly random asset, or a uniform
         # draw from the pool of validated fresh rho starts.
         eval_ids = env_ids[is_eval]
@@ -513,7 +588,8 @@ class MjSgsTask:
         self.assign_objects(train_ids, self.cfg['asset'][chosen])
 
     def after_reset(self, env_ids):
-        """Overwrite the task's rho reset with the chosen configurations."""
+        """Overwrite the task's rho reset with the chosen configurations (whole body:
+        called after the env's standing reset)."""
         env, c = self.env, self.cfg
         env_ids = env_ids.reshape(-1)
         if self.eval_pool is not None:
@@ -537,6 +613,8 @@ class MjSgsTask:
             pose[:, :3] += env.scene.env_origins[r]
             env.object.write_root_pose_to_sim(pose, env_ids=r)
             env.object.write_root_velocity_to_sim(torch.zeros(len(r), 6, device=self.device), env_ids=r)
+            if self.wholebody:
+                self._standing_body(r, c['targets'][kr])
         held = ~reach
         if bool(held.any()):
             h, kh = ids[held], k[held]
@@ -546,6 +624,10 @@ class MjSgsTask:
                 env.sim.data.act[h] = c['act'][kh]
             env._lifted_object[h] = True
             env._episode_ever_lifted[h] = True
+            if self.wholebody:
+                # Floating base: restored with qpos/qvel. SONIC inputs: history and executed body action.
+                self._restore_history(h, c['history'][kh])
+                env._last_body_action[h] = (c['targets'][kh][:, env._body_ids]-env._body_nominal)/env._body_scales
         env._prev_targets[ids] = c['targets'][k]
         env._cur_targets[ids] = c['targets'][k]
         env.robot.reset_setpoint(ids, c['setpoint'][k])
@@ -576,7 +658,10 @@ class MjSgsTask:
         grasp = (force[:, THUMB] > s.grasp_force_n) & (torch.cat((force[:, :THUMB], force[:, THUMB+1:]), 1) > s.grasp_force_n).any(1)
         slow = (obj.root_lin_vel_w.norm(dim=-1) < s.max_object_speed) & (obj.root_ang_vel_w.norm(dim=-1) < s.max_object_spin)
         finite = torch.isfinite(env.sim.data.qpos).all(1) & torch.isfinite(env.sim.data.qvel).all(1)
-        return env._lifted_object & grasp & slow & finite & (z > table_top+s.table_clearance_m) & ~env.reset_buf & ~self.eval_mask
+        held = env._lifted_object & grasp & slow & finite & (z > table_top+s.table_clearance_m) & ~env.reset_buf & ~self.eval_mask
+        if self.wholebody:
+            held &= ~env._body_fallen & ~env._body_numerical_failure & ~env._body_history.fresh
+        return held
 
     def in_goal_volume(self):
         rc = self.env.cfg.reset
@@ -638,6 +723,8 @@ class MjSgsTask:
         c['object_init_z'][slots] = env._object_init_z[ids]
         c['object_pose'][slots] = torch.cat((obj_pos, obj_quat), -1)
         c['joint_pos'][slots], c['joint_vel'][slots] = env.robot.data.joint_pos[ids], env.robot.data.joint_vel[ids]
+        if self.wholebody:
+            c['history'][slots] = self._history_now(ids)
         n = len(ids)
         if family == 'stable_grasp':
             pos, quat = self.goal_sampling.sample_absolute_goal_pose(
@@ -675,6 +762,8 @@ class MjSgsTask:
             x[f'sgs/{f}/sampling_share'] = prob[a:b].sum()
             x[f'sgs/{f}/train_any_goal_success_rate'] = self.train_stats[f].mean()
             x[f'sgs/{f}/train_fall_rate'] = self.fall_stats[f].mean()
+            if self.wholebody:
+                x[f'sgs/{f}/train_robot_fall_rate'] = self.robot_fall_stats[f].mean()
             x[f'sgs/{f}/configs'] = float(self.fill_count[f])
         x['sgs/harvest_done'] = float(self.harvest_done)
 
@@ -685,13 +774,14 @@ class MjSgsTask:
                     fill_count=dict(self.fill_count), harvest_steps=self.harvest_steps, harvest_done=self.harvest_done,
                     asset_harvest={k: v.cpu() for k, v in self.asset_harvest.items()},
                     n_assets=self.n_assets, nq=self.cfg['qpos'].shape[1], nv=self.cfg['qvel'].shape[1],
-                    validated=self.validated.cpu())
+                    validated=self.validated.cpu(), wholebody=self.wholebody)
 
     def load_state_dict(self, state):
         saved = SgsSettings(**state['settings']).layout()
         if saved != self.settings.layout():
             raise ValueError(f'SGS configuration layout changed since the checkpoint: {saved} vs {self.settings.layout()}')
-        if (state['n_assets'], state['nq'], state['nv']) != (self.n_assets, self.cfg['qpos'].shape[1], self.cfg['qvel'].shape[1]):
+        if ((state['n_assets'], state['nq'], state['nv'], state.get('wholebody', False))
+                != (self.n_assets, self.cfg['qpos'].shape[1], self.cfg['qvel'].shape[1], self.wholebody)):
             raise ValueError('SGS checkpoint is for another scene')
         self.sampler.load_state_dict(state['sampler'])
         for k, v in state['cfg'].items():

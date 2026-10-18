@@ -423,8 +423,8 @@ class G1SonicTouchMjEnv:
         if self._touch_ready:
             self.touch_model.reset(env_ids)
             self.touch_raw[env_ids] = 0
-        if self._sgs is not None:
-            # SGS: replace the rho reset of training envs by their configuration.
+        if self._sgs is not None and not self._wholebody_ready:
+            # SGS (fixed body): replace the rho reset of training envs by their configuration.
             self._sgs.after_reset(torch.as_tensor(env_ids, device=self.device, dtype=torch.long))
         # G1SonicTouchEnv
         if not self._wholebody_ready:
@@ -446,6 +446,10 @@ class G1SonicTouchMjEnv:
         self._body_table_count[ids] = 0
         self._body_table_contact[ids] = False
         self._body_numerical_failure[ids] = False
+        if self._sgs is not None:
+            # SGS (whole body): after the standing reset, so a configuration also sets
+            # the floating base, SONIC history and executed body action.
+            self._sgs.after_reset(torch.as_tensor(ids, device=self.device, dtype=torch.long))
 
     def _pre_physics_step(self, actions):
         if self._fixed_body:

@@ -89,6 +89,7 @@ class ValidatedStarts:
         import torch
         from dextrah_lab.sgs.mj_task import RHO_FIELDS
         self.env, self.device = env, env.device
+        self.wholebody = False                                          # fixed-body task (MjSgsTask._write_rho)
         st = torch.load(state_path, map_location='cpu', weights_only=False)
         fams, outcomes = st['settings']['families'], st['sampler']['outcomes']
         N = outcomes.shape[0]
