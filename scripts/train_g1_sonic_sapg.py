@@ -3,6 +3,11 @@
 
 Original Play2Perfect task + original six-group SAPG Runner. No new manipulation
 reward, no physics freezing, no fabrics/PCA, no periodic evaluation orchestrator.
+
+Opt-in (mjlab): --teacher-checkpoint (another fixed-body teacher on the same task
+contract instead of run 383) with --task-run (fresh start), --sgs (Success
+Guided Sampling, dextrah_lab/sgs, whole-body port), --best-metric (best by the
+SGS evaluation envs) and --minibatch-size (more PPO minibatches per epoch).
 """
 import argparse
 import faulthandler
@@ -21,12 +26,18 @@ def mjlab_task_config(args):
     from dextrah_lab.mj.env import load_run_cfg
     from dextrah_lab.g1_adept.touch_continuation import load_yaml
     from dextrah_lab.wholebody.task_contract import TOUCH_RUN, verify_task_contract
-    parent = (args.resume or args.init_weights).parent.parent
+    checkpoint = args.resume or args.init_weights
+    parent = checkpoint.parent.parent if checkpoint else args.task_run
     cfg = load_run_cfg(parent)
     cfg.scene.num_envs = args.num_envs
     cfg.bps_artifact_dir = str(args.output/'bps')
     contract = verify_task_contract(load_yaml(Path(TOUCH_RUN)/'params/env_resolved.yaml'), cfg)
     contract['task_config_source'] = str(parent/'params/env_resolved.yaml')
+    if args.teacher_checkpoint is not None:
+        # The teacher must have solved this same task (fails closed otherwise).
+        teacher_run = args.teacher_checkpoint.parent.parent
+        verify_task_contract(load_yaml(teacher_run/'params/env_resolved.yaml'), cfg)
+        contract['teacher_task_config_source'] = str(teacher_run/'params/env_resolved.yaml')
     return cfg, contract
 
 
@@ -89,6 +100,33 @@ def main():
                    help='Load actor/critic weights only (fresh optimizers, epoch 0) from a same-architecture checkpoint')
     p.add_argument('--critic-warmup-epochs', type=int, default=0,
                    help='Skip actor optimizer steps for this many epochs while the critic adapts')
+    p.add_argument('--teacher-checkpoint', type=Path,
+                   help='Frozen SONIC: fixed-body BPS+touch SAPG checkpoint (same task contract) whose recurrent features, '
+                        'finger head, value head, normalizers and critic initialize the policy (default: completed run 383). '
+                        'On --resume it is read from the parent contract')
+    p.add_argument('--task-run', type=Path,
+                   help='mjlab fresh start: whole-body run whose params/env_resolved.yaml defines the task')
+    p.add_argument('--minibatch-size', type=int,
+                   help='PPO minibatch for actor and critic (default 4*num_envs: 4 minibatches per epoch)')
+    p.add_argument('--sgs', action='store_true',
+                   help='mjlab: Success Guided Sampling of episode configurations (arXiv:2610.12465, dextrah_lab/sgs)')
+    p.add_argument('--sgs-num-configs', type=int, default=32768)
+    p.add_argument('--sgs-history', type=int, default=100)
+    p.add_argument('--sgs-temperature', type=float, default=2.)
+    p.add_argument('--sgs-target', type=float, default=.5)
+    p.add_argument('--sgs-kappa', type=float, default=1.)
+    p.add_argument('--sgs-eps', type=float, default=1e-4)
+    p.add_argument('--sgs-families', default='reaching,stable_grasp,near_goal')
+    p.add_argument('--sgs-eval-every', type=int, default=16,
+                   help='Every Nth env resets from fresh rho samples (Reaching) and is logged as sgs/eval_*')
+    p.add_argument('--sgs-harvest-max-steps', type=int, default=6000)
+    p.add_argument('--sgs-validate-spawns', action='store_true',
+                   help='Reaching configurations and evaluation starts must pass the passive settle check')
+    p.add_argument('--sgs-eval-pool', type=int, default=16384,
+                   help='With --sgs-validate-spawns: validated fresh rho starts the evaluation envs draw from')
+    p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success'], default='reward',
+                   help='Best checkpoint by training reward (rl_games) or, with --sgs, by the rolling statistic of the '
+                        'fresh-rho evaluation envs')
     if backend == 'isaac':
         AppLauncher.add_app_launcher_args(p)
     else:
@@ -99,8 +137,25 @@ def main():
             raise ValueError('The mjlab port implements the run-1105 task: frozen SONIC, per-env objects, monitor-only table contact')
         if args.carry or args.diagnostic_capture_seconds or args.no_table_body_support or args.body_table_contact_termination:
             raise ValueError('Carry, failure capture and table-filter options exist only on the Isaac backend')
-        if (args.resume or args.init_weights) is None:
-            raise ValueError('mjlab training continues an existing run (its params define the task)')
+        if (args.resume or args.init_weights) is None and args.task_run is None:
+            raise ValueError('mjlab training continues an existing run or names the task with --task-run')
+        if args.task_run is not None and (args.resume or args.init_weights):
+            raise ValueError('--task-run is for fresh starts (a continuation takes its task from the parent run)')
+    if args.sgs and (backend != 'mjlab' or args.carry):
+        raise ValueError('--sgs is implemented for the mjlab reposing task')
+    if args.best_metric != 'reward' and not args.sgs:
+        raise ValueError(f'--best-metric {args.best_metric} needs --sgs (its evaluation envs)')
+    if args.teacher_checkpoint is not None and (not args.frozen_pretrained_sonic or args.init_weights
+                                                or not args.teacher_checkpoint.is_file()):
+        raise ValueError('--teacher-checkpoint initializes a frozen-SONIC policy from an existing checkpoint')
+    if args.resume is not None:
+        # A continuation keeps its teacher (the network was built from it).
+        parent_teacher = json.loads((args.resume.parent.parent/'task_contract.json').read_text()).get('source_checkpoint')
+        from dextrah_lab.wholebody.task_contract import TOUCH_CHECKPOINT as _run383
+        if args.teacher_checkpoint is None and parent_teacher not in (None, _run383):
+            args.teacher_checkpoint = Path(parent_teacher)
+        elif args.teacher_checkpoint is not None and str(args.teacher_checkpoint) != parent_teacher:
+            raise ValueError(f'Continuation teacher {args.teacher_checkpoint} != parent {parent_teacher}')
     if args.num_envs < 6 or args.num_envs % 6 or not args.output.name.startswith('0_'):
         raise ValueError('Require six groups and a policy-index-prefixed output name')
     if args.output.exists():
@@ -198,6 +253,39 @@ def main():
         frozen = args.frozen_pretrained_sonic
         cfg.sonic_body.controller_mode = 'frozen_pretrained_latent' if frozen else 'trainable_decoder'
         agent = load_yaml(Path(TOUCH_RUN)/'params/agent.yaml')
+        teacher_sha, teacher_frames = None, 17364025344
+        if args.teacher_checkpoint is not None:
+            with args.teacher_checkpoint.open('rb') as f:
+                teacher_sha = hashlib.file_digest(f, 'sha256').hexdigest()
+            teacher_payload = torch.load(args.teacher_checkpoint, map_location='cpu', weights_only=False)
+            teacher_frames = int((teacher_payload[0] if 0 in teacher_payload else teacher_payload)['frame'])
+            del teacher_payload
+            teacher_agent = load_yaml(args.teacher_checkpoint.parent.parent/'params/agent.yaml')
+            if teacher_agent['params']['network'] != agent['params']['network']:
+                raise ValueError('Teacher network differs from the run-383 SAPG architecture')
+            contract.update(source_run=str(args.teacher_checkpoint.parent.parent), source_checkpoint=str(args.teacher_checkpoint),
+                            source_sha256=teacher_sha, teacher_replaces_run383=True)
+        ac_cfg = agent['params']['config']
+        minibatch_size = args.minibatch_size or 4*args.num_envs
+        if (ac_cfg['horizon_length']*args.num_envs) % minibatch_size:
+            raise ValueError(f'--minibatch-size {minibatch_size} must divide the rollout '
+                             f'{ac_cfg["horizon_length"]}*{args.num_envs}')
+        optimization = dict(minibatch_size=minibatch_size,
+            minibatches_per_epoch=ac_cfg['horizon_length']*args.num_envs//minibatch_size,
+            actor_gradient_steps_per_epoch=ac_cfg['mini_epochs']*ac_cfg['horizon_length']*args.num_envs//minibatch_size,
+            critic_gradient_steps_per_epoch=ac_cfg['central_value_config']['mini_epochs']*ac_cfg['horizon_length']*args.num_envs//minibatch_size)
+        contract['optimization'] = optimization
+        print('OPTIMIZATION '+json.dumps(optimization), flush=True)
+        sgs_settings = None
+        if args.sgs:
+            from dataclasses import asdict
+            from dextrah_lab.sgs.mj_task import SgsSettings
+            sgs_settings = SgsSettings(num_configs=args.sgs_num_configs, history=args.sgs_history,
+                temperature=args.sgs_temperature, target=args.sgs_target, kappa=args.sgs_kappa, eps=args.sgs_eps,
+                families=tuple(args.sgs_families.split(',')), eval_every=args.sgs_eval_every,
+                harvest_max_steps=args.sgs_harvest_max_steps, validate_spawns=args.sgs_validate_spawns,
+                eval_pool_size=args.sgs_eval_pool)
+            contract['sgs'] = dict(settings=asdict(sgs_settings), paper='arXiv:2610.12465', best_metric=args.best_metric)
         bootstrap_sha = None
         if args.bootstrap is not None:
             with args.bootstrap.open('rb') as f:
@@ -208,7 +296,7 @@ def main():
             original_task_observation_clip=10., sonic_body_observation_clip=None,
             fresh_optimizers_for_architecture_migration=not bool(args.resume),
             continuous=args.continuous, periodic_evaluation=False,
-            source_training_transitions=17364025344, source_commit=report['source_commit'])
+            source_training_transitions=teacher_frames, source_commit=report['source_commit'])
         contract.update(controller_mode=cfg.sonic_body.controller_mode,
             pretrained_sonic_sha256=WEIGHTS_SHA256, pretrained_sonic_frozen=frozen,
             action_dim=70 if frozen else 35)
@@ -217,7 +305,8 @@ def main():
                 initial_latent_std_leader=1., adapter_learning_rate=args.adapter_learning_rate,
                 body_joint_exploration_noise=False, latent_clipping=False,
                 action_delay='source delay on latent/finger meta-actions; SONIC uses current body feedback',
-                initialization='completed touch-383 SAPG features/fingers/critic; zero-initialized new latent output',
+                initialization=('completed touch-383' if teacher_sha is None else 'teacher')
+                    +' SAPG features/fingers/critic; zero-initialized new latent output',
                 old_arm_policy_exactly_preserved=False, pretrained_sonic_audit='all tensors bitwise after every update',
                 online_teacher_loss=False, new_balance_reward=False)
             contract['intentional_changes'] = [x for x in contract['intentional_changes']
@@ -236,6 +325,9 @@ def main():
         if args.per_env_object_physics:
             contract['intentional_changes'] = contract['intentional_changes'] + [
                 'per_env_object_physics_upstream_scene_path_no_physx_replication']
+        if args.sgs:
+            contract['intentional_changes'] = contract['intentional_changes'] + ['sgs_success_guided_episode_configurations'] + (
+                ['sgs_spawn_validation'] if args.sgs_validate_spawns else [])
         if args.body_table_contact_termination:
             contract['intentional_changes'] = contract['intentional_changes'] + [
                 'terminate_on_body_table_contact_except_right_forearm_hand_fingers']
@@ -284,7 +376,7 @@ def main():
         if args.wandb == 'online':
             wandb.config.update(contract, allow_val_change=True)
         sonic = FrozenSonic(workspace/'GRAIL', workspace/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
-        actor, critic = load_touch_sources(args.device)
+        actor, critic = load_touch_sources(args.device, args.teacher_checkpoint, teacher_sha)
         student, bootstrap_report = None, None
         if not frozen:
             student, bootstrap_report = load_student_checkpoint(args.bootstrap, sonic, args.device)
@@ -321,6 +413,15 @@ def main():
                                     mujoco_cfg=mj_settings['mujoco_options'])
             if args.mj_nan_capture:
                 env.enable_nan_capture(args.output/'nan_capture')
+            if args.sgs:
+                # A resumed SGS run continues its configuration set and outcome windows.
+                sgs_file = args.resume.with_suffix('.sgs.pt') if args.resume else None
+                sgs_state = (torch.load(sgs_file, map_location='cpu', weights_only=False)
+                             if sgs_file is not None and sgs_file.exists() else None)
+                env.enable_sgs(sgs_settings, sgs_state)
+                report['sgs'] = dict(contract['sgs'], resumed_from=str(sgs_file) if sgs_state else None,
+                                     spawn_check=dict(env._sgs.spawn_stats))
+                print('SGS_ENABLED '+json.dumps(report['sgs']), flush=True)
         else:
             env = G1SonicTouchEnv(cfg, sonic=sonic)
         if args.diagnostic_capture_seconds > 0:
@@ -338,7 +439,7 @@ def main():
         params['load_checkpoint'], params['load_path'] = False, ''
         ac = params['config']
         ac.update(name='g1_sonic_sapg_bps128_touch', num_actors=args.num_envs,
-            expl_coef_block_size=args.num_envs//6, minibatch_size=4*args.num_envs,
+            expl_coef_block_size=args.num_envs//6, minibatch_size=minibatch_size,
             device=args.device, device_name=args.device, multi_gpu=False,
             max_frames=-1, max_epochs=-1 if args.continuous else args.max_epochs,
             train_dir=str(args.output.parent), full_experiment_name=args.output.name)
@@ -347,7 +448,7 @@ def main():
             ac['clip_actions'] = False
             ac['name'] = 'g1_frozen_sonic_sapg_bps128_touch'
             ac['adapter_learning_rate'] = args.adapter_learning_rate
-        ac['central_value_config']['minibatch_size'] = 4*args.num_envs
+        ac['central_value_config']['minibatch_size'] = minibatch_size
         ac['central_value_config']['model'] = dict(name='sonic_sapg_value')
         ac['central_value_config']['network']['name'] = 'sonic_sapg_critic'
         agent['hydra']['run']['dir'] = str(args.output)
@@ -360,6 +461,11 @@ def main():
                            clip_actions=float('inf') if frozen else 1.)
         observer = SonicTransferObserver(env, args.output)
         observers = [EnvStatsAlgoObserver(), observer]
+        eval_best = None
+        if args.best_metric != 'reward':
+            from dextrah_lab.sgs.best import SgsEvalBest
+            eval_best = SgsEvalBest(env, args.best_metric, args.best_delay_epochs)
+            observers.append(eval_best)
         if args.wandb == 'online':
             class ExistingWandbObserver:
                 def before_init(self, base_name, config, experiment_name):
@@ -378,6 +484,15 @@ def main():
             report['frozen_controller_validation'] = observer.controller_audit.check(algo.optimizer)
         install_complete_checkpoint(algo)
         install_atomic_checkpoint_saves(algo)
+        if args.sgs:
+            # Every network checkpoint X.pth gets the SGS state beside it (X.sgs.pt).
+            network_save = algo.save
+            def save_with_sgs(filename, override_state=None):
+                network_save(filename, override_state)
+                target = Path(str(filename)+'.sgs.pt')
+                torch.save(env._sgs.state_dict(), str(target)+'.pending')
+                os.replace(str(target)+'.pending', target)
+            algo.save = save_with_sgs
         if args.resume:
             previous = json.loads((args.resume.parent.parent/'task_contract.json').read_text())
             for key in ('source_sha256', 'bank_sha256', 'bootstrap_sha256', 'action_units'):
@@ -388,7 +503,7 @@ def main():
                     if previous.get(key) != contract[key]:
                         raise ValueError(f'Incompatible frozen-controller continuation: {key}')
             report['resume'] = resume_at_episode_boundary(algo, args.resume)
-            if args.reset_best:
+            if args.reset_best and eval_best is None:
                 # The parent's best return belongs to a different MDP; keeping
                 # it would block every best-checkpoint save in this run. The
                 # first post-resume returns still include episodes from before
@@ -398,6 +513,9 @@ def main():
                 report['resume']['parent_best_return_discarded'] = float(algo.last_mean_rewards)
                 from dextrah_lab.wholebody.carry_training import install_delayed_best
                 report['resume']['best_tracking'] = install_delayed_best(algo, args.best_delay_epochs)
+        if eval_best is not None:
+            # rl_games' reward-based best never saves; best follows the SGS evaluation envs.
+            report['best_tracking'] = eval_best.disable_reward_best()
         if args.init_weights is not None:
             from dextrah_lab.wholebody.carry_training import load_initial_weights, install_critic_warmup
             report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)

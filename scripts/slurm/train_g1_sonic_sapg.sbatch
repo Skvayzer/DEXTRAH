@@ -75,6 +75,20 @@ if [[ "${BODY_TABLE_CONTACT_MONITOR_ONLY:-0}" == 1 ]]; then extra_args+=(--body-
 if [[ -n "${INIT_WEIGHTS:-}" ]]; then extra_args+=(--init-weights "$INIT_WEIGHTS"); fi
 if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then extra_args+=(--resume "$RESUME_CHECKPOINT"); fi
 if [[ "${RESET_BEST:-0}" == 1 ]]; then extra_args+=(--reset-best); fi
+if [[ -n "${BEST_DELAY_EPOCHS:-}" ]]; then extra_args+=(--best-delay-epochs "$BEST_DELAY_EPOCHS"); fi
+if [[ -n "${TEACHER_CHECKPOINT:-}" ]]; then extra_args+=(--teacher-checkpoint "$TEACHER_CHECKPOINT"); fi
+if [[ -n "${TASK_RUN:-}" ]]; then extra_args+=(--task-run "$TASK_RUN"); fi
+if [[ -n "${MINIBATCH_SIZE:-}" ]]; then extra_args+=(--minibatch-size "$MINIBATCH_SIZE"); fi
+if [[ "${SGS:-0}" == 1 ]]; then
+    # Success Guided Sampling (dextrah_lab/sgs, docs/sgs_success_guided_sampling.md).
+    extra_args+=(--sgs --sgs-families "${SGS_FAMILIES:-reaching,stable_grasp,near_goal}")
+    if [[ -n "${SGS_NUM_CONFIGS:-}" ]]; then extra_args+=(--sgs-num-configs "$SGS_NUM_CONFIGS"); fi
+    if [[ -n "${SGS_EVAL_EVERY:-}" ]]; then extra_args+=(--sgs-eval-every "$SGS_EVAL_EVERY"); fi
+    if [[ -n "${SGS_HARVEST_MAX_STEPS:-}" ]]; then extra_args+=(--sgs-harvest-max-steps "$SGS_HARVEST_MAX_STEPS"); fi
+    if [[ "${SGS_VALIDATE_SPAWNS:-0}" == 1 ]]; then extra_args+=(--sgs-validate-spawns); fi
+    if [[ -n "${SGS_EVAL_POOL:-}" ]]; then extra_args+=(--sgs-eval-pool "$SGS_EVAL_POOL"); fi
+fi
+if [[ -n "${BEST_METRIC:-}" ]]; then extra_args+=(--best-metric "$BEST_METRIC"); fi
 if [[ -n "${DIAGNOSTIC_CAPTURE_SECONDS:-}" ]]; then
     extra_args+=(--diagnostic-capture-seconds "$DIAGNOSTIC_CAPTURE_SECONDS")
 fi

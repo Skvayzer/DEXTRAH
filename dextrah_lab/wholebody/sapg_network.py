@@ -190,15 +190,22 @@ def register_sonic_models(source_actor, source_critic, sonic, lower, upper, stud
     model_builder.register_model('sonic_sapg_value', CriticModel)
 
 
-def load_touch_sources(device='cpu'):
+def load_touch_sources(device='cpu', checkpoint=None, sha256=None):
+    """Recurrent SAPG actor and critic of a fixed-body BPS+touch teacher: the
+    completed run 383 by default, or ``checkpoint`` (its run's params/agent.yaml,
+    file hash ``sha256``) for another teacher on the same task contract."""
     from pathlib import Path
     from dextrah_lab.g1_adept.touch_continuation import load_yaml
     from .sapg_features import load_sapg_actor
     from .task_contract import TOUCH_CHECKPOINT, TOUCH_RUN
-    actor = load_sapg_actor(TOUCH_CHECKPOINT, Path(TOUCH_RUN)/'params/agent.yaml', TOUCH_SHA256, device)
-    saved = torch.load(TOUCH_CHECKPOINT, map_location='cpu', weights_only=False)
+    if checkpoint is None:
+        checkpoint, run, sha256 = TOUCH_CHECKPOINT, TOUCH_RUN, TOUCH_SHA256
+    else:
+        run = Path(checkpoint).parent.parent
+    actor = load_sapg_actor(checkpoint, Path(run)/'params/agent.yaml', sha256, device)
+    saved = torch.load(checkpoint, map_location='cpu', weights_only=False)
     saved = saved[0] if 0 in saved else saved
-    params = load_yaml(Path(TOUCH_RUN)/'params/agent.yaml')['params']
+    params = load_yaml(Path(run)/'params/agent.yaml')['params']
     cv = params['config']['central_value_config']
     critic = model_builder.ModelBuilder().load(dict(model=cv['model'], network=cv['network'])).build(
         dict(actions_num=13, input_shape=(TASK_CRITIC_DIM+32,), num_seqs=1, value_size=1,

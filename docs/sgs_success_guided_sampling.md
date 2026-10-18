@@ -1,4 +1,4 @@
-# Success Guided Sampling (SGS) for the fixed-body G1 + Revo2 task
+# Success Guided Sampling (SGS) for the G1 + Revo2 tasks (fixed body and frozen-SONIC whole body)
 
 Paper: O. Zhang, M. Guaman Castro, P. Yin, I. Dagnino, A. Gupta, R. Scalise, B. Boots,
 "A Balanced Data Diet: Addressing the Exploration Bottleneck in Mega-Scale RL for
@@ -125,3 +125,41 @@ validated distribution (expect a small upward step at the switch). On resume, sa
 reaching configurations that were never checked are checked once; replaced ones start
 with empty outcome windows. Counts by reason: `SGS_SPAWN_CHECK` / `SGS_REVALIDATED`
 log lines and `resume_provenance.json` (`sgs.spawn_check`).
+
+## Whole-body (frozen SONIC) task
+
+`scripts/train_g1_sonic_sapg.py --backend mjlab --sgs ...` (sbatch
+`scripts/slurm/train_g1_sonic_sapg.sbatch` with `SGS=1`) uses the same sampler,
+families, evaluation envs, spawn validation and best checkpoint on the floating G1
+driven by frozen SONIC. Differences from the fixed-body port (`MjSgsTask.wholebody`):
+
+* Reaching starts are that task's rho: the standing reset (floating base at its default
+  root, at rest; body joints at their defaults), plus the opt-in table spawn
+  (`--spawn-on-table`) when enabled, applied to each draw's own asset.
+* Held states (stable grasp, near goal) also restore the floating base (part of the
+  stored qpos/qvel) and SONIC's proprioceptive history (`TimedSonicHistory`, 12 frames of
+  base angular velocity, joint offsets/velocities, executed body action, gravity) up to
+  the stored step, so the frozen controller sees the motion that led to the state. The
+  first observation reproduces exactly the history the policy would have seen had the
+  episode continued (tests/test_sgs_wholebody.py). The executed body action is rebuilt
+  from the stored body targets (as `apply_wholebody_action` sets it). As in the fixed-body
+  port, the action delay queue refills from the episode's first action (source
+  behaviour) and the touch filter restarts.
+* Harvest also requires a standing robot (no fall / numerical failure, initialized history).
+* The spawn check holds the floating base at its standing reset pose (as the fixed-body
+  teacher's welded base) while the joints hold their reset targets.
+* Extra metrics: `sgs/<family>/train_robot_fall_rate`, `sgs/eval_robot_fall_rate`.
+* In `env._reset_idx` the whole-body SGS hook runs after the standing reset, so a
+  configuration owns the base, the history and the executed body action.
+
+Starting from a fixed-body teacher (opt-in `--teacher-checkpoint`, fresh start with
+`--task-run <whole-body run>`): as runs 558/560 from run 383, the teacher's recurrent task
+features, finger head, value head, normalizers and critic initialize the policy, the new
+64-D latent adapter starts with a zero last layer (pristine SONIC at step 0), the teacher's
+7 arm commands are not transferred. The teacher's task sections must equal the
+whole-body task's (`verify_task_contract`, fails closed); its path and SHA-256 are
+recorded in `task_contract.json` (`source_checkpoint`, `source_sha256`), and a
+continuation reads it from there. Because the zero-initialized adapter cannot grasp at
+first, held states can only be collected once the policy grasps: use a long collection
+window (`SGS_HARVEST_MAX_STEPS`), until which only reaching configurations are sampled.
+
