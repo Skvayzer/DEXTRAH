@@ -197,7 +197,7 @@ class MjSgsTask:
         self.robot_fall_stats = {f: _Rolling(w, self.device) for f in settings.families} if self.wholebody else {}
         self.steps = 0
         self.validated = torch.zeros(N, dtype=torch.bool, device=self.device)
-        self.spawn_stats = dict(checked=0, valid=0, spawn_overlap=0, ejected=0, off_table=0, not_at_rest=0)
+        self.spawn_stats = dict(checked=0, valid=0, spawn_overlap=0, ejected=0, off_table=0, not_at_rest=0, max_nefc=0, max_nefc_other=0)
         if state is not None:
             self.load_state_dict(state)
         elif 'reaching' in settings.families:
@@ -456,6 +456,7 @@ class MjSgsTask:
         at its standing reset pose (welded, as in the fixed-body task). Uses the env's worlds; the whole
         simulation state is reset afterwards (a world that diverged here must not
         leave e.g. a non-finite solver warm start behind)."""
+        import warp as wp
         env, s = self.env, self.settings
         if not hasattr(env, 'contacts'):
             env._init_contacts()
@@ -473,14 +474,30 @@ class MjSgsTask:
                                                 joint_ids=env._position_target_joint_ids_list, env_ids=ids)
             env.object._wrench = None
             env.sim.data.xfrc_applied.zero_()
+            root = None
+            if self.wholebody:
+                # Every world's base is held (worlds without a candidate stand at the default
+                # pose): a free-falling humanoid would lie on the floor with hundreds of
+                # constraint rows (nefc overflow, job 1374).
+                every = torch.arange(n_env, device=self.device)
+                park = every[m:]
+                if park.numel():
+                    pose = env.robot.data.default_joint_pos[park]
+                    env.robot.write_joint_state_to_sim(pose, torch.zeros_like(pose), env_ids=park)
+                    env.robot.set_joint_position_target(pose[:, env._position_target_joint_ids],
+                                                        joint_ids=env._position_target_joint_ids_list, env_ids=park)
+                    env.robot.reset_setpoint(park, pose)
+                root = (every, self._standing_root(every))
+                env.robot.write_root_state_to_sim(root[1], env_ids=every)
             env.sim.forward()
             vmax = torch.zeros(n_env, device=self.device)
-            root = self._standing_root(ids) if self.wholebody else None
+            nefc = torch.zeros(n_env, dtype=torch.long, device=self.device)
             for step in range(max(1, round(s.settle_s/env.physics_dt))):
                 if root is not None:
-                    env.robot.write_root_state_to_sim(root, env_ids=ids)
+                    env.robot.write_root_state_to_sim(root[1], env_ids=root[0])
                 env._write_data_to_sim()
                 env.sim.step()
+                nefc = torch.maximum(nefc, wp.to_torch(env.sim.wp_data.nefc).long())
                 env.object.limit_angular_velocity(env.PHYSX_MAX_ANGULAR_VELOCITY)
                 if step == 0:
                     robot_depth, table_depth = self._object_contact_depth()
@@ -500,6 +517,8 @@ class MjSgsTask:
                 code[mask] = c
             codes.append(code)
             st = self.spawn_stats
+            st['max_nefc'] = max(st['max_nefc'], int(nefc[:m].max()))                  # candidate worlds
+            st['max_nefc_other'] = max(st['max_nefc_other'], int(nefc[m:].max()) if m < n_env else 0)
             st['checked'] += m
             for key, mask in (('valid', ok), ('spawn_overlap', touched), ('ejected', ejected), ('off_table', off), ('not_at_rest', rest)):
                 st[key] += int(mask.sum())
