@@ -244,3 +244,61 @@ def check_zero_hand_columns(model, critic, obs_dim, state_dim, hand_dim, device,
     if max(report.values()) > 1e-5:
         raise RuntimeError(f'Hand-surface inputs are not inert at initialization: {report}')
     return report
+
+
+FIXED_ACTOR_KEY, FIXED_ACTOR_AT = 'a2c_network.rnn.rnn.weight_ih_l0', 249       # 224 base + 25 touch
+FIXED_CRITIC_KEY, FIXED_CRITIC_AT = 'a2c_network.actor_mlp.0.weight', 271      # 246 base + 25 touch
+
+
+def expand_fixed_resume_state(state, algo, hand_dim):
+    """Fixed-body touch SAPG checkpoint without hand-surface inputs -> resumable state
+    for the expanded model: zero input columns (actor LSTM, critic layer 1) in the
+    weights AND in the Adam moments of both optimizers, normaliser channels appended
+    (mean 0, var 1, count 1: they adapt at once). Everything else is unchanged.
+    Returns (state, report); a checkpoint that already has the inputs is returned as is."""
+    import copy
+    width = state['model'][FIXED_ACTOR_KEY].shape[1]
+    model_width = algo.model.state_dict()[FIXED_ACTOR_KEY].shape[1]
+    if width == model_width:
+        return state, dict(expanded=False)
+    if width+hand_dim != model_width:
+        raise ValueError(f'Checkpoint actor input {width} + {hand_dim} != model {model_width}')
+    state = dict(state)
+
+    def normaliser(d, prefix):
+        for key, fill in (('running_mean', 0.), ('running_var', 1.), ('count', 1.)):
+            old = d[prefix+'running_mean_std.'+key]
+            d[prefix+'running_mean_std.'+key] = torch.cat((old, old.new_full((hand_dim,), fill)))
+
+    model = dict(state['model'])
+    model[FIXED_ACTOR_KEY] = insert_zero_columns(model[FIXED_ACTOR_KEY], FIXED_ACTOR_AT, hand_dim)
+    normaliser(model, '')
+    critic = dict(state['assymetric_vf_nets'])
+    critic['model.'+FIXED_CRITIC_KEY] = insert_zero_columns(critic['model.'+FIXED_CRITIC_KEY], FIXED_CRITIC_AT, hand_dim)
+    normaliser(critic, 'model.')
+    state['model'], state['assymetric_vf_nets'] = model, critic
+
+    def optimizer(opt_state, net, key, at):
+        opt_state = copy.deepcopy(opt_state)
+        index = [n for n, _ in net.named_parameters()].index(key)
+        ids = opt_state['param_groups'][0]['params']
+        slot = ids[index]
+        for moment in ('exp_avg', 'exp_avg_sq'):
+            opt_state['state'][slot][moment] = insert_zero_columns(opt_state['state'][slot][moment], at, hand_dim)
+        return opt_state
+    if len(state['optimizer']['param_groups']) != 1 or len(state['continuation_critic_optimizer']['param_groups']) != 1:
+        raise ValueError('Expected one Adam parameter group per optimizer')
+    state['optimizer'] = optimizer(state['optimizer'], algo.model, FIXED_ACTOR_KEY, FIXED_ACTOR_AT)
+    state['continuation_critic_optimizer'] = optimizer(state['continuation_critic_optimizer'], algo.central_value_net.model,
+                                                       FIXED_CRITIC_KEY, FIXED_CRITIC_AT)
+    for key, value in algo.model.state_dict().items():
+        if model[key].shape != value.shape:
+            raise ValueError(f'actor {key}: {tuple(model[key].shape)} vs {tuple(value.shape)}')
+    for key, value in algo.central_value_net.state_dict().items():
+        if key in critic and critic[key].shape != value.shape:
+            raise ValueError(f'critic {key}: {tuple(critic[key].shape)} vs {tuple(value.shape)}')
+    return state, dict(expanded=True, hand_surface_dim=hand_dim,
+                       zero_columns=dict(actor_lstm_input=[FIXED_ACTOR_AT, FIXED_ACTOR_AT+hand_dim],
+                                         critic_first_layer=[FIXED_CRITIC_AT, FIXED_CRITIC_AT+hand_dim]),
+                       optimizer_moments='zero for the new columns, all others restored',
+                       normaliser='new channels mean 0, var 1, count 1')

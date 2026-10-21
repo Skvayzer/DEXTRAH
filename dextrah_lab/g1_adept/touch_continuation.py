@@ -99,14 +99,17 @@ def optimizer_step_devices(optimizer):
     return counts
 
 
-def resume_at_episode_boundary(algo, checkpoint):
-    """Retain learning state, never replay observations from absent physics."""
+def resume_at_episode_boundary(algo, checkpoint, transform=None):
+    """Retain learning state, never replay observations from absent physics.
+    ``transform(state) -> state`` may adapt an older checkpoint (e.g. new input columns)."""
     # load_state_dict moves model/momentum tensors to their parameter devices.
     # Discarded old rollout tensors should never consume new GPU capacity.
     payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
     state = payload[0] if 0 in payload else payload
     if 'continuation_critic_optimizer' not in state:
         raise ValueError('Resume needs a complete continuation checkpoint')
+    if transform is not None:
+        state = transform(state)
     algo.set_full_state_weights(state)
     algo.central_value_net.optimizer.load_state_dict(state['continuation_critic_optimizer'])
     algo.central_value_net.epoch_num = state['continuation_critic_epoch']

@@ -82,6 +82,10 @@ def main():
     p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success'], default='reward',
                    help='Best checkpoint by training reward (rl_games) or, with --sgs, by the rolling statistic of '
                         'the fresh-rho evaluation envs (sgs/eval_goals_reached_count or sgs/eval_any_goal_success_rate)')
+    p.add_argument('--hand-surface-obs', action='store_true',
+                   help='mjlab, resume only: add 17 hand-point -> nearest object surface vectors (51 inputs after touch, '
+                        'dextrah_lab/wholebody/hand_surface.py); a checkpoint without them is expanded with zero input '
+                        'columns, zero Adam moments for them and fresh normalizer channels')
     p.add_argument('--best-delay-epochs', type=int, default=0,
                    help='New continuous run: start best-checkpoint tracking this many epochs after the resume '
                         '(0 = from the first epoch)')
@@ -142,7 +146,13 @@ def main():
             raise ValueError(f'--best-metric {args.best_metric} needs --sgs (its evaluation envs)')
         sgs_report = None
         torch.set_num_threads(4)
-        register_models()
+        hand_dim = 0
+        if args.hand_surface_obs:
+            if backend != 'mjlab' or not args.resume or args.control:
+                raise ValueError('--hand-surface-obs is implemented for resuming the mjlab tactile task')
+            from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM
+            hand_dim = HAND_SURFACE_DIM
+        register_models(hand_dim)
         saved = load_yaml(args.source_run/'params/env_resolved.yaml')
         agent = load_yaml(args.source_run/'params/agent.yaml')
         if backend == 'mjlab':
@@ -223,7 +233,7 @@ def main():
                     'control' if args.control else 'tactile-normal-shear','warmstart-8B',
                     'strict-tolerance','no-fabrics','no-pca','no-arm-torques']
                     +(['per-env-object-physics'] if args.per_env_object_physics else [])+['backend-'+backend]
-                    +(['sgs'] if args.sgs else []))
+                    +(['sgs'] if args.sgs else [])+(['hand-surface'] if args.hand_surface_obs else []))
             if wandb.run is None or wandb.run.settings.mode != 'online':
                 raise RuntimeError('Requested online W&B logging is not active')
             wandb.run.summary.update(dict(experiment_status='initializing_simulation',
@@ -235,7 +245,7 @@ def main():
             from dextrah_lab.mj.scene import SceneParams
             env = G1SonicTouchMjEnv(cfg, sonic=None, num_envs=args.num_envs, device=args.device,
                                     nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
-                                    mujoco_cfg=mj_settings['mujoco_options'], fixed_body=True,
+                                    mujoco_cfg=mj_settings['mujoco_options'], fixed_body=True, hand_surface=args.hand_surface_obs,
                                     scene_params=SceneParams(contact=ContactParams(g1_arm_armature=args.mj_arm_armature)))
             if args.mj_nan_capture:
                 env.enable_nan_capture(args.output/'nan_capture', max_abs_qvel=args.mj_nan_capture_max_qvel)
@@ -326,7 +336,22 @@ def main():
                 torch.save(env._sgs.state_dict(), str(target)+'.pending')
                 os.replace(str(target)+'.pending', target)
             algo.save = save_with_sgs
-        resume_info = resume_at_episode_boundary(algo,args.resume) if args.resume else None
+        hand_report = {}
+        def expand_hand(state):
+            from dextrah_lab.wholebody.hand_surface import expand_fixed_resume_state
+            state, report = expand_fixed_resume_state(state, algo, hand_dim)
+            hand_report.update(report)
+            return state
+        resume_info = resume_at_episode_boundary(algo,args.resume,transform=expand_hand if hand_dim else None) \
+            if args.resume else None
+        if hand_dim:
+            if hand_report.get('expanded'):
+                from dextrah_lab.wholebody.hand_surface import check_zero_hand_columns
+                hand_report['inert_hand_inputs'] = check_zero_hand_columns(
+                    algo.model, algo.central_value_net.model, env.cfg.observation_space, env.cfg.state_space, hand_dim, args.device)
+            hand_report['encoding'] = 'world-axis vector to nearest object-primitive surface, decimetres, norm clip 3; 17 points'
+            print('HAND_SURFACE '+json.dumps(hand_report), flush=True)
+            resume_info['hand_surface'] = hand_report
         observer.run_start_frame = int(algo.frame)
         if args.continuous and new_run:
             # Fresh physics must not mix old rolling scores with newly reset
@@ -350,6 +375,7 @@ def main():
         if provenance:
             provenance['optimization'] = optimization
             provenance['sgs'] = sgs_report
+            provenance['hand_surface'] = hand_report or None
             (args.output/'resume_provenance.json').write_text(json.dumps(provenance,indent=2))
         if resume_info:
             (args.output/'resume_validation.json').write_text(json.dumps(resume_info,indent=2))
@@ -363,6 +389,7 @@ def main():
                 additional_frame_budget=None if args.continuous else args.max_frames,
                 continuous=args.continuous,periodic_evaluation=False,
                 resume_checkpoint=str(args.resume) if args.resume else None,
+                hand_surface=hand_report or None,
                 run_start_frame=int(algo.frame),
                 tactile_sensor_hz=None if args.control else cfg.touch.sensor_hz,
                 tactile_publish_hz=None if args.control else cfg.touch.publish_hz,

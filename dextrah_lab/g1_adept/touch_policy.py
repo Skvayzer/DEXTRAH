@@ -9,12 +9,14 @@ from rl_games.algos_torch.running_mean_std import RunningMeanStd
 
 
 class TouchRunningMeanStd(RunningMeanStd):
-    def __init__(self, base_dim):
-        super().__init__((base_dim + 25,))
-        self.base_dim = base_dim
+    def __init__(self, base_dim, extra_dim=0):
+        # extra_dim: opt-in hand-to-surface inputs after the 25 touch channels
+        # (dextrah_lab/wholebody/hand_surface.py), plain per-channel normalization.
+        super().__init__((base_dim + 25 + extra_dim,))
+        self.base_dim, self.extra_dim = base_dim, extra_dim
         # The original scalar count is broadcast onto OLD features at migration.
         # New channels have their own calibration count and adapt immediately.
-        self.count = torch.ones(base_dim + 25, dtype=torch.float64)
+        self.count = torch.ones(base_dim + 25 + extra_dim, dtype=torch.float64)
 
     def _update_mean_var_count_from_moments(self, *args):
         mean, var, count = super()._update_mean_var_count_from_moments(*args)
@@ -25,8 +27,9 @@ class TouchRunningMeanStd(RunningMeanStd):
         if denorm:
             raise ValueError('Touch normalization is for observations, not values')
         output = super().forward(input, mask=mask)
-        raw = input[:, self.base_dim:].reshape(-1, 5, 5)
-        extra = output[:, self.base_dim:].reshape(-1, 5, 5)
+        touch = slice(self.base_dim, self.base_dim+25)
+        raw = input[:, touch].reshape(-1, 5, 5)
+        extra = output[:, touch].reshape(-1, 5, 5)
         # Preserve validity as a bit; invalid forces stay zero after centering.
         # Fixed 100 ms UNITS, not the publication period. Preserve checkpoint
         # semantics when sensor rates change; do not rescale learned inputs.
@@ -36,25 +39,30 @@ class TouchRunningMeanStd(RunningMeanStd):
         return output
 
 
+HAND_DIM = 0     # set by register_models (opt-in hand-to-surface inputs)
+
+
 class TouchActor(models.ModelA2CContinuousLogStd):
     def build(self, config):
-        if config.get('coef_id_idx') != 249:
-            raise ValueError('Touch continuation actor requires 224 + 25 observations')
+        if config.get('coef_id_idx') != 249+HAND_DIM:
+            raise ValueError(f'Touch continuation actor requires 224 + 25 (+ {HAND_DIM}) observations')
         model = super().build(config)
-        model.running_mean_std = TouchRunningMeanStd(224)
+        model.running_mean_std = TouchRunningMeanStd(224, HAND_DIM)
         return model
 
 
 class TouchCritic(models.ModelCentralValue):
     def build(self, config):
-        if config.get('coef_id_idx') != 271:
-            raise ValueError('Touch continuation critic requires 246 + 25 observations')
+        if config.get('coef_id_idx') != 271+HAND_DIM:
+            raise ValueError(f'Touch continuation critic requires 246 + 25 (+ {HAND_DIM}) observations')
         model = super().build(config)
-        model.running_mean_std = TouchRunningMeanStd(246)
+        model.running_mean_std = TouchRunningMeanStd(246, HAND_DIM)
         return model
 
 
-def register_models():
+def register_models(hand_dim=0):
+    global HAND_DIM
+    HAND_DIM = hand_dim
     model_builder.register_model('continuous_a2c_logstd_touch', TouchActor)
     model_builder.register_model('central_value_touch', TouchCritic)
 

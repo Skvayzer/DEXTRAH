@@ -96,13 +96,16 @@ class _Scene:
 
 class G1SonicTouchMjEnv:
     def __init__(self, cfg, *, sonic, num_envs, device='cuda:0', scene_params=None,
-                 nconmax=None, njmax=None, mujoco_cfg=None, velocity_limits=True, seed=None, fixed_body=False):
+                 nconmax=None, njmax=None, mujoco_cfg=None, velocity_limits=True, seed=None, fixed_body=False,
+                 hand_surface=False):
         from mjlab.scene import Scene
         from mjlab.sim import Simulation, SimulationCfg
         self.cfg, self.device, self.num_envs = cfg, device, num_envs
         # fixed_body: the fixed-body touch teacher (Isaac G1Revo2TouchEnv is the
         # leaf class: right arm + hand, welded base, no SONIC layers).
         self._fixed_body = fixed_body
+        if hand_surface and not fixed_body:
+            raise ValueError('Whole body: enable the hand-surface observation with cfg.sonic_body.hand_surface_obs')
         if fixed_body:
             if sonic is not None:
                 raise ValueError('The fixed-body touch task has no SONIC controller')
@@ -200,6 +203,14 @@ class G1SonicTouchMjEnv:
                 raise ValueError(f'Fixed-body interface {(cfg.observation_space, cfg.state_space)} != Isaac {isaac_dims}')
             if self._bps_manifest['features_sha256'] != BANK_SHA256:
                 raise ValueError('mjlab port generated a different object bank')
+            # Opt-in hand-to-surface observation (wholebody/hand_surface.py), after touch.
+            self._hand_surface, self.hand_surface_dim = None, 0
+            if hand_surface:
+                from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM, HandSurface, install_actor_pose_capture
+                self._hand_surface, self.hand_surface_dim = HandSurface(self), HAND_SURFACE_DIM
+                install_actor_pose_capture(obs_utils)
+                cfg.observation_space += HAND_SURFACE_DIM
+                cfg.state_space += HAND_SURFACE_DIM
             self.single_action_space = gym.spaces.Box(-np.inf, np.inf, shape=(cfg.action_space,))
             for key, size in (('policy', cfg.observation_space), ('critic', cfg.state_space)):
                 self.single_observation_space[key] = gym.spaces.Box(-np.inf, np.inf, shape=(size,), dtype=np.float32)
@@ -577,6 +588,9 @@ class G1SonicTouchMjEnv:
             self.extras['final_observation']['critic'] = torch.cat(
                 (self.extras['final_observation']['critic'], self._touch_observation()), -1)
         if self._fixed_body:
+            if self._hand_surface is not None and 'final_observation' in self.extras:
+                final = self.extras['final_observation']
+                final['critic'] = torch.cat((final['critic'], self._hand_surface.observation(*self._true_object_pose())), -1)
             return reward
         # G1SonicTouchEnv
         self.extras['episode_final']['robot_fall'] = self._body_fallen.float()
@@ -650,6 +664,9 @@ class G1SonicTouchMjEnv:
             obs = {k: torch.cat((v, extra), -1) for k, v in obs.items()}
         # G1SonicTouchEnv
         if not self._wholebody_ready:
+            if self._hand_surface is not None:
+                actor, critic = self._hand_surface_observations()
+                obs = dict(policy=torch.cat((obs['policy'], actor), -1), critic=torch.cat((obs['critic'], critic), -1))
             return obs
         extra = self._wholebody_observation()
         obs = {k: torch.cat((v, extra), -1) for k, v in obs.items()}
