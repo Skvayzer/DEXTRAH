@@ -19,7 +19,7 @@ FROZEN_ACTION_DIM = 70
 
 
 class FrozenSonicSapgNetwork(nn.Module):
-    def __init__(self, source, num_seqs):
+    def __init__(self, source, num_seqs, hand_dim=0):
         super().__init__()
         self.source = deepcopy(source.a2c_network).requires_grad_(True)
         if (self.source.separate or not self.source.has_rnn or not self.source.is_rnn_before_mlp
@@ -27,6 +27,13 @@ class FrozenSonicSapgNetwork(nn.Module):
                 or self.source.pid_idx != TASK_ACTOR_DIM or self.source.fixed_sigma != 'coef_cond'):
             raise ValueError('Unsupported source recurrent SAPG interface')
         self.source.num_seqs = num_seqs
+        self.hand_dim = hand_dim
+        if hand_dim:
+            # Opt-in hand-to-surface inputs (wholebody/hand_surface.py) enter the task LSTM
+            # through zero input weights, inserted before the SAPG coefficient embedding.
+            from .hand_surface import expand_lstm_input
+            expand_lstm_input(self.source.rnn, TASK_ACTOR_DIM, hand_dim)
+            self.source.pid_idx = TASK_ACTOR_DIM+hand_dim
         self.source.sigma.requires_grad_(False)
         # Zero final layer means the initial body command is exactly pristine
         # SONIC, while the six finger means and recurrent task features are the

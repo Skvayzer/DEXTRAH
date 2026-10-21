@@ -243,8 +243,14 @@ class G1SonicTouchMjEnv:
             low = np.r_[np.full(64, -np.inf), np.full(6, -1.)].astype(np.float32)
             high = np.r_[np.full(64, np.inf), np.full(6, 1.)].astype(np.float32)
             self.single_action_space = gym.spaces.Box(low, high)
-            cfg.observation_space = TASK_ACTOR_DIM+BODY_EXTRA_DIM
-            cfg.state_space = TASK_CRITIC_DIM+BODY_EXTRA_DIM
+            # Opt-in hand-to-surface observation (wholebody/hand_surface.py), after the body extra.
+            self._hand_surface, self.hand_surface_dim = None, 0
+            if getattr(cfg.sonic_body, 'hand_surface_obs', False):
+                from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM, HandSurface, install_actor_pose_capture
+                self._hand_surface, self.hand_surface_dim = HandSurface(self), HAND_SURFACE_DIM
+                install_actor_pose_capture(obs_utils)
+            cfg.observation_space = TASK_ACTOR_DIM+BODY_EXTRA_DIM+self.hand_surface_dim
+            cfg.state_space = TASK_CRITIC_DIM+BODY_EXTRA_DIM+self.hand_surface_dim
             for key, size in (('policy', cfg.observation_space), ('critic', cfg.state_space)):
                 self.single_observation_space[key] = gym.spaces.Box(-np.inf, np.inf, shape=(size,), dtype=np.float32)
             if getattr(cfg.sonic_body, 'spawn_on_table', False):
@@ -586,7 +592,25 @@ class G1SonicTouchMjEnv:
         if 'final_observation' in self.extras:
             final = self.extras['final_observation']
             final['critic'] = torch.cat((final['critic'], self._wholebody_observation()), -1)
+            if self._hand_surface is not None:
+                final['critic'] = torch.cat((final['critic'], self._hand_surface.observation(*self._true_object_pose())), -1)
         return reward
+
+    def _true_object_pose(self):
+        return self.object.data.root_pos_w-self.scene.env_origins, self.object.data.root_quat_w
+
+    def _hand_surface_observations(self):
+        """(actor, critic) hand-to-surface observations: the actor sees the object pose its
+        other object observations use (delayed/noised when that DR is on), the critic the true one."""
+        true = self._true_object_pose()
+        actor = true
+        if self.cfg.domain_randomization.use_object_state_delay_noise:
+            pose = getattr(self, '_actor_object_pose', None)
+            if pose is None or pose[2] != self._sim_step_counter:
+                raise RuntimeError('Actor object pose was not captured at this step')
+            actor = pose[:2]
+        critic = self._hand_surface.observation(*true)
+        return (critic if actor is true else self._hand_surface.observation(*actor)), critic
 
     def _touch_observation(self):
         return self.touch_model.observation(None)
@@ -628,4 +652,8 @@ class G1SonicTouchMjEnv:
         if not self._wholebody_ready:
             return obs
         extra = self._wholebody_observation()
-        return {k: torch.cat((v, extra), -1) for k, v in obs.items()}
+        obs = {k: torch.cat((v, extra), -1) for k, v in obs.items()}
+        if self._hand_surface is not None:
+            actor, critic = self._hand_surface_observations()
+            obs = dict(policy=torch.cat((obs['policy'], actor), -1), critic=torch.cat((obs['critic'], critic), -1))
+        return obs

@@ -89,7 +89,8 @@ def build_policy(env, checkpoint, contract, device):
     from dextrah_lab.wholebody.sapg_network import load_touch_sources, register_sonic_models
     run = Path(checkpoint).resolve().parent.parent
     source, critic = load_touch_sources(device, Path(contract['source_checkpoint']), contract['source_sha256'])
-    register_sonic_models(source, critic, env._sonic_reference, env._body_lower[0], env._body_upper[0], frozen=True)
+    register_sonic_models(source, critic, env._sonic_reference, env._body_lower[0], env._body_upper[0], frozen=True,
+                          hand_dim=getattr(env, 'hand_surface_dim', 0))
     params = load_yaml(run/'params/agent.yaml')['params']
     model = model_builder.ModelBuilder().load(params).build(dict(
         actions_num=70, input_shape=(env.cfg.observation_space+32,), num_seqs=env.num_envs, value_size=1,

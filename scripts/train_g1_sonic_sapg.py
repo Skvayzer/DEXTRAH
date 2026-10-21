@@ -124,6 +124,12 @@ def main():
                    help='Reaching configurations and evaluation starts must pass the passive settle check')
     p.add_argument('--sgs-eval-pool', type=int, default=16384,
                    help='With --sgs-validate-spawns: validated fresh rho starts the evaluation envs draw from')
+    p.add_argument('--hand-surface-obs', action='store_true',
+                   help='Frozen SONIC (mjlab): add 17 hand-point -> nearest object surface vectors (51 inputs, '
+                        'wholebody/hand_surface.py) to actor and critic; with --init-weights from a run without them, '
+                        'their network columns start at zero')
+    p.add_argument('--sgs-state', type=Path,
+                   help='SGS state to continue (X.sgs.pt); default: the --resume checkpoint\'s')
     p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success'], default='reward',
                    help='Best checkpoint by training reward (rl_games) or, with --sgs, by the rolling statistic of the '
                         'fresh-rho evaluation envs')
@@ -145,17 +151,26 @@ def main():
         raise ValueError('--sgs is implemented for the mjlab reposing task')
     if args.best_metric != 'reward' and not args.sgs:
         raise ValueError(f'--best-metric {args.best_metric} needs --sgs (its evaluation envs)')
-    if args.teacher_checkpoint is not None and (not args.frozen_pretrained_sonic or args.init_weights
-                                                or not args.teacher_checkpoint.is_file()):
+    if args.teacher_checkpoint is not None and (not args.frozen_pretrained_sonic or not args.teacher_checkpoint.is_file()):
         raise ValueError('--teacher-checkpoint initializes a frozen-SONIC policy from an existing checkpoint')
-    if args.resume is not None:
-        # A continuation keeps its teacher (the network was built from it).
-        parent_teacher = json.loads((args.resume.parent.parent/'task_contract.json').read_text()).get('source_checkpoint')
+    if args.hand_surface_obs and (backend != 'mjlab' or not args.frozen_pretrained_sonic or args.carry):
+        raise ValueError('--hand-surface-obs is implemented for the frozen-SONIC mjlab reposing task')
+    if args.sgs_state is not None and (not args.sgs or not args.sgs_state.is_file()):
+        raise ValueError('--sgs-state needs --sgs and an existing X.sgs.pt')
+    parent_checkpoint = args.resume or args.init_weights
+    if parent_checkpoint is not None and (parent_checkpoint.parent.parent/'task_contract.json').exists():
+        # A continuation or fine-tune keeps its teacher (the network architecture was built from it).
+        parent_contract = json.loads((parent_checkpoint.parent.parent/'task_contract.json').read_text())
+        parent_teacher = parent_contract.get('source_checkpoint')
         from dextrah_lab.wholebody.task_contract import TOUCH_CHECKPOINT as _run383
         if args.teacher_checkpoint is None and parent_teacher not in (None, _run383):
             args.teacher_checkpoint = Path(parent_teacher)
         elif args.teacher_checkpoint is not None and str(args.teacher_checkpoint) != parent_teacher:
             raise ValueError(f'Continuation teacher {args.teacher_checkpoint} != parent {parent_teacher}')
+        parent_hand = bool(parent_contract.get('body_termination', {}).get('hand_surface_obs', False))
+        if args.resume is not None and parent_hand != args.hand_surface_obs:
+            raise ValueError(f'--hand-surface-obs={args.hand_surface_obs} but the resumed run used {parent_hand}')
+        args.expand_hand_inputs = args.hand_surface_obs and not parent_hand
     if args.num_envs < 6 or args.num_envs % 6 or not args.output.name.startswith('0_'):
         raise ValueError('Require six groups and a policy-index-prefixed output name')
     if args.output.exists():
@@ -245,6 +260,7 @@ def main():
         cfg.sonic_body.body_table_contact_termination = args.body_table_contact_termination
         cfg.sonic_body.per_env_object_physics = args.per_env_object_physics
         cfg.sonic_body.spawn_on_table = args.spawn_on_table
+        cfg.sonic_body.hand_surface_obs = args.hand_surface_obs
         if args.body_table_contact_monitor_only:
             cfg.sonic_body.body_table_contact_termination = True
             cfg.sonic_body.body_table_contact_terminates = False
@@ -415,7 +431,7 @@ def main():
                 env.enable_nan_capture(args.output/'nan_capture')
             if args.sgs:
                 # A resumed SGS run continues its configuration set and outcome windows.
-                sgs_file = args.resume.with_suffix('.sgs.pt') if args.resume else None
+                sgs_file = args.sgs_state or (args.resume.with_suffix('.sgs.pt') if args.resume else None)
                 sgs_state = (torch.load(sgs_file, map_location='cpu', weights_only=False)
                              if sgs_file is not None and sgs_file.exists() else None)
                 env.enable_sgs(sgs_settings, sgs_state)
@@ -428,7 +444,20 @@ def main():
             from dextrah_lab.wholebody.failure_recording import FailureRecorder
             diagnostic = FailureRecorder(env, args.output/'failure_clip', args.diagnostic_capture_seconds,
                                          epoch=lambda: 0 if algo is None else int(algo.epoch_num))
-        register_sonic_models(actor, critic, sonic, env._body_lower[0], env._body_upper[0], student, frozen=frozen)
+        hand_dim = getattr(env, 'hand_surface_dim', 0)
+        if args.hand_surface_obs:
+            from dextrah_lab.wholebody import hand_surface
+            contract['intentional_changes'] = contract['intentional_changes'] + ['hand_to_surface_observation_51d']
+            contract['hand_surface'] = dict(points=['palm_centre', '5_fingertip_pads', *hand_surface.HAND_SURFACE_LINKS],
+                dim=hand_dim, encoding='world-axis vector to nearest object-primitive surface, decimetres, norm clip 3',
+                actor_object_pose='same delayed/noised pose as the other actor object observations',
+                critic_object_pose='true', network='zero-initialized input columns in the task LSTM and critic layer 1')
+            (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
+            if args.wandb == 'online':
+                wandb.config.update(dict(hand_surface=contract['hand_surface'], intentional_changes=contract['intentional_changes']),
+                                    allow_val_change=True)
+        register_sonic_models(actor, critic, sonic, env._body_lower[0], env._body_upper[0], student, frozen=frozen,
+                              hand_dim=hand_dim)
         params = agent['params']
         params['model']['name'] = 'sonic_sapg_logstd'
         params['network']['name'] = 'sonic_sapg_actor'
@@ -518,7 +547,14 @@ def main():
             report['best_tracking'] = eval_best.disable_reward_best()
         if args.init_weights is not None:
             from dextrah_lab.wholebody.carry_training import load_initial_weights, install_critic_warmup
-            report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)
+            if getattr(args, 'expand_hand_inputs', False):
+                from dextrah_lab.wholebody.hand_surface import check_zero_hand_columns, load_expanded_initial_weights
+                report['init_weights'] = load_expanded_initial_weights(algo, args.init_weights, hand_dim)
+                report['init_weights']['inert_hand_inputs'] = check_zero_hand_columns(
+                    algo.model, algo.central_value_net.model, env.cfg.observation_space, env.cfg.state_space, hand_dim, args.device)
+                print('HAND_SURFACE_INIT '+json.dumps(report['init_weights']['inert_hand_inputs']), flush=True)
+            else:
+                report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)
             if args.critic_warmup_epochs:
                 install_critic_warmup(algo, args.critic_warmup_epochs)
         if args.memory_trace:

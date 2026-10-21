@@ -15,18 +15,27 @@ from .task_contract import TASK_ACTOR_DIM, TASK_CRITIC_DIM, BODY_EXTRA_DIM, TOUC
 
 
 class TaskBodyNormalizer(nn.Module):
-    """Keep exact source tactile normalization and unclipped SONIC inputs."""
-    def __init__(self, source, task_dim, normalize_body=False):
+    """Keep exact source tactile normalization and unclipped SONIC inputs.
+
+    With hand_dim > 0 (opt-in hand-to-surface observation, wholebody/hand_surface.py)
+    the last hand_dim inputs get their own running normalizer."""
+    def __init__(self, source, task_dim, normalize_body=False, hand_dim=0):
         super().__init__()
         self.task = deepcopy(source)
         self.task_dim = task_dim
         self.body = RunningMeanStd((BODY_EXTRA_DIM,)) if normalize_body else nn.Identity()
+        self.hand_dim = hand_dim
+        if hand_dim:
+            self.hand = RunningMeanStd((hand_dim,))
 
     def forward(self, x, **kwargs):
         # Original VecEnv clips only the original observation to +/-10 before
         # updating its normalizer. Never clip SONIC velocity/history at 10.
         task = self.task(x[:, :self.task_dim].clamp(-10, 10), **kwargs)
-        return torch.cat((task, self.body(x[:, self.task_dim:])), -1)
+        if not self.hand_dim:
+            return torch.cat((task, self.body(x[:, self.task_dim:])), -1)
+        b = self.task_dim+BODY_EXTRA_DIM
+        return torch.cat((task, self.body(x[:, self.task_dim:b]), self.hand(x[:, b:b+self.hand_dim], **kwargs)), -1)
 
 
 def recurrent_task_features(source, observation, states, sequence_length=1, dones=None, bptt_len=0):
@@ -123,31 +132,34 @@ class SonicSapgNetwork(nn.Module):
         return torch.cat((body, fingers), -1), self.logstd[ids], value, states
 
 
-def expanded_critic(source, num_seqs):
+def expanded_critic(source, num_seqs, hand_dim=0):
     network = deepcopy(source.a2c_network).requires_grad_(True)
     if network.has_rnn or network.pid_idx != TASK_CRITIC_DIM or not network.central_value:
         raise ValueError('Expected the original feedforward asymmetric critic')
     old = network.actor_mlp[0]
     if not isinstance(old, nn.Linear) or old.in_features != TASK_CRITIC_DIM+32:
         raise ValueError('Unexpected critic embedding/input layout')
-    new = nn.Linear(old.in_features+BODY_EXTRA_DIM, old.out_features).to(old.weight)
+    new = nn.Linear(old.in_features+BODY_EXTRA_DIM+hand_dim, old.out_features).to(old.weight)
     with torch.no_grad():
         new.weight.zero_()
         new.weight[:, :TASK_CRITIC_DIM] = old.weight[:, :TASK_CRITIC_DIM]
         new.weight[:, -32:] = old.weight[:, -32:]
         new.bias.copy_(old.bias)
     network.actor_mlp[0] = new
-    network.pid_idx = TASK_CRITIC_DIM+BODY_EXTRA_DIM
+    network.pid_idx = TASK_CRITIC_DIM+BODY_EXTRA_DIM+hand_dim
     network.num_seqs = num_seqs
     return network
 
 
-def register_sonic_models(source_actor, source_critic, sonic, lower, upper, student=None, *, frozen=False):
-    """Register builders for the unchanged rl_games/SAPG Runner, once per run."""
+def register_sonic_models(source_actor, source_critic, sonic, lower, upper, student=None, *, frozen=False, hand_dim=0):
+    """Register builders for the unchanged rl_games/SAPG Runner, once per run.
+    hand_dim: opt-in hand-to-surface inputs after the body extra (frozen SONIC only)."""
     if frozen and student is not None:
         raise ValueError('Never import a fine-tuned decoder bootstrap into frozen pretrained SONIC')
+    if hand_dim and not frozen:
+        raise ValueError('The hand-to-surface observation is implemented for frozen SONIC')
     def validate(config, task_dim):
-        if config.get('coef_id_idx') != task_dim+BODY_EXTRA_DIM or config.get('type') != 'extra_param':
+        if config.get('coef_id_idx') != task_dim+BODY_EXTRA_DIM+hand_dim or config.get('type') != 'extra_param':
             raise ValueError('Require task+body observations and six mixed SAPG groups')
         torch.testing.assert_close(config['coef_ids'].to(source_actor.a2c_network.param_ids),
                                    source_actor.a2c_network.param_ids, rtol=0, atol=0)
@@ -162,25 +174,25 @@ def register_sonic_models(source_actor, source_critic, sonic, lower, upper, stud
             validate(config, TASK_ACTOR_DIM)
             if frozen:
                 from .frozen_sapg import FrozenSonicSapgNetwork
-                return FrozenSonicSapgNetwork(source_actor, config['num_seqs'])
+                return FrozenSonicSapgNetwork(source_actor, config['num_seqs'], hand_dim=hand_dim)
             return SonicSapgNetwork(source_actor, sonic, lower, upper, config['num_seqs'], student)
 
     class CriticBuilder(ActorBuilder):
         def build(self, name, **config):
             validate(config, TASK_CRITIC_DIM)
-            return expanded_critic(source_critic, config['num_seqs'])
+            return expanded_critic(source_critic, config['num_seqs'], hand_dim)
 
     class ActorModel(models.ModelA2CContinuousLogStd):
         def build(self, config):
             model = super().build(config)
-            model.running_mean_std = TaskBodyNormalizer(source_actor.running_mean_std, TASK_ACTOR_DIM)
+            model.running_mean_std = TaskBodyNormalizer(source_actor.running_mean_std, TASK_ACTOR_DIM, hand_dim=hand_dim)
             model.value_mean_std = deepcopy(source_actor.value_mean_std)
             return model
 
     class CriticModel(models.ModelCentralValue):
         def build(self, config):
             model = super().build(config)
-            model.running_mean_std = TaskBodyNormalizer(source_critic.running_mean_std, TASK_CRITIC_DIM, True)
+            model.running_mean_std = TaskBodyNormalizer(source_critic.running_mean_std, TASK_CRITIC_DIM, True, hand_dim)
             model.value_mean_std = deepcopy(source_critic.value_mean_std)
             return model
 
