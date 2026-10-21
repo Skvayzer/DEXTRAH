@@ -148,9 +148,20 @@ run 1377 loaded into the expanded network, new inputs inert at initialization
 (max output difference 0.0), SGS state continued, checkpoint + `.sgs.pt` saved,
 5.9 GB GPU memory free.
 
-Planned comparison (not run yet): fine-tune run 1377's final checkpoint with and
-without `--hand-surface-obs`, same fresh optimizers, same SGS state (`--sgs-state`),
-same hours; compare evaluation success overall and on thin-handle objects.
+Fixed-body teacher (the comparison runs here first: ~110k transitions/s vs ~31k for
+the whole body). `scripts/train_g1_touch_continuation.py --hand-surface-obs` resumes a
+checkpoint without the inputs by expanding it (`expand_fixed_resume_state`): zero input
+columns in the actor LSTM and the critic's first layer, zero Adam moments for those
+columns in both optimizers, new normaliser channels (mean 0, var 1, count 1); every
+other weight, moment, counter and the SGS state are restored. A CPU test on the real
+run-1369 checkpoint confirms the expanded actor and critic reproduce the original
+outputs for any hand input.
+
+Comparison (running): resume run 1369's final checkpoint (epoch 83 107) for 12 h each
+- treatment: `HAND_SURFACE_OBS=1`, job 1393 (W&B `unique_id_0_bps128_touch70_fixed_mjlab_sgs_hand_1393`);
+- control: plain resume, same settings and hours (after job 1393).
+Compare `sgs/eval_*` overall and on thin-handle objects (per-object success from the SGS
+state). The same `--hand-surface-obs` exists for the whole-body trainer (smoke job 1392).
 
 ## 7. Comparison with SimToolReal (summary)
 
@@ -166,7 +177,8 @@ real robot).
 
 ## 8. Next steps
 
-1. Run the hand-surface comparison (two fine-tunes from run 1377).
+1. Finish the hand-surface comparison on the fixed-body teacher; if it helps, carry the
+   inputs into the whole-body policy (re-initialize from the new teacher or fine-tune 1377).
 2. Opt-in SGS fixes 1-2 above (re-harvest with per-object quotas, count-based success).
 3. Evaluate on the 12 DexToolBench meshes (needs mesh objects in the mjlab scene).
 4. Precision budget of the object interface (pose noise, latency, dropouts, coarse
