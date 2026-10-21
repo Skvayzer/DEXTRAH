@@ -163,3 +163,8 @@ continuation reads it from there. Because the zero-initialized adapter cannot gr
 first, held states can only be collected once the policy grasps: use a long collection
 window (`SGS_HARVEST_MAX_STEPS`), until which only reaching configurations are sampled.
 
+Hand-to-surface observation (opt-in `--hand-surface-obs`, independent of SGS): see
+`dextrah_lab/wholebody/hand_surface.py` and docs/g1_wholebody_sgs_report_20261021.md
+section 6. For an SGS fine-tune from another checkpoint pass `--sgs-state X.sgs.pt`
+together with `--init-weights X.pth` (fresh optimizers, same configuration set).
+

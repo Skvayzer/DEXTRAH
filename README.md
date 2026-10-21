@@ -1,5 +1,25 @@
 # DextrAH on Isaac Lab
 
+## Current project: whole-body dexterous reposing on Unitree G1 + BrainCo Revo2 (October 2026)
+
+A Unitree G1 humanoid driven by NVIDIA's pretrained SONIC whole-body controller
+(kept frozen) reposes 1200 procedural tool-like objects with a BrainCo Revo2 right
+hand. A recurrent SAPG policy outputs SONIC latent residuals plus six finger
+commands from object pose, the handle "grasp box", a BPS-128 shape code, simulated
+70 Hz Revo2 touch and SONIC's body history (optionally hand-to-surface vectors).
+It is initialized from a fixed-body teacher and trained in mjlab (MuJoCo Warp, per-world
+object physics) with Success Guided Sampling (arXiv:2610.12465) over spawn-validated
+starts. Latest result (simulation, training objects): 57.5% of episodes reach at least one goal,
+7.4 goals per episode, deterministic policy.
+
+* Report and analysis: [docs/g1_wholebody_sgs_report_20261021.md](docs/g1_wholebody_sgs_report_20261021.md)
+* SGS (fixed body and whole body): [docs/sgs_success_guided_sampling.md](docs/sgs_success_guided_sampling.md)
+* mjlab port: [docs/mjlab_port_plan_20261013.md](docs/mjlab_port_plan_20261013.md)
+* Training: `scripts/train_g1_sonic_sapg.py --backend mjlab` (`scripts/slurm/train_g1_sonic_sapg.sbatch`);
+  evaluation `scripts/eval_wholebody_checkpoint.py`; videos `scripts/record_wholebody_videos.py`.
+
+The sections below describe earlier stages of the project and the upstream DextrAH code.
+
 The experimental Unitree G1 + BrainCo Revo2 human-motion/PCA pipeline is
 documented in [docs/revo2_human_motion_pca.md](docs/revo2_human_motion_pca.md).
 
