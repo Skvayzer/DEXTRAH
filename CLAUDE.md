@@ -22,6 +22,9 @@
   spawn rules or eval thresholds; changes are explicit, opt-in and recorded
   in the task contract.
 - Don't stop or restart training unless asked. Keep evals quick and small.
+- Hand-to-surface observation (`--hand-surface-obs`, 17 hand points -> nearest object
+  surface, `dextrah_lab/wholebody/hand_surface.py`) is ON for all mjlab runs from
+  2026-10-21 (sbatch default `HAND_SURFACE_OBS=1`; opt out with `HAND_SURFACE_OBS=0`).
 - Conservative claims.
 
 ## Git

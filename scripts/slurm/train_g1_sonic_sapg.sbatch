@@ -89,7 +89,10 @@ if [[ "${SGS:-0}" == 1 ]]; then
     if [[ -n "${SGS_EVAL_POOL:-}" ]]; then extra_args+=(--sgs-eval-pool "$SGS_EVAL_POOL"); fi
 fi
 if [[ -n "${BEST_METRIC:-}" ]]; then extra_args+=(--best-metric "$BEST_METRIC"); fi
-if [[ "${HAND_SURFACE_OBS:-0}" == 1 ]]; then extra_args+=(--hand-surface-obs); fi
+# Hand-to-surface observation: default ON for mjlab frozen-SONIC runs (user, 2026-10-21); HAND_SURFACE_OBS=0 opts out.
+if [[ "${BACKEND:-isaac}" == mjlab && "${FROZEN_PRETRAINED_SONIC:-0}" == 1 && "${HAND_SURFACE_OBS:-1}" == 1 ]]; then
+    extra_args+=(--hand-surface-obs)
+fi
 if [[ -n "${SGS_STATE:-}" ]]; then extra_args+=(--sgs-state "$SGS_STATE"); fi
 if [[ -n "${DIAGNOSTIC_CAPTURE_SECONDS:-}" ]]; then
     extra_args+=(--diagnostic-capture-seconds "$DIAGNOSTIC_CAPTURE_SECONDS")

@@ -283,8 +283,9 @@ def expand_fixed_resume_state(state, algo, hand_dim):
         index = [n for n, _ in net.named_parameters()].index(key)
         ids = opt_state['param_groups'][0]['params']
         slot = ids[index]
-        for moment in ('exp_avg', 'exp_avg_sq'):
-            opt_state['state'][slot][moment] = insert_zero_columns(opt_state['state'][slot][moment], at, hand_dim)
+        if slot in opt_state['state']:                   # fresh optimizers have no moments yet
+            for moment in ('exp_avg', 'exp_avg_sq'):
+                opt_state['state'][slot][moment] = insert_zero_columns(opt_state['state'][slot][moment], at, hand_dim)
         return opt_state
     if len(state['optimizer']['param_groups']) != 1 or len(state['continuation_critic_optimizer']['param_groups']) != 1:
         raise ValueError('Expected one Adam parameter group per optimizer')

@@ -55,7 +55,8 @@ if [[ "${PER_ENV_OBJECT_PHYSICS:-0}" == 1 ]]; then extra_args+=(--per-env-object
 if [[ -n "${MINIBATCH_SIZE:-}" ]]; then extra_args+=(--minibatch-size "$MINIBATCH_SIZE"); fi
 if [[ -n "${BEST_DELAY_EPOCHS:-}" ]]; then extra_args+=(--best-delay-epochs "$BEST_DELAY_EPOCHS"); fi
 if [[ -n "${BEST_METRIC:-}" ]]; then extra_args+=(--best-metric "$BEST_METRIC"); fi
-if [[ "${HAND_SURFACE_OBS:-0}" == 1 ]]; then extra_args+=(--hand-surface-obs); fi
+# Hand-to-surface observation: default ON for mjlab runs (user, 2026-10-21); HAND_SURFACE_OBS=0 opts out.
+if [[ "${BACKEND:-isaac}" == mjlab && "${HAND_SURFACE_OBS:-1}" == 1 ]]; then extra_args+=(--hand-surface-obs); fi
 if [[ "${WANDB:-1}" == 1 ]]; then extra_args+=(--wandb); fi
 training_pid=''
 trap 'if [[ -n "$training_pid" ]]; then kill -USR1 "$training_pid"; fi' USR1 TERM
