@@ -72,6 +72,10 @@ def main():
     p.add_argument('--continuous', action='store_true')
     p.add_argument('--resume', type=Path)
     p.add_argument('--memory-trace', action='store_true')
+    p.add_argument('--lean-sapg-batches', action='store_true',
+                   help='exact lower-peak-memory SAPG batch handling (dextrah_lab/wholebody/sapg_memory.py)')
+    p.add_argument('--boundary-gc-freeze', action='store_true',
+                   help='gc.freeze() after the first boundary collection (faster later collections)')
     p.add_argument('--boundary-gc-interval', type=int, default=0,
                    help='Full cyclic GC between completed updates; zero disables; never flushes CUDA cache')
     p.add_argument('--memory-gc-probe-epoch', type=int, default=0,
@@ -360,6 +364,8 @@ def main():
         contract['memory_trace'] = args.memory_trace
         contract['memory_gc_probe_epoch'] = args.memory_gc_probe_epoch
         contract['boundary_gc_interval'] = args.boundary_gc_interval
+        contract['boundary_gc_freeze'] = bool(args.boundary_gc_freeze)
+        contract['lean_sapg_batches'] = bool(args.lean_sapg_batches)
         contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
         contract['periodic_stack_dumps_during_training'] = False
         contract['wandb_initialization'] = 'before_Isaac_Kit_asyncio_patch' if backend == 'isaac' else 'standard'
@@ -567,12 +573,15 @@ def main():
                 report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)
             if args.critic_warmup_epochs:
                 install_critic_warmup(algo, args.critic_warmup_epochs)
+        if args.lean_sapg_batches:
+            from dextrah_lab.wholebody.sapg_memory import install_lean_sapg_batches
+            report['lean_sapg_batches'] = install_lean_sapg_batches(algo)
         if args.memory_trace:
             from dextrah_lab.wholebody.memory_diagnostics import install_memory_trace
             install_memory_trace(algo, args.output, args.memory_gc_probe_epoch)
         if args.boundary_gc_interval:
             from dextrah_lab.wholebody.memory_cleanup import install_boundary_gc
-            install_boundary_gc(algo, args.output, args.boundary_gc_interval)
+            install_boundary_gc(algo, args.output, args.boundary_gc_interval, freeze=args.boundary_gc_freeze)
         def request_stop(signum, frame):
             observer.stop_requested = signal.Signals(signum).name
             print('CHECKPOINTED_STOP_REQUESTED '+observer.stop_requested, flush=True)

@@ -53,6 +53,8 @@ if [[ -n "${SIM_WORKER_THREADS:-}" ]]; then
     extra_args+=("--kit_args=--/plugins/carb.tasking.plugin/threadCount=$SIM_WORKER_THREADS --/plugins/omni.tbb.globalcontrol/maxThreadCount=$SIM_WORKER_THREADS")
 fi
 if [[ "${MEMORY_TRACE:-0}" == 1 ]]; then extra_args+=(--memory-trace); fi
+if [[ "${LEAN_SAPG_BATCHES:-0}" == 1 ]]; then extra_args+=(--lean-sapg-batches); fi
+if [[ "${BOUNDARY_GC_FREEZE:-0}" == 1 ]]; then extra_args+=(--boundary-gc-freeze); fi
 if [[ -n "${BOUNDARY_GC_INTERVAL:-}" ]]; then
     extra_args+=(--boundary-gc-interval "$BOUNDARY_GC_INTERVAL")
 fi

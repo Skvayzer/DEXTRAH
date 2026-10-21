@@ -12,14 +12,17 @@ import time
 import torch
 
 
-def install_boundary_gc(algo, output, interval=16):
+def install_boundary_gc(algo, output, interval=16, freeze=False):
+    """freeze: at the first boundary, after collecting, move every surviving object to
+    the permanent generation (gc.freeze) so later full collections scan only objects
+    created during training (startup objects live for the whole run)."""
     if interval < 1:
         raise ValueError('Require a positive GC interval')
     original = algo.train_epoch
     output = Path(output)
     first_epoch = int(algo.epoch_num)
     report = dict(interval_updates=interval, calls=0, collected_objects=0,
-                  released_tensor_bytes=0, wall_seconds=0.)
+                  released_tensor_bytes=0, wall_seconds=0., freeze=freeze, frozen_objects=None)
 
     def train_epoch(*args, **kwargs):
         epoch = int(algo.epoch_num)
@@ -27,6 +30,9 @@ def install_boundary_gc(algo, output, interval=16):
             before = torch.cuda.memory_allocated()
             start = time.monotonic()
             collected = gc.collect(2)
+            if freeze and report['frozen_objects'] is None:
+                gc.freeze()
+                report['frozen_objects'] = gc.get_freeze_count()
             elapsed = time.monotonic()-start
             after = torch.cuda.memory_allocated()
             released = max(0, before-after)
