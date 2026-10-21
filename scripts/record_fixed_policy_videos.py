@@ -233,7 +233,10 @@ def quat_mat(q):
                      [2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)]])
 
 
-def render(args, mj_model, meta):
+FIXED_CAMERAS = (((0., .12, .95), 90., -20., .85), ((0., .12, .95), 180., -15., .85))   # (lookat, azimuth, elevation, distance)
+
+
+def render(args, mj_model, meta, cameras=FIXED_CAMERAS):
     import imageio.v2 as imageio
     import mujoco
     import numpy as np
@@ -270,9 +273,9 @@ def render(args, mj_model, meta):
         opt = mujoco.MjvOption()
         opt.geomgroup[:] = 1
         cams = []
-        for az, el, dist in ((90., -20., .85), (180., -15., .85)):
+        for lookat, az, el, dist in cameras:
             c = mujoco.MjvCamera()
-            c.lookat[:] = (0., .12, .95)
+            c.lookat[:] = lookat
             c.azimuth, c.elevation, c.distance = az, el, dist
             cams.append(c)
         title = f"{e['type']}  asset {a}  env {e['env']}  |  epoch {meta['epoch']}  leader, deterministic"
@@ -280,8 +283,9 @@ def render(args, mj_model, meta):
                                     quality=8, macro_block_size=1)
         for f in range(len(tr['time_s'])):
             d.qpos[:] = tr['qpos'][f, k]
-            d.mocap_pos[:] = tr['mocap_pos'][f, k]
-            d.mocap_quat[:] = tr['mocap_quat'][f, k]
+            if 'mocap_pos' in tr:
+                d.mocap_pos[:] = tr['mocap_pos'][f, k]
+                d.mocap_quat[:] = tr['mocap_quat'][f, k]
             mujoco.mj_forward(m, d)
             gp, gq = tr['goal'][f, k, :3], tr['goal'][f, k, 3:]
             R = quat_mat(gq)

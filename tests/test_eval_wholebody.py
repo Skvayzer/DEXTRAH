@@ -51,3 +51,26 @@ class EvalStartsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ValidatedReachingTests(unittest.TestCase):
+    def test_reaching_starts_of_own_object_with_standing_base(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
+        import record_wholebody_videos as rec
+        env, task, _ = fixed.make_validating(lambda call, n: torch.zeros(n, dtype=torch.bool), env=make_env(), eval_pool_size=0)
+        hook = rec.ValidatedReaching(env, task, torch.Generator().manual_seed(0), selected=[0, 5])
+        env.sim.data.qpos[:] = 5.
+        ids = torch.arange(N_ENV)
+        before = env._object_asset_index_per_env.clone()
+        for _ in range(3):
+            hook.after_reset(ids)
+            for i in (0, 5):
+                c = hook.log[i][-1]['config']
+                a, b = task.blocks['reaching']
+                self.assertTrue(a <= c < b)
+                self.assertEqual(int(task.cfg['asset'][c]), int(env._object_asset_index_per_env[i]))
+                self.assertTrue(torch.allclose(env.object.data.root_pos_w[i], task.cfg['object_pose'][c, :3]))
+        self.assertTrue(torch.equal(env._object_asset_index_per_env, before))       # objects never swapped
+        self.assertTrue(torch.equal(env.sim.data.qpos[:, :7], env.robot.data.default_root_state[:, :7]))
+        self.assertEqual(len(hook.log[0]), 3)

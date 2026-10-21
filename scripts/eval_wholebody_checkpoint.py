@@ -66,6 +66,27 @@ class EvalStarts:
         self.length += 1
 
 
+def build_policy(env, checkpoint, contract, device):
+    """Frozen-SONIC SAPG policy: architecture from the run's teacher, every weight from
+    the checkpoint (strict). Returns (model, checkpoint payload)."""
+    import torch
+    from rl_games.algos_torch import model_builder
+    from dextrah_lab.g1_adept.touch_continuation import load_yaml
+    from dextrah_lab.wholebody.sapg_network import load_touch_sources, register_sonic_models
+    run = Path(checkpoint).resolve().parent.parent
+    source, critic = load_touch_sources(device, Path(contract['source_checkpoint']), contract['source_sha256'])
+    register_sonic_models(source, critic, env._sonic_reference, env._body_lower[0], env._body_upper[0], frozen=True)
+    params = load_yaml(run/'params/agent.yaml')['params']
+    model = model_builder.ModelBuilder().load(params).build(dict(
+        actions_num=70, input_shape=(env.cfg.observation_space+32,), num_seqs=env.num_envs, value_size=1,
+        normalize_value=True, normalize_input=True, type='extra_param',
+        coef_ids=source.a2c_network.param_ids, coef_id_idx=env.cfg.observation_space)).to(device)
+    payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
+    payload = payload[0] if 0 in payload else payload
+    model.load_state_dict(payload['model'], strict=True)
+    return model.eval().requires_grad_(False), payload
+
+
 FIELDS = ('env', 'asset', 'goals', 'lifted', 'object_drop', 'hand_far', 'max_successes', 'timeout', 'robot_fall', 'steps')
 
 
@@ -114,11 +135,8 @@ def main():
         import mujoco_warp
         from dextrah_lab.mj.compat import install
         install()
-        from rl_games.algos_torch import model_builder
-        from dextrah_lab.g1_adept.touch_continuation import load_yaml
         from dextrah_lab.mj.factory import make_mj_env
         from dextrah_lab.sgs.mj_task import MjSgsTask, SgsSettings
-        from dextrah_lab.wholebody.sapg_network import load_touch_sources, register_sonic_models
         device = 'cuda:0'
         torch.manual_seed(args.seed)
         run = args.checkpoint.resolve().parent.parent
@@ -127,19 +145,8 @@ def main():
             raise RuntimeError('Training used the vendored mujoco_warp cone Hessian fix; put it on PYTHONPATH')
         env = make_mj_env(args.num_envs, device, nconmax=args.nconmax, njmax=args.njmax, run=run,
                           spawn_on_table=contract['body_termination']['spawn_on_table'])
-        # Policy: architecture from the run's teacher, every weight from the checkpoint (strict).
         teacher = Path(contract['source_checkpoint'])
-        source, critic = load_touch_sources(device, teacher, contract['source_sha256'])
-        register_sonic_models(source, critic, env._sonic_reference, env._body_lower[0], env._body_upper[0], frozen=True)
-        params = load_yaml(run/'params/agent.yaml')['params']
-        model = model_builder.ModelBuilder().load(params).build(dict(
-            actions_num=70, input_shape=(env.cfg.observation_space+32,), num_seqs=env.num_envs, value_size=1,
-            normalize_value=True, normalize_input=True, type='extra_param',
-            coef_ids=source.a2c_network.param_ids, coef_id_idx=env.cfg.observation_space)).to(device)
-        payload = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-        payload = payload[0] if 0 in payload else payload
-        model.load_state_dict(payload['model'], strict=True)
-        model.eval().requires_grad_(False)
+        model, payload = build_policy(env, args.checkpoint, contract, device)
         with args.checkpoint.open('rb') as f:
             sha = hashlib.file_digest(f, 'sha256').hexdigest()
         # Validated fresh starts: the run's SGS reaching set (+ a new validated pool).
