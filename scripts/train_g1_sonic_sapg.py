@@ -58,6 +58,10 @@ def main():
                    help='mjlab: require the vendored mujoco_warp with the elliptic cone Hessian fix (third_party/mujoco_warp_cone_fix)')
     p.add_argument('--mj-nan-capture', action='store_true',
                    help='mjlab diagnostic: record the first non-finite world to OUTPUT/nan_capture (no dynamics change)')
+    p.add_argument('--mj-fast-step', action='store_true',
+                   help='mjlab: G1SonicTouchMjEnv.enable_fast_step (kinematics-only refresh between steps, active-only '
+                        'contact reader, SONIC encoder once per step + g1_dyn only); same simulation and observations, '
+                        'checked by scripts/check_fast_env_step.py')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--bootstrap', type=Path)
     p.add_argument('--frozen-pretrained-sonic', action='store_true',
@@ -381,6 +385,10 @@ def main():
                 joint_velocity_limits='body: PD setpoint rate-limited at the PhysX max joint velocity; Revo2: velocity servo kv=effort/vmax, v_cmd=clamp(kp*err/kv, +-vmax) (robot.hand_servo)',
                 asset_parity='scripts/mj_asset_parity.py: 0 mismatches vs Isaac dump (job 1112)',
                 nan_capture=bool(args.mj_nan_capture),
+                fast_step=dict(enabled=bool(args.mj_fast_step), check='scripts/check_fast_env_step.py',
+                               components=['kinematics refresh (fwd_kinematics + com_vel) instead of sim.forward() after '
+                                           'physics substeps and after resets', 'contact reader over the active contacts',
+                                           'frozen SONIC: reference encoder once per policy step, g1_dyn decoder only']),
                 mujoco_warp_path=str(Path(mujoco_warp.__file__).parent),
                 cone_hessian_fix=dict(enabled=True, sites=3, change='T=max(T,1e-12); ttt=T^3 (was max(T^3,1e-15))',
                                       solver_sha256=hashlib.sha256(Path(mujoco_warp.__file__).with_name('_src').joinpath('solver.py').read_bytes()).hexdigest())
@@ -427,6 +435,8 @@ def main():
             env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device,
                                     nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
                                     mujoco_cfg=mj_settings['mujoco_options'])
+            if args.mj_fast_step:
+                env.enable_fast_step()
             if args.mj_nan_capture:
                 env.enable_nan_capture(args.output/'nan_capture')
             if args.sgs:

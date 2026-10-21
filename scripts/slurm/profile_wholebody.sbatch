@@ -6,7 +6,7 @@
 #SBATCH --mem=96G
 #SBATCH --time=01:30:00
 #SBATCH --output=slurm-wb-profile-%j.out
-# Profile variants of the whole-body env step (scripts/profile_wholebody_step.py), one process each.
+# Profile variants of the whole-body env step (scripts/profile_wholebody_step.py, or SCRIPT=...), one process each.
 set -euo pipefail
 project="${WHOLEBODY_REPO:-/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody}"
 commit="$(git -C "$project" rev-parse HEAD)"
@@ -21,5 +21,7 @@ C="${CHECKPOINT:?}"
 IFS=';' read -ra VARIANTS <<< "${VARIANTS:?}"
 for v in "${VARIANTS[@]}"; do
     echo "=== variant: $v"
-    python scripts/profile_wholebody_step.py --checkpoint "$C" $v || echo "VARIANT_FAILED $v"
+    script="${SCRIPT:-profile_wholebody_step.py}"
+    if [[ "$v" == script=* ]]; then script="${v%% *}"; script="${script#script=}"; v="${v#* }"; fi
+    python "scripts/$script" --checkpoint "$C" $v || echo "VARIANT_FAILED $v"
 done

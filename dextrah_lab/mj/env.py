@@ -149,6 +149,7 @@ class G1SonicTouchMjEnv:
         self.common_step_counter = 0
         self._nan_capture = None
         self._sgs = None
+        self._fast_step = False
         self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
         self.reset_terminated = torch.zeros(num_envs, device=device, dtype=torch.bool)
         self.reset_time_outs = torch.zeros_like(self.reset_terminated)
@@ -352,6 +353,47 @@ class G1SonicTouchMjEnv:
 
     def _init_contacts(self):
         self.contacts = ContactReader(self.sim, self.sim.mj_model, pad_tensors=self.pad_tensors, **self._contacts_cfg)
+        self.contacts.active_only = self._fast_step
+
+    def enable_fast_step(self):
+        """Opt-in faster env.step with the same simulation and observations (checked by
+        scripts/check_fast_env_step.py against the default path):
+
+        * after the physics substeps and after resets, refresh only the derived kinematic
+          quantities the task reads (poses, COM, body velocities) instead of a full
+          sim.forward(); collision, constraints and the solver are recomputed from the
+          state by the next physics step anyway (the solver warm start is written only by
+          the step);
+        * the touch contact reader processes the active contacts only (not the whole pool);
+        * frozen SONIC runs its reference encoder once per policy step (the observation's
+          reference tokens and the action decode share it) and only the g1_dyn decoder.
+        """
+        import mujoco_warp as mjwarp
+        from mujoco_warp import EnableBit
+        m = self.sim.wp_model
+        if m.ntendon or m.nflex or (m.opt.enableflags & EnableBit.SLEEP):
+            raise ValueError('The kinematics refresh does not cover tendons, flexes or sleeping')
+        self._mjwarp = mjwarp
+        self._fast_step = True
+        if hasattr(self, 'contacts'):
+            self.contacts.active_only = True
+        if self._sonic_reference is not None:
+            self._sonic_reference.check_fast_path()
+
+    def _refresh_kinematics(self):
+        """Kinematics (body/geom/site poses, xipos, subtree_com, cdof) and com_vel (cvel)
+        for the current qpos/qvel: everything the task reads between steps."""
+        import warp as wp
+        m, d = self.sim.wp_model, self.sim.wp_data
+        with wp.ScopedDevice(self.sim.wp_device):
+            self._mjwarp.fwd_kinematics(m, d)
+            self._mjwarp.com_vel(m, d)
+
+    def _refresh(self):
+        if self._fast_step:
+            self._refresh_kinematics()
+        else:
+            self.sim.forward()
 
     # ======================================================================
     # DirectRLEnv.step / reset
@@ -380,7 +422,7 @@ class G1SonicTouchMjEnv:
             if self._nan_capture is not None:
                 self._nan_capture.after_step(self._sim_step_counter)
             self._after_physics_step()
-        self.sim.forward()
+        self._refresh()
         self.episode_length_buf += 1
         self.common_step_counter += 1
         self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
@@ -392,7 +434,7 @@ class G1SonicTouchMjEnv:
         if len(reset_env_ids) > 0:
             self._reset_idx(reset_env_ids)
             self._write_data_to_sim(advance=False)
-            self.sim.forward()
+            self._refresh()
         self.obs_buf = self._get_observations()
         return self.obs_buf, self.reward_buf, self.reset_terminated, self.reset_time_outs, self.extras
 
@@ -648,7 +690,14 @@ class G1SonicTouchMjEnv:
         heading_delta = quat_mul(quat_conjugate(yaw_quat(self.robot.data.root_quat_w)), self._reference_heading)
         ori6 = matrix_from_quat(heading_delta)[:, :, :2].reshape(self.num_envs, 1, 6).expand(-1, 10, -1)
         self._reference_ori6 = ori6
-        tokens = self._sonic_reference.reference_tokens(self._reference_q, self._reference_qd, ori6)
+        if self._fast_step:
+            # One encoder pass serves the reference tokens and the next action decode
+            # (valid while _reference_ori6 is this ori6; the reference pose is fixed).
+            tokens, self._sonic_latent = self._sonic_reference.reference_tokens_and_latent(
+                self._reference_q, self._reference_qd, ori6)
+            self._sonic_latent_ori6 = ori6
+        else:
+            tokens = self._sonic_reference.reference_tokens(self._reference_q, self._reference_qd, ori6)
         self._body_extra = torch.cat((proprio, tokens), -1)
         self._body_extra_step = self._sim_step_counter
         return self._body_extra

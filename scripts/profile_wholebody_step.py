@@ -25,6 +25,9 @@ def main():
     p.add_argument('--nan-capture', action='store_true')
     p.add_argument('--label', default='')
     p.add_argument('--kernel-table', action='store_true', help='print the top CUDA kernels (torch.profiler, 3 steps)')
+    p.add_argument('--fast-step', action='store_true', help='env.enable_fast_step()')
+    p.add_argument('--sgs-state', type=Path, help="enable SGS with the run's settings and this state (as in training)")
+    p.add_argument('--drop-forward-graph', action='store_true', help='report memory freed by dropping the sim.forward CUDA graph')
     args = p.parse_args()
     import torch
     from dextrah_lab.mj.compat import install
@@ -42,8 +45,14 @@ def main():
                       spawn_on_table=contract['body_termination']['spawn_on_table'])
     torch.cuda.synchronize()
     env_gib = (free0-torch.cuda.mem_get_info()[0])/2**30
+    if args.fast_step:
+        env.enable_fast_step()
     if args.nan_capture:
         env.enable_nan_capture(Path(os.environ.get('TMPDIR', '/tmp'))/f'nan_{os.getpid()}')
+    if args.sgs_state:
+        from dextrah_lab.sgs.mj_task import SgsSettings
+        env.enable_sgs(SgsSettings(**contract['sgs']['settings']),
+                       torch.load(args.sgs_state, map_location='cpu', weights_only=False))
     model, _ = build_policy(env, args.checkpoint, contract, device)
     timers = {}
 
@@ -84,6 +93,10 @@ def main():
                                                           '_get_dones', '_get_rewards', '_reset_idx', '_get_observations')]
         originals.append((env.sim, 'step', timed(env.sim, 'step', 'physics')))
         originals.append((env.sim, 'forward', timed(env.sim, 'forward', 'sim_forward')))
+        originals.append((env, '_refresh_kinematics', timed(env, '_refresh_kinematics', 'refresh_kinematics')))
+        if env._sgs is not None:
+            for name in ('after_step', 'before_reset', 'after_reset'):
+                originals.append((env._sgs, name, timed(env._sgs, name, 'sgs_'+name)))
         originals.append((env, '_write_data_to_sim', timed(env, '_write_data_to_sim', 'write_data_to_sim')))
         originals.append((env, '_wholebody_observation', timed(env, '_wholebody_observation', 'wholebody_observation')))
         originals.append((env.contacts, 'read', timed(env.contacts, 'read', 'contacts_read')))
@@ -91,6 +104,9 @@ def main():
             originals.append((env._nan_capture, 'after_step', timed(env._nan_capture, 'after_step', 'nan_check')))
         originals.append((env._sonic_reference, 'reference_tokens', timed(env._sonic_reference, 'reference_tokens', 'sonic_tokens')))
         originals.append((env._sonic_reference, 'forward', timed(env._sonic_reference, 'forward', 'sonic_decode')))
+        originals.append((env._sonic_reference, 'reference_tokens_and_latent',
+                          timed(env._sonic_reference, 'reference_tokens_and_latent', 'sonic_tokens_latent')))
+        originals.append((env._sonic_reference, 'decode_latent', timed(env._sonic_reference, 'decode_latent', 'sonic_decode_latent')))
         fwd = model.forward
 
         def model_wrapper(*a, **k):
@@ -115,9 +131,26 @@ def main():
                 run_steps(3)
                 torch.cuda.synchronize()
             print(prof.key_averages().table(sort_by='cuda_time_total', row_limit=40, max_name_column_width=70), flush=True)
+    memory = {}
+    if args.drop_forward_graph:
+        import gc
+        import warp as wp
+        torch.cuda.synchronize()
+        memory['free_before_gib'] = torch.cuda.mem_get_info()[0]/2**30
+        memory['mempool_release_threshold'] = wp.get_mempool_release_threshold('cuda:0')
+        memory['mempool_used_gib'] = wp.get_mempool_used_mem_current('cuda:0')/2**30
+        env.sim.forward_graph = None
+        gc.collect()
+        wp.synchronize()
+        memory['free_after_drop_gib'] = torch.cuda.mem_get_info()[0]/2**30
+        memory['mempool_used_after_drop_gib'] = wp.get_mempool_used_mem_current('cuda:0')/2**30
+        wp.set_mempool_release_threshold('cuda:0', 0)
+        wp.synchronize()
+        memory['free_after_release_gib'] = torch.cuda.mem_get_info()[0]/2**30
     breakdown = {k: round(1e3*v/args.steps, 2) for k, v in sorted(timers.items(), key=lambda x: -x[1])}
     report = dict(label=args.label, envs=env.num_envs, njmax=args.njmax, nconmax=args.nconmax, tf32=args.tf32,
-                  nan_capture=args.nan_capture, env_build_gib=round(env_gib, 2),
+                  nan_capture=args.nan_capture, fast_step=args.fast_step, sgs=bool(args.sgs_state),
+                  env_build_gib=round(env_gib, 2), memory={k: round(v, 2) if isinstance(v, float) else v for k, v in memory.items()},
                   natural_ms_per_step=round(1e3*natural, 1), env_steps_per_s=round(env.num_envs/natural),
                   synced_ms_per_step=round(1e3*synced, 1), breakdown_ms_per_step=breakdown,
                   peak_allocated_gib=round(torch.cuda.max_memory_allocated()/2**30, 2),

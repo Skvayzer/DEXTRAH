@@ -61,8 +61,13 @@ def apply_frozen_latent_action(env, actions, source_pipeline):
     executed = delayed_actions(env, actions)
     if env._body_extra is None:
         raise RuntimeError('Obtain a reset observation before applying a latent action')
-    body = env._sonic_reference(env._body_extra[:, :930], env._reference_q,
-                               env._reference_qd, env._reference_ori6, executed[:, :64])
+    if getattr(env, '_fast_step', False) and getattr(env, '_sonic_latent_ori6', None) is env._reference_ori6:
+        # Opt-in fast path (mj env.enable_fast_step): the reference latent of this
+        # observation, decoded with g1_dyn only; equal to the full call below.
+        body = env._sonic_reference.decode_latent(env._body_extra[:, :930], env._sonic_latent, executed[:, :64])
+    else:
+        body = env._sonic_reference(env._body_extra[:, :930], env._reference_q,
+                                   env._reference_qd, env._reference_ori6, executed[:, :64])
     env._last_latent_action.copy_(executed[:, :64])
     env._last_decoded_sonic_action.copy_(body)
     whole = torch.cat((env.sonic_to_policy_body(body), executed[:, 64:]), -1)

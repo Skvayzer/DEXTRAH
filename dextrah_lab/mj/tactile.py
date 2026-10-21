@@ -56,23 +56,32 @@ class ContactReader:
         self._ids = wp.array(list(range(self.naconmax)), dtype=int, device=str(device))
         self._force = wp.zeros(self.naconmax, dtype=wp.spatial_vector, device=str(device))
         self._contact_force = lambda: mjwarp.contact_force(sim.wp_model, sim.wp_data, self._ids, True, self._force)
+        self._mjwarp = mjwarp
         self._wp = wp
+
+    active_only = False   # opt-in (env.enable_fast_step): process the first nacon contacts only
 
     def read(self):
         """Return per-env fingertip and body-table force tensors for the last step."""
         wp = self._wp
+        nacon = wp.to_torch(self.sim.wp_data.nacon)
+        # Active-only: same forces; inactive slots (all routed to world 0 slot 0 below)
+        # dominate the atomics otherwise. Costs one host read of nacon.
+        k = min(int(nacon[0]), self.naconmax) if self.active_only else self.naconmax
         self._force.zero_()
         with wp.ScopedDevice(str(self.device)):
-            self._contact_force()
+            if self.active_only:
+                self._mjwarp.contact_force(self.sim.wp_model, self.sim.wp_data, self._ids[:k], True, self._force[:k])
+            else:
+                self._contact_force()
         c = self.sim.wp_data.contact
-        force = wp.to_torch(self._force)[:, :3]                     # world, acts on geom[1]
-        frame = wp.to_torch(c.frame)                                  # (C, 3, 3)
-        pos = wp.to_torch(c.pos)
-        geom = wp.to_torch(c.geom).long()
-        world = wp.to_torch(c.worldid).long()
-        nacon = wp.to_torch(self.sim.wp_data.nacon)
-        active = torch.arange(self.naconmax, device=self.device) < nacon
-        active &= (wp.to_torch(c.type) & 1) > 0
+        force = wp.to_torch(self._force)[:k, :3]                    # world, acts on geom[1]
+        frame = wp.to_torch(c.frame)[:k]                              # (C, 3, 3)
+        pos = wp.to_torch(c.pos)[:k]
+        geom = wp.to_torch(c.geom)[:k].long()
+        world = wp.to_torch(c.worldid)[:k].long()
+        active = torch.arange(k, device=self.device) < nacon
+        active &= (wp.to_torch(c.type)[:k] & 1) > 0
         # Inactive slots hold stale or uninitialised ids: never index with them.
         ngeom = self.partner.numel()
         active &= (geom >= 0).all(-1) & (geom < ngeom).all(-1) & (world >= 0) & (world < self.n)

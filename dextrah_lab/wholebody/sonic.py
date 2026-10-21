@@ -155,6 +155,67 @@ class FrozenSonic(nn.Module):
         tokens, _ = module.encode('g1', parsed)
         return tokens.reshape(n,64)
 
+    # ---- opt-in fast path (mj env.enable_fast_step) ------------------------------
+    def check_fast_path(self, n=64):
+        """The fast path (one reference-encoder pass shared by the observation and the
+        decode; g1_dyn decoder only) is exact for this controller's layout; verify the
+        layout and that both paths agree bitwise on a random batch."""
+        actor, module = self.actor, self.actor.actor_module
+        layout = dict(
+            input_obs_dict=actor.input_obs_dict is True, input_key=actor.input_key == 'actor_obs',
+            proprioception=list(module.proprioception_features) == ['actor_obs'],
+            encoder=module.encoder_input_features['g1'] == ['command_multi_future_nonflat',
+                                                            'motion_anchor_ori_heading_mf_nonflat'],
+            encoder_frame_mask=not module.encoder_mask_features.get('g1'),
+            encoder_additive=not module.additive_encoders.get('g1'),
+            encoder_projector='g1' not in module.encoder_input_projectors,
+            height_adapter=module.height_adapter_mlp is None,
+            quantizer=module.quantizer is not None,
+            decoder=module.decoder_input_features['g1_dyn'] == ['token_flattened', 'proprioception'],
+            decoder_cond=not module.decoder_cond_features.get('g1_dyn'),
+            decoder_token_mask=not module.decoder_mask_features.get('g1_dyn'))
+        if not all(layout.values()):
+            raise ValueError(f'SONIC fast path does not match this controller: {layout}')
+        device = next(self.parameters()).device
+        g = torch.Generator(device='cpu').manual_seed(0)
+        rand = lambda *shape: torch.randn(*shape, generator=g).to(device)
+        proprio, rq, rqd, ori6, residual = rand(n, 930), rand(n, 10, 29), rand(n, 10, 29), rand(n, 10, 6), rand(n, LATENT_DIM)
+        full = self(proprio, rq, rqd, ori6, residual)
+        tokens, latent = self.reference_tokens_and_latent(rq, rqd, ori6)
+        if not torch.equal(tokens, self.reference_tokens(rq, rqd, ori6)) or not torch.equal(
+                self.decode_latent(proprio, latent, residual), full):
+            raise RuntimeError('SONIC fast path differs from the full controller')
+
+    @torch.no_grad()
+    def reference_tokens_and_latent(self, reference_q, reference_qd, reference_ori6):
+        """reference_tokens(...) and the g1 encoder's pre-quantization latent (n, 2, 32)."""
+        n = reference_q.shape[0]
+        obs = self.observations(reference_q.new_zeros(n, 930), reference_q, reference_qd, reference_ori6)
+        module = self.actor.actor_module
+        tokens, latent = module.encode('g1', module.parse_tokenizer_obs(obs))
+        return tokens.reshape(n, 64), latent
+
+    @torch.no_grad()
+    def decode_latent(self, proprio, latent, residual):
+        """forward(proprio, ref, residual) given latent = reference_tokens_and_latent(ref)[1]:
+        quantize (latent + scaled residual) and run the g1_dyn decoder only (the g1_kin
+        decoder output is not used by forward's action)."""
+        module = self.actor.actor_module
+        n = proprio.shape[0]
+        latent = latent + (LATENT_SCALE*residual).view(n, module.max_num_tokens, module.token_dim)
+        tokens, _ = module.quantizer(latent)
+        tokens = tokens.contiguous().view(n, 1, module.max_num_tokens, module.token_dim)
+        actor_obs = proprio[:, None, :]
+        if self.actor.running_mean_std is not None:
+            actor_obs = self.actor.running_mean_std(actor_obs)
+        out = module.decode('g1_dyn', dict(token=tokens, token_flattened=tokens.view(n, 1, -1),
+                                           proprioception=actor_obs))
+        action = next(out[k] for k in ('body_action', 'meta_action', 'action') if k in out)[:, 0]
+        if action.shape != (n, 29) or not bool(torch.isfinite(proprio).all() & torch.isfinite(residual).all()
+                                               & torch.isfinite(action).all()):
+            raise ValueError('Invalid SONIC body command or input')
+        return action
+
     def decode_for_imitation(self, proprio, reference_q, reference_qd, reference_ori6, residual):
         """Frozen weights, gradients ONLY through the proposed latent correction.
 
