@@ -13,8 +13,11 @@ Policy modes (one pass each, same envs):
   stoch_blocks  each env keeps its training SAPG block coefficient, sampled actions
                 (what the training evaluation envs measure)
 
-Per env, the first ``--episodes-per-env`` completed episodes count (no bias towards
-short episodes); episodes still running after ``--max-steps`` are reported as censored.
+Per env, the first ``--episodes-per-env`` episodes in start order count (no bias
+towards short episodes). Each reached goal restarts the 10 s episode timer, so an
+episode still running after ``--max-steps`` has reached a goal: it is kept as a
+success with its goals so far (a lower bound) and flagged censored. Headline numbers
+use each env's first episode (one unbiased sample per env).
 """
 import argparse
 import json
@@ -65,6 +68,17 @@ class EvalStarts:
     def after_step(self):
         self.length += 1
 
+    def flush_running(self):
+        """Record the episodes still running (censored)."""
+        import torch
+        env = self.env
+        ids = torch.nonzero(self.started).squeeze(-1)
+        zero = torch.zeros(ids.numel(), device=self.device)
+        self.censored_from = sum(len(x) for x in self.records)
+        self.records.append(torch.stack((
+            ids.float(), env._object_asset_index_per_env[ids].float(), env._successes[ids].float(),
+            env._episode_ever_lifted[ids].float(), zero, zero, zero, zero, zero, self.length[ids].float()), -1))
+
 
 def build_policy(env, checkpoint, contract, device):
     """Frozen-SONIC SAPG policy: architecture from the run's teacher, every weight from
@@ -90,7 +104,7 @@ def build_policy(env, checkpoint, contract, device):
 FIELDS = ('env', 'asset', 'goals', 'lifted', 'object_drop', 'hand_far', 'max_successes', 'timeout', 'robot_fall', 'steps')
 
 
-def summarize(rows, types, step_dt):
+def summarize(rows, types, step_dt, censored):
     import numpy as np
     out = {}
     def stats(m):
@@ -98,7 +112,8 @@ def summarize(rows, types, step_dt):
         if len(r) == 0:
             return dict(episodes=0)
         g = r[:, 2]
-        return dict(episodes=int(len(r)), success=float((g > 0).mean()), goals_mean=float(g.mean()),
+        return dict(episodes=int(len(r)), censored=int(censored[m].sum()), success=float((g > 0).mean()),
+                    goals_mean_lower_bound=float(g.mean()),
                     goals_median=float(np.median(g)), lifted=float(r[:, 3].mean()), object_drop=float(r[:, 4].mean()),
                     hand_far=float(r[:, 5].mean()), all_50_goals=float(r[:, 6].mean()), timeout=float(r[:, 7].mean()),
                     robot_fall=float(r[:, 8].mean()), episode_seconds=float(r[:, 9].mean()*step_dt))
@@ -116,7 +131,7 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=12000)
     p.add_argument('--episodes-per-env', type=int, default=2)
-    p.add_argument('--max-steps', type=int, default=4000)
+    p.add_argument('--max-steps', type=int, default=6000)
     p.add_argument('--modes', default='det_leader,stoch_leader,stoch_blocks')
     p.add_argument('--nconmax', type=int, default=64)
     p.add_argument('--njmax', type=int, default=300)
@@ -167,7 +182,8 @@ def main():
         for mode in args.modes.split(','):
             hook.records, hook.recording = [], False
             hook.started[:] = False
-            obs, _ = env.reset()
+            with torch.inference_mode():         # env buffers became inference tensors in the previous pass
+                obs, _ = env.reset()
             hook.recording = True
             states = tuple(s.to(device) for s in model.get_default_rnn_state())
             ids = torch.arange(env.num_envs, device=device)
@@ -186,28 +202,33 @@ def main():
                     for s in states:
                         s[:, done, :] = 0
                     steps += 1
-            rows = torch.cat(hook.records).cpu().numpy() if hook.records else np.zeros((0, len(FIELDS)))
-            # First episodes_per_env completed episodes of each env (records are in completion order).
-            keep = np.zeros(len(rows), bool)
+            hook.flush_running()
+            rows = torch.cat(hook.records).cpu().numpy()
+            cens = np.arange(len(rows)) >= hook.censored_from
+            # Per env, records are in start order (an env's episodes end in the order they began;
+            # its running episode is last). Keep the first episodes_per_env; rank 0 = first episode.
+            rank = np.zeros(len(rows), int)
             seen = np.zeros(env.num_envs, int)
             for i, e in enumerate(rows[:, 0].astype(int)):
-                if seen[e] < args.episodes_per_env:
-                    keep[i], seen[e] = True, seen[e]+1
-            rows = rows[keep]
-            np.savez_compressed(args.output/f'episodes_{mode}.npz', rows=rows, fields=np.array(FIELDS),
-                                asset_type=asset_type)
-            censored = int((seen < args.episodes_per_env).sum())
+                rank[i], seen[e] = seen[e], seen[e]+1
+            keep = rank < args.episodes_per_env
+            rows, cens, rank = rows[keep], cens[keep], rank[keep]
+            if bool(((rows[:, 2] == 0) & cens & (rows[:, 9] > env.max_episode_length)).any()):
+                raise RuntimeError('A censored episode longer than the timeout reached no goal')
+            np.savez_compressed(args.output/f'episodes_{mode}.npz', rows=rows, fields=np.array(FIELDS), censored=cens,
+                                rank=rank, asset_type=asset_type)
             types = asset_type[rows[:, 1].astype(int)]
-            s = summarize(rows, types, env.step_dt)
+            first = rank == 0
+            s = dict(first_episode=summarize(rows[first], types[first], env.step_dt, cens[first]),
+                     all_kept=summarize(rows, types, env.step_dt, cens))
             per_asset = np.full(len(paths), np.nan)
             for a in np.unique(rows[:, 1].astype(int)):
                 per_asset[a] = float((rows[rows[:, 1] == a, 2] > 0).mean())
             s['assets_evaluated'] = int(np.isfinite(per_asset).sum())
             s['assets_never_succeeded'] = int((per_asset == 0).sum())
-            s['envs_censored'] = censored
             s['steps'], s['wall_s'] = steps, time.monotonic()-t0
             results[mode] = s
-            print(f'EVAL_MODE {mode} '+json.dumps(s['all'])+f' censored_envs={censored} steps={steps}', flush=True)
+            print(f'EVAL_MODE {mode} steps={steps} first_episode '+json.dumps(s['first_episode']['all']), flush=True)
             (args.output/'summary.json').write_text(json.dumps(dict(report, results=results), indent=2))
         report.update(completed=True, results=results)
         print('EVAL_COMPLETE', flush=True)

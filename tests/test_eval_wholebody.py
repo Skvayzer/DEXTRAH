@@ -47,6 +47,16 @@ class EvalStartsTests(unittest.TestCase):
         self.assertEqual(rows[:, 8].tolist(), [0., 0., 1.])        # robot fall
         self.assertEqual(rows[:, 9].tolist(), [7., 7., 7.])        # steps
         self.assertEqual(hook.length[:3].tolist(), [0, 0, 0])
+        # Episodes still running at the end are recorded last, flagged by censored_from.
+        hook.after_step()
+        env._successes[5] = 3
+        hook.flush_running()
+        self.assertEqual(hook.censored_from, 3)
+        running = hook.records[-1]
+        self.assertEqual(running.shape, (N_ENV, len(ev.FIELDS)))
+        self.assertEqual(running[5, 2].item(), 3.)
+        self.assertEqual(running[5, 9].item(), 8.)
+        self.assertEqual(running[0, 9].item(), 1.)
 
 
 if __name__ == '__main__':
