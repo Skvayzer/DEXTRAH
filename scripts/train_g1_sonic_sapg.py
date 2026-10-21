@@ -75,7 +75,7 @@ def main():
     p.add_argument('--lean-sapg-batches', action='store_true',
                    help='exact lower-peak-memory SAPG batch handling (dextrah_lab/wholebody/sapg_memory.py)')
     p.add_argument('--boundary-gc-freeze', action='store_true',
-                   help='gc.freeze() after the first boundary collection (faster later collections)')
+                   help="gc.freeze() after the first boundary collection (ms collections), plus a post-rollout collection and attribution of large cyclic garbage (OUTPUT/boundary_gc_garbage.jsonl)")
     p.add_argument('--boundary-gc-interval', type=int, default=0,
                    help='Full cyclic GC between completed updates; zero disables; never flushes CUDA cache')
     p.add_argument('--memory-gc-probe-epoch', type=int, default=0,
