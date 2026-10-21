@@ -157,13 +157,55 @@ other weight, moment, counter and the SGS state are restored. A CPU test on the 
 run-1369 checkpoint confirms the expanded actor and critic reproduce the original
 outputs for any hand input.
 
-Comparison (running): resume run 1369's final checkpoint (epoch 83 107) for 12 h each
-- treatment: `HAND_SURFACE_OBS=1`, job 1393 (W&B `unique_id_0_bps128_touch70_fixed_mjlab_sgs_hand_1393`);
-- control: plain resume, same settings and hours (after job 1393).
-Compare `sgs/eval_*` overall and on thin-handle objects (per-object success from the SGS
-state). The same `--hand-surface-obs` exists for the whole-body trainer (smoke job 1392).
+Fixed-body runs (stopped at the user's request; no controlled comparison was finished):
+job 1393 resumed run 1369 with the inputs (~52 min, eval success unchanged at ~19%);
+job 1400 transplanted run 1377's network onto the fixed body
+(`scripts/transplant_wholebody_to_fixed.py`: SONIC adapter and the critic's body columns
+dropped, arm head = teacher's, fresh optimizers) and recovered from 7.7% to 16% eval
+success in 2.5 h, below the fixed-body teacher's 20%: run 1377's arm and torso motion
+lived in the SONIC adapter (waist typically 23-28 deg from start, pelvis 16 cm). The
+hand-surface observation is on by default for all mjlab runs from 2026-10-21
+(`HAND_SURFACE_OBS=0` opts out); the whole-body fine-tune of run 1377 uses it (section 7).
 
-## 7. Comparison with SimToolReal (summary)
+## 7. Faster whole-body training (same simulation), and the fine-tune of run 1377
+
+Profile of run 1377's env step (`scripts/profile_wholebody_step.py`, 22 080 envs, SGS on,
+job 1411): 418 ms per policy step. 145 ms was `sim.forward()` after the physics
+substeps and after resets (full collision + constraint solve, which the next physics
+step recomputes anyway), 36 ms the touch contact reader (atomic adds of ~1.1 M inactive
+contact-pool slots into one address), 57 ms frozen SONIC (reference encoder run twice,
+unused `g1_kin` decoder). Opt-in `--mj-fast-step` (`MJ_FAST_STEP=1`,
+`G1SonicTouchMjEnv.enable_fast_step`):
+
+| Change | Before | After |
+|---|---|---|
+| kinematics-only refresh (`fwd_kinematics` + `com_vel`) between steps | 145 ms | 3 ms |
+| contact reader over the active contacts | 36 ms | 2 ms |
+| SONIC encoder once per step (shared by observation and decode), `g1_dyn` only | 36 ms decode | 17 ms |
+| **env step** | **418 ms (52.8k env-steps/s)** | **253 ms (87.3k/s)** |
+
+Checked against the default path on the same states under the 1377 policy
+(`scripts/check_fast_env_step.py`, job 1412): SONIC actions and tokens bitwise equal;
+contact outputs within 2e-7 relative (atomic order); refreshed quantities equal to
+`sim.forward()` for poses, and for subtree COM / body velocities within 1.3e-7 relative -
+the same as two `sim.forward()` calls on the same state (MuJoCo Warp accumulates subtree
+COM with float atomics). The task reads nothing that only the full forward computes
+(`tests/test_fast_env_step.py`). Physics is now 72% of the step (elliptic cones,
+20 Newton / 20 line-search iterations; unchanged).
+
+Memory: `--lean-sapg-batches` builds SAPG's leader off-policy batch without k full
+copies (same tensors; `tests/test_sapg_memory.py`) and releases the previous epoch's
+datasets before the rollout; `--boundary-gc-freeze` makes the per-epoch GC 0.3 ms
+instead of 0.3 s. Sweep with everything on (job 1412): 26 880 envs leave 4.1 GB free,
+30 720 leave 0.45 GB, 34 560 run out of memory. Throughput 49.7k transitions/s at
+26 880 envs (run 1377: 34.4k at 22 080), i.e. ~1.45x; it saturates (30 720: 50.4k).
+
+Fine-tune (job 1414, W&B `unique_id_0_mjlab_wb_ft1377_hand_fast_1414`): run 1377's
+final weights (`--init-weights`, expanded with zero hand-surface columns: inert at start,
+max output difference 0.0), its SGS state, hand-surface observation, fast step, lean
+batches, 26 880 envs, minibatch 43 008, 2 days.
+
+## 8. Comparison with SimToolReal (summary)
 
 Our reposing task is SimToolReal's: identical procedural generator and size
 distributions, identical reward code and coefficients, the same grasp-region input
@@ -175,10 +217,9 @@ SONIC), our extra inputs (BPS-128, touch, SONIC body history), our evaluation (r
 goals on procedural objects, simulation only) vs theirs (human-video goal sequences,
 real robot).
 
-## 8. Next steps
+## 9. Next steps
 
-1. Finish the hand-surface comparison on the fixed-body teacher; if it helps, carry the
-   inputs into the whole-body policy (re-initialize from the new teacher or fine-tune 1377).
+1. Whole-body fine-tune of run 1377 with the hand-surface observation (job 1414, running).
 2. Opt-in SGS fixes 1-2 above (re-harvest with per-object quotas, count-based success).
 3. Evaluate on the 12 DexToolBench meshes (needs mesh objects in the mjlab scene).
 4. Precision budget of the object interface (pose noise, latency, dropouts, coarse

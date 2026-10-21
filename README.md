@@ -15,7 +15,9 @@ starts. Latest result (simulation, training objects): 57.5% of episodes reach at
 * Report and analysis: [docs/g1_wholebody_sgs_report_20261021.md](docs/g1_wholebody_sgs_report_20261021.md)
 * SGS (fixed body and whole body): [docs/sgs_success_guided_sampling.md](docs/sgs_success_guided_sampling.md)
 * mjlab port: [docs/mjlab_port_plan_20261013.md](docs/mjlab_port_plan_20261013.md)
-* Training: `scripts/train_g1_sonic_sapg.py --backend mjlab` (`scripts/slurm/train_g1_sonic_sapg.sbatch`);
+* Training: `scripts/train_g1_sonic_sapg.py --backend mjlab` (`scripts/slurm/train_g1_sonic_sapg.sbatch`;
+  `MJ_FAST_STEP=1 LEAN_SAPG_BATCHES=1 BOUNDARY_GC_FREEZE=1` give ~1.45x throughput and room for 26 880 envs
+  with the same simulation - report section 7);
   evaluation `scripts/eval_wholebody_checkpoint.py`; videos `scripts/record_wholebody_videos.py`.
 
 The sections below describe earlier stages of the project and the upstream DextrAH code.
