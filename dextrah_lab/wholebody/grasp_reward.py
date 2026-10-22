@@ -112,10 +112,25 @@ class GraspReward:
         """(reward (n,), {name: (n,) per-env values for logging})."""
         env = self.env
         c = env._last_contacts
-        G, parts = grasp_score(self.surface_offsets(), self.radius, c['finger_object_force_l1'], c['palm_object_force_l1'])
+        b = self.surface_offsets()
+        force = c['finger_object_force_l1']
+        G, parts = grasp_score(b, self.radius, force, c['palm_object_force_l1'])
         reward = self.scale*G
         terms = dict(grasp_score_rew=self.scale*G)
         logs = dict(score=G, **parts)
+        # Diagnostics (while lifted): object contact of the thumb, pad gaps at contact, and the
+        # touch-pad pinch (thumb + another pad > 0.25 N) for comparison with C_opp.
+        lifted = env._lifted_object.float()
+        mean = lambda v, m: (v*m).sum()/m.sum().clamp_min(1.)
+        touching = (force > 0.1).float()
+        gap = ((b.norm(dim=-1)-self.radius).clamp_min(0.))*100.
+        pad = env.touch_force_w.norm(dim=-1) > .25
+        others = [i for i in range(5) if i != THUMB]
+        logs['thumb_object_contact_lifted'] = mean(touching[:, THUMB], lifted)
+        logs['any_finger_object_contact_lifted'] = mean(touching[:, others].amax(-1), lifted)
+        logs['thumb_gap_cm_at_contact'] = mean(gap[:, THUMB], touching[:, THUMB])
+        logs['finger_gap_cm_at_contact'] = (gap[:, others]*touching[:, others]).sum()/touching[:, others].sum().clamp_min(1.)
+        logs['pad_pinch_lifted'] = mean((pad[:, THUMB] & pad[:, others].any(-1)).float(), lifted)
         if self.energy_scale > 0:
             vel = env.object.data.root_state_w[:, 7:13].clone()
             if self.prev_vel is None:
