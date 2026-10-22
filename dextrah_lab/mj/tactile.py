@@ -27,7 +27,7 @@ def _quat_rotate_inverse(q, v):
 
 class ContactReader:
     def __init__(self, sim, mj_model, *, finger_bodies, monitored_bodies, object_body,
-                 table_body, ground_geom, robot_bodies, pad_tensors):
+                 table_body, ground_geom, robot_bodies, pad_tensors, palm_body=None):
         import mujoco_warp as mjwarp
         import warp as wp
         self.sim, self.n = sim, sim.num_envs
@@ -47,6 +47,8 @@ class ContactReader:
         for i, b in enumerate(monitored_bodies):
             self.link[body == b] = i
         self.finger_bodies = torch.as_tensor(finger_bodies, device=device)
+        # Opt-in (grasp reward): object-only contact magnitudes of the distal links and palm.
+        self.palm = None if palm_body is None else (body == palm_body)
         self.num_links = len(monitored_bodies)
         self.pad_origin = torch.stack([p[0] for p in pad_tensors])      # (5, 3)
         self.pad_rotation = torch.stack([p[1] for p in pad_tensors])    # (5, 3, 3)
@@ -120,6 +122,17 @@ class ContactReader:
         centroid = torch.zeros(self.n*5, 3, device=self.device).index_add_(0, slot, pos*load[:, None])
         out['centroid_w'] = (centroid/weight.clamp_min(1e-12)[:, None]).view(self.n, 5, 3)
         out['finger_contacts'] = torch.zeros(self.n*5, device=self.device).index_add_(0, slot, hit.float()).view(self.n, 5)
+        # ---- object-only contact magnitudes (grasp reward) -------------------
+        if self.palm is not None:
+            obj0, obj1 = self.partner[g0] == OBJECT, self.partner[g1] == OBJECT
+            f1 = active & (self.finger[g1] >= 0) & obj0
+            f0 = active & (self.finger[g0] >= 0) & obj1
+            fing = torch.where(f1, self.finger[g1], self.finger[g0]).clamp_min(0)
+            mag = force.abs().sum(-1)
+            out['finger_object_force_l1'] = torch.zeros(self.n*5, device=self.device).index_add_(
+                0, world*5+fing, mag*(f1 | f0).float()).view(self.n, 5)
+            palm = active & ((self.palm[g1] & obj0) | (self.palm[g0] & obj1))
+            out['palm_object_force_l1'] = torch.zeros(self.n, device=self.device).index_add_(0, world, mag*palm.float())
         # ---- body-table -----------------------------------------------------
         if self.num_links:
             l1 = active & (self.link[g1] >= 0) & (self.partner[g0] == TABLE)

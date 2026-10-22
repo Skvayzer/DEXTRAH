@@ -150,6 +150,7 @@ class G1SonicTouchMjEnv:
         self._nan_capture = None
         self._sgs = None
         self._fast_step = False
+        self._grasp_reward = None
         self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
         self.reset_terminated = torch.zeros(num_envs, device=device, dtype=torch.bool)
         self.reset_time_outs = torch.zeros_like(self.reset_terminated)
@@ -354,6 +355,18 @@ class G1SonicTouchMjEnv:
     def _init_contacts(self):
         self.contacts = ContactReader(self.sim, self.sim.mj_model, pad_tensors=self.pad_tensors, **self._contacts_cfg)
         self.contacts.active_only = self._fast_step
+
+    def enable_grasp_reward(self, scale, energy_scale=0.):
+        """Opt-in reward terms after InterMimicGen (dextrah_lab/wholebody/grasp_reward.py):
+        scale * contact-prioritized grasp score with thumb-finger opposition (scale 0: computed
+        and logged only), minus energy_scale * bounded object-acceleration energy. Call before
+        the first reset (the contact reader then also measures object-only pad/palm forces)."""
+        from dextrah_lab.wholebody.grasp_reward import GraspReward
+        if hasattr(self, 'contacts'):
+            raise RuntimeError('Enable the grasp reward before the first reset')
+        self._contacts_cfg['palm_body'] = int(self.sim.mj_model.body(f'robot/{self.robot.body_names[self._palm_body_id]}').id)
+        self._grasp_reward = GraspReward(self, scale, energy_scale)
+        return self._grasp_reward
 
     def enable_fast_step(self):
         """Opt-in faster env.step with the same simulation and observations (checked by
@@ -600,6 +613,18 @@ class G1SonicTouchMjEnv:
     def _get_rewards(self):
         # PlayEnv
         reward = reward_utils.compute_rewards(self)
+        if self._grasp_reward is not None:
+            # Opt-in InterMimicGen grasp score / object energy (enable_grasp_reward).
+            extra, terms, logs = self._grasp_reward()
+            reward = reward+extra
+            self._reward_terms.update(terms)
+            self._reward_terms['total_reward'] = reward
+            lifted = self._lifted_object
+            for k, v in logs.items():
+                self.extras[f'grasp/{k}'] = v.mean()
+            if bool(lifted.any()):
+                self.extras['grasp/C_opp_lifted'] = logs['C_opp'][lifted].mean()
+                self.extras['grasp/opposed_contact_rate_lifted'] = (logs['C_opp'][lifted] > .5).float().mean()
         logging_utils.log_step_metrics(self)
         if self.reset_buf.any():
             self.extras['final_observation'] = {'critic': obs_utils.build_critic_observation(self, reward=reward).clone()}

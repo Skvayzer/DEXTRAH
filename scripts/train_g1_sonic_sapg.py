@@ -72,6 +72,11 @@ def main():
     p.add_argument('--continuous', action='store_true')
     p.add_argument('--resume', type=Path)
     p.add_argument('--memory-trace', action='store_true')
+    p.add_argument('--grasp-reward-scale', type=float, default=None,
+                   help='mjlab: + scale * InterMimicGen contact-prioritized grasp score with thumb-finger opposition '
+                        'per step (dextrah_lab/wholebody/grasp_reward.py); 0 = compute and log only')
+    p.add_argument('--object-energy-scale', type=float, default=0.,
+                   help='mjlab: - scale * bounded object-acceleration energy per step (InterMimicGen regularizer)')
     p.add_argument('--lean-sapg-batches', action='store_true',
                    help='exact lower-peak-memory SAPG batch handling (dextrah_lab/wholebody/sapg_memory.py)')
     p.add_argument('--boundary-gc-freeze', action='store_true',
@@ -366,6 +371,16 @@ def main():
         contract['boundary_gc_interval'] = args.boundary_gc_interval
         contract['boundary_gc_freeze'] = bool(args.boundary_gc_freeze)
         contract['lean_sapg_batches'] = bool(args.lean_sapg_batches)
+        if args.grasp_reward_scale is not None or args.object_energy_scale:
+            from dextrah_lab.wholebody import grasp_reward as gr
+            contract['grasp_reward'] = dict(
+                scale=args.grasp_reward_scale or 0., object_energy_scale=args.object_energy_scale,
+                source='InterMimicGen arXiv:2610.06850, App. C.2 (Eqs. 10-11) and C.1 (object energy)',
+                weights=gr.WEIGHTS, sigma_m=gr.SIGMA, contact_gap_m=gr.D_CONTACT, force_threshold_n=gr.FORCE_THRESHOLD,
+                definition=gr.__doc__.strip())
+            contract['intentional_changes'] = contract['intentional_changes'] + (
+                ['grasp_opposition_reward'] if args.grasp_reward_scale else []) + (
+                ['object_energy_penalty'] if args.object_energy_scale else [])
         contract['cuda_allocator_config'] = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
         contract['periodic_stack_dumps_during_training'] = False
         contract['wandb_initialization'] = 'before_Isaac_Kit_asyncio_patch' if backend == 'isaac' else 'standard'
@@ -441,6 +456,8 @@ def main():
             env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device,
                                     nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
                                     mujoco_cfg=mj_settings['mujoco_options'])
+            if args.grasp_reward_scale is not None or args.object_energy_scale:
+                env.enable_grasp_reward(args.grasp_reward_scale or 0., args.object_energy_scale)
             if args.mj_fast_step:
                 env.enable_fast_step()
             if args.mj_nan_capture:

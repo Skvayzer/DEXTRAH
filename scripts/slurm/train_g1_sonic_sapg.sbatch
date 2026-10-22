@@ -54,6 +54,8 @@ if [[ -n "${SIM_WORKER_THREADS:-}" ]]; then
 fi
 if [[ "${MEMORY_TRACE:-0}" == 1 ]]; then extra_args+=(--memory-trace); fi
 if [[ "${LEAN_SAPG_BATCHES:-0}" == 1 ]]; then extra_args+=(--lean-sapg-batches); fi
+if [[ -n "${GRASP_REWARD_SCALE:-}" ]]; then extra_args+=(--grasp-reward-scale "$GRASP_REWARD_SCALE"); fi
+if [[ -n "${OBJECT_ENERGY_SCALE:-}" ]]; then extra_args+=(--object-energy-scale "$OBJECT_ENERGY_SCALE"); fi
 if [[ "${BOUNDARY_GC_FREEZE:-0}" == 1 ]]; then extra_args+=(--boundary-gc-freeze); fi
 if [[ -n "${BOUNDARY_GC_INTERVAL:-}" ]]; then
     extra_args+=(--boundary-gc-interval "$BOUNDARY_GC_INTERVAL")
