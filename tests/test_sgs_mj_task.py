@@ -275,6 +275,85 @@ class MjSgsTaskTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             wrong.load_state_dict(state)
 
+    def _held_everywhere(self, env):
+        env._lifted_object[:] = True
+        env.touch_force_w[:, 0, 0] = 1.
+        env.touch_force_w[:, 2, 0] = 1.
+        env.object.data.root_pos_w[:] = torch.tensor([0., .1, 1.])
+        env._table_z_per_env[:] = .65
+
+    def test_self_evolving_rounds_edit_and_reharvest(self):
+        torch.manual_seed(8)
+        env, task = make_task(harvest_asset_cap=2., reharvest_every=5, reharvest_steps=3, reharvest_fraction=.5,
+                              reharvest_min_tries=2, edit_fraction=.5, edit_parent_success=.5)
+        ids = torch.arange(N_ENV)
+        task.before_reset(ids)
+        task.after_reset(ids)
+        self._held_everywhere(env)
+        while not task.harvest_done:
+            task.after_step()
+        a, b = task.blocks['near_goal']
+        # Half the held configurations succeed, half never: judged after 2 tries.
+        good = torch.arange(a, b)[::2]
+        bad = torch.arange(a, b)[1::2]
+        task.sampler.record(good.repeat(2), torch.ones(2*len(good), dtype=torch.bool))
+        task.sampler.record(bad.repeat(2), torch.zeros(2*len(bad), dtype=torch.bool))
+        version = task.slot_version.clone()
+        env.current_step = task.steps
+        while task.round == 0:
+            task.after_step()
+        log = task.round_log['near_goal']
+        self.assertEqual(log['replaced'], 5)
+        edited = torch.arange(a, b)[task.edited[a:b]]
+        self.assertEqual(len(edited), log['edits'])
+        self.assertGreater(len(edited), 0)
+        # Edits copy a verified parent's physical state with a new goal and fresh window.
+        for e in edited.tolist():
+            par = int(task.parent[e])
+            self.assertIn(par, good.tolist())
+            self.assertTrue(torch.equal(task.cfg['qpos'][e], task.cfg['qpos'][par]))
+            self.assertEqual(int(task.generation[e]), 1)
+            self.assertEqual(int(task.sampler.count[e]), 0)
+            self.assertGreater(int(task.slot_version[e]), int(version[e]))
+        while task.round_start is not None:
+            task.after_step()
+        self.assertGreater(task.round_log['near_goal']['harvested'], 0)
+        self.assertTrue(bool(task.sampler.available.all()))
+        # An episode started before its configuration was replaced is not credited to the new one.
+        k = int(edited[0])
+        task.current[0], task.current_version[0] = k, version[k]
+        env._successes[0] = 1
+        before = int(task.sampler.count[k])
+        task.before_reset(torch.tensor([0]))
+        self.assertEqual(int(task.sampler.count[k]), before)
+        # Lineage survives a state round trip.
+        state = task.state_dict()
+        _, other = make_task(harvest_asset_cap=2., reharvest_every=5)
+        other.load_state_dict(state)
+        self.assertTrue(torch.equal(other.edited, task.edited) and torch.equal(other.parent, task.parent))
+        self.assertEqual(other.round, task.round)
+
+    def test_hardness_weighted_sampling_prefers_hard_objects(self):
+        torch.manual_seed(9)
+        env, task = make_task(hard_object_share=1., hard_object_uniform=0., hard_object_beta=1.)
+        a, b = task.blocks['reaching']
+        assets = task.cfg['asset'][a:b]
+        slots = torch.arange(a, b)
+        # Object 0 never succeeds, every other object always does.
+        hard = slots[assets == 0]
+        easy = slots[assets != 0]
+        task.sampler.record(hard.repeat(4), torch.zeros(4*len(hard), dtype=torch.bool))
+        task.sampler.record(easy.repeat(4), torch.ones(4*len(easy), dtype=torch.bool))
+        drawn = task._sample_hard(4000)
+        self.assertTrue(bool(task.sampler.available[drawn].all()))
+        share = float((task.cfg['asset'][drawn] == 0).float().mean())
+        # weights: 1/0.05 = 20 for object 0 vs 1 for each of 5 others -> 20/25
+        self.assertAlmostEqual(share, .8, delta=.04)
+        # Within an object, configurations follow their SGS probabilities (only available ones).
+        task.sampler.available[hard[0]] = False
+        drawn = task._sample_hard(500)
+        self.assertFalse(bool((drawn == hard[0]).any()))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -37,6 +37,21 @@ distribution"): every ``eval_every``-th env always resets from a fresh sample
 of rho with a uniformly random asset and is logged separately (sgs/eval_*).
 Unlike the paper's separate evaluation runs, these episodes also feed PPO.
 
+Opt-in, after InterMimicGen (arXiv:2610.06850):
+* self-evolving held starts (``reharvest_every``; Sec. 3.4 data flywheel): every round
+  replaces part of each held family (unfilled slots, goal edits that never succeeded,
+  over-represented objects first) by (a) goal edits of verified held states (same
+  physical state, a fresh / farther goal; the edit generation grows) and (b) new held
+  states harvested from the current policy's rollouts, objects with the fewest held
+  states first. Edits that fail are replaced in a later round ("keep only what
+  executes"); replaced slots restart their outcome windows, and episodes started from a
+  replaced configuration are not credited to its successor.
+* hardness-weighted object sampling (``hard_object_share``; Eq. 9): that share of the
+  training resets first draws an object with probability
+  rho/|O| + (1-rho) clip(c_o, c_min, 1)^-beta / sum (c_o: the object's from-scratch
+  success over its reaching configurations' recent tries), then one of its available
+  configurations by its SGS probability.
+
 Whole-body (frozen SONIC) task: the same families on the floating G1. Reaching
 starts are that task's rho (standing reset: base at its default root, plus the
 opt-in table spawn when enabled, applied to the drawn asset). Held states also
@@ -96,6 +111,19 @@ class SgsSettings:
     spawn_rest_speed: float = .05        # m/s, COM, at the end of settling
     spawn_edge_margin: float = .03       # settled COM at least this far inside the table top edges
     spawn_max_rounds: int = 20           # redraws per slot before giving up
+    # Self-evolving held starts (opt-in; see the module docstring).
+    reharvest_every: int = 0             # env steps between rounds (0: off); starts after the first harvest
+    reharvest_steps: int = 300           # env steps of collection per round
+    reharvest_fraction: float = .2       # at most this share of each held family replaced per round
+    reharvest_min_tries: int = 10        # outcomes before a configuration is judged
+    edit_fraction: float = .5            # share of a round's replacements made by goal edits
+    edit_parent_success: float = .5      # edits copy held states with at least this success over their tries
+    edit_goal_growth: float = .5         # near-goal edits: goal fraction bound grows by this per generation
+    # Hardness-weighted object sampling (opt-in).
+    hard_object_share: float = 0.        # share of training resets drawn object-first
+    hard_object_beta: float = .5
+    hard_object_min: float = .05
+    hard_object_uniform: float = .25
 
     def __post_init__(self):
         self.families = tuple(self.families)
@@ -106,6 +134,12 @@ class SgsSettings:
             raise ValueError('Fewer configurations than families')
         if set(self.families) & set(HARVESTED) and 'reaching' not in self.families:
             raise ValueError('Held states are collected from reaching episodes: keep the reaching family')
+        if self.reharvest_every < 0 or not 0. <= self.reharvest_fraction <= 1. or not 0. <= self.edit_fraction <= 1.:
+            raise ValueError('Invalid re-harvest settings')
+        if not 0. <= self.hard_object_share <= 1. or not 0. <= self.hard_object_uniform <= 1. or self.hard_object_min <= 0.:
+            raise ValueError('Invalid hardness-weighted sampling settings')
+        if self.hard_object_share and 'reaching' not in self.families:
+            raise ValueError('Object hardness is measured on the reaching family')
 
     def layout(self):
         """Fields that fix the saved configuration set and outcome windows."""
@@ -178,11 +212,19 @@ class MjSgsTask:
             self.hist_dims = [b.shape[2] for b in hist]
             self.cfg['history'] = z(N, hist[0].shape[1], sum(self.hist_dims))
         self.filled = torch.zeros(N, dtype=torch.bool, device=self.device)
+        # Self-evolving held starts: edit lineage, slot versions (outcome attribution), rounds.
+        self.generation = torch.zeros(N, dtype=torch.long, device=self.device)
+        self.parent = torch.full((N,), -1, dtype=torch.long, device=self.device)
+        self.edited = torch.zeros(N, dtype=torch.bool, device=self.device)
+        self.slot_version = torch.zeros(N, dtype=torch.long, device=self.device)
+        self.round, self.round_start, self.round_queue, self.round_log = 0, None, {}, {}
+        self._asset_index, self._completion, self._completion_step = None, None, -1
         self.fill_count = {f: 0 for f in settings.families}
         self.harvest_steps, self.harvest_done = 0, not any(f in HARVESTED for f in settings.families)
         self.asset_harvest = {f: torch.zeros(self.n_assets, dtype=torch.long, device=self.device) for f in HARVESTED}
         # Per-env bookkeeping.
         self.current = torch.full((n_env,), -1, dtype=torch.long, device=self.device)
+        self.current_version = torch.zeros(n_env, dtype=torch.long, device=self.device)
         ids = torch.arange(n_env, device=self.device)
         e = settings.eval_every
         self.eval_mask = (ids % e == e-1) if e > 0 else torch.zeros(n_env, dtype=torch.bool, device=self.device)
@@ -567,7 +609,8 @@ class MjSgsTask:
         env, s = self.env, self.settings
         env_ids = env_ids.reshape(-1)
         cfg_ids = self.current[env_ids]
-        active = cfg_ids >= 0
+        # Episodes started from a configuration replaced since then are not credited to it.
+        active = (cfg_ids >= 0) & (self.slot_version[cfg_ids.clamp_min(0)] == self.current_version[env_ids])
         if bool(active.any()):
             success = env._successes[env_ids[active]] > 0
             self.sampler.record(cfg_ids[active], success)
@@ -603,7 +646,12 @@ class MjSgsTask:
         self.current[eval_ids] = -1
         train_ids = env_ids[~is_eval]
         chosen = self.sampler.sample(train_ids.numel(), generator=self.generator)
+        if s.hard_object_share > 0 and train_ids.numel():
+            hard = torch.rand(train_ids.numel(), device=self.device, generator=self.generator) < s.hard_object_share
+            if bool(hard.any()):
+                chosen[hard] = self._sample_hard(int(hard.sum()))
         self.current[train_ids] = chosen
+        self.current_version[train_ids] = self.slot_version[chosen]
         self.assign_objects(train_ids, self.cfg['asset'][chosen])
 
     def after_reset(self, env_ids):
@@ -661,6 +709,11 @@ class MjSgsTask:
         Called after rewards/dones, before done envs are reset."""
         if not self.harvest_done:
             self._harvest()
+        elif self.settings.reharvest_every and any(f in self.blocks for f in HARVESTED):
+            if self.round_start is None and self.steps > 0 and self.steps % self.settings.reharvest_every == 0:
+                self._start_round()
+            if self.round_start is not None:
+                self._reharvest_step()
         self.steps += 1
         if self.steps % 2000 == 0:
             self._verify_tables()
@@ -724,10 +777,14 @@ class MjSgsTask:
                                                 for f in HARVESTED if f in self.blocks)+f' steps={self.harvest_steps}', flush=True)
         self._sync_available()
 
-    def _store_held(self, family, ids, assets):
+    def _store_held(self, family, ids, assets, slots=None):
+        """Store the held states of envs ids: in the next free slots (initial harvest) or,
+        when re-harvesting, in the given slots (fresh lineage, outcome window restarted)."""
         env, c, rc = self.env, self.cfg, self.env.cfg.reset
-        a, _ = self.blocks[family]
-        slots = torch.arange(a+self.fill_count[family], a+self.fill_count[family]+len(ids), device=self.device)
+        a, b = self.blocks[family]
+        sequential = slots is None
+        if sequential:
+            slots = torch.arange(a+self.fill_count[family], a+self.fill_count[family]+len(ids), device=self.device)
         origin = env.scene.env_origins[ids]
         obj_pos = env.object.data.root_pos_w[ids]-origin
         obj_quat = env.object.data.root_quat_w[ids]
@@ -757,8 +814,164 @@ class MjSgsTask:
                 maxs=rc.target_volume_maxs, scale=rc.target_volume_region_scale)
         c['goal_pose'][slots] = torch.cat((pos, quat), -1)
         self.filled[slots] = True
-        self.fill_count[family] += n
+        if sequential:
+            self.fill_count[family] += n
+        else:
+            self.fill_count[family] = int(self.filled[a:b].sum())
+            self.generation[slots], self.parent[slots], self.edited[slots] = 0, -1, False
+            self._renew(slots)
         self.asset_harvest[family].index_add_(0, assets, torch.ones_like(assets))
+        self._asset_index = None
+
+    # ------------------------------------------- self-evolving held starts
+    def _tried(self):
+        """Per configuration: outcomes in its window (<= history) and success over them."""
+        tried = self.sampler.count.clamp(max=self.sampler.history)
+        return tried, self.sampler.outcomes.sum(-1).float()/tried.clamp_min(1).float()
+
+    def _renew(self, slots):
+        """New configurations in these slots: empty outcome windows, new version."""
+        self.sampler.outcomes[slots] = False
+        self.sampler.head[slots] = 0
+        self.sampler.count[slots] = 0
+        self.slot_version[slots] += 1
+
+    def _start_round(self):
+        s = self.settings
+        self.round += 1
+        self.round_start = self.steps
+        self.round_log = dict(round=self.round, step=self.steps)
+        tried, rate = self._tried()
+        for f in HARVESTED:
+            if f not in self.blocks:
+                continue
+            a, b = self.blocks[f]
+            slots = torch.arange(a, b, device=self.device)
+            filled, assets, r = self.filled[a:b], self.cfg['asset'][a:b], rate[a:b]
+            counts = torch.bincount(assets[filled], minlength=self.n_assets)
+            quota = max(1, math.ceil((b-a)/self.n_assets))
+            judged = tried[a:b] >= s.reharvest_min_tries
+            failed_edit = self.edited[a:b] & judged & (r == 0)
+            over = filled & (counts[assets] > quota)
+            eligible = ~filled | failed_edit | (over & judged)
+            score = 4.*~filled+3.*failed_edit+1.*over+r+1e-3*torch.rand(b-a, device=self.device, generator=self.generator)
+            k = min(int(s.reharvest_fraction*(b-a)), int(eligible.sum()))
+            chosen = slots[torch.topk(score.masked_fill(~eligible, float('-inf')), k).indices] if k else slots[:0]
+            parents_ok = filled & judged & (r >= s.edit_parent_success)
+            parents_ok[chosen-a] = False
+            n_edit = min(int(round(s.edit_fraction*k)), k) if bool(parents_ok.any()) else 0
+            if n_edit:
+                # Under-represented objects first (weight 1 / held states of the object).
+                weight = parents_ok.float()/counts[assets].clamp_min(1).float()
+                parents = slots[torch.multinomial(weight, n_edit, replacement=True, generator=self.generator)]
+                self._make_edits(f, chosen[:n_edit], parents)
+            self.round_queue[f] = chosen[n_edit:]
+            self.round_log[f] = dict(replaced=k, edits=n_edit, harvested=0, failed_edits=int(failed_edit.sum()),
+                                     unfilled=int((~filled).sum()), assets_covered_before=int((counts > 0).sum()))
+        self._sync_available()
+
+    def _make_edits(self, family, slots, parents):
+        """Goal edits: copy the verified held state, new goal (stable grasp: fresh rho goal;
+        near goal: a delta goal whose fraction bound grows with the edit generation)."""
+        c, rc = self.cfg, self.env.cfg.reset
+        for key in c:
+            c[key][slots] = c[key][parents]
+        gen = self.generation[parents]+1
+        n = len(slots)
+        if family == 'stable_grasp':
+            pos, quat = self.goal_sampling.sample_absolute_goal_pose(
+                mins=rc.target_volume_mins, maxs=rc.target_volume_maxs, scale=rc.target_volume_region_scale,
+                n_envs=n, device=self.device)
+        else:
+            bound = self.settings.near_goal_max_fraction*(1.+self.settings.edit_goal_growth*gen.float())
+            frac = torch.rand(n, device=self.device, generator=self.generator)*bound
+            obj = c['object_pose'][slots]
+            pos, quat = self.goal_sampling.sample_delta_goal_pose(
+                prev_pos=obj[:, :3], prev_quat_wxyz=obj[:, 3:], delta_distance=frac[:, None]*rc.delta_goal_distance,
+                delta_rotation_degrees=frac*rc.delta_rotation_degrees, mins=rc.target_volume_mins,
+                maxs=rc.target_volume_maxs, scale=rc.target_volume_region_scale)
+        c['goal_pose'][slots] = torch.cat((pos, quat), -1)
+        self.generation[slots], self.parent[slots], self.edited[slots] = gen, parents, True
+        self.filled[slots] = True
+        self._renew(slots)
+        self._asset_index = None
+
+    def _reharvest_step(self):
+        s, env = self.settings, self.env
+        held = self.held_mask()
+        for f, queue in self.round_queue.items():
+            if queue.numel() == 0:
+                continue
+            a, b = self.blocks[f]
+            cand = held & self.in_goal_volume() if f == 'near_goal' else held
+            ids = cand.nonzero().squeeze(-1)
+            if ids.numel() == 0:
+                continue
+            ids = ids[torch.randperm(ids.numel(), device=self.device, generator=self.generator)[:4*s.harvest_per_step]]
+            assets = env._object_asset_index_per_env[ids]
+            counts = torch.bincount(self.cfg['asset'][a:b][self.filled[a:b]], minlength=self.n_assets)
+            quota = max(1, math.ceil((b-a)/self.n_assets))
+            cap = max(quota, math.ceil(s.harvest_asset_cap*(b-a)/self.n_assets))
+            order = torch.argsort(assets, stable=True)
+            _, groups = torch.unique_consecutive(assets[order], return_counts=True)
+            rank = torch.empty_like(order)
+            rank[order] = torch.arange(len(order), device=self.device)-torch.repeat_interleave(torch.cumsum(groups, 0)-groups, groups)
+            ok = (counts[assets]+rank < cap).nonzero().squeeze(-1)
+            deficit = (quota-counts[assets]-rank).float()
+            ok = ok[torch.argsort(-deficit[ok], stable=True)]              # objects with the fewest held states first
+            m = min(s.harvest_per_step, queue.numel(), ok.numel())
+            if m:
+                pick = ok[:m]
+                self._store_held(f, ids[pick], assets[pick], slots=queue[:m])
+                self.round_queue[f] = queue[m:]
+                self.round_log[f]['harvested'] += m
+        if self.steps-self.round_start+1 >= s.reharvest_steps or all(q.numel() == 0 for q in self.round_queue.values()):
+            for f in self.round_queue:
+                a, b = self.blocks[f]
+                counts = torch.bincount(self.cfg['asset'][a:b][self.filled[a:b]], minlength=self.n_assets)
+                self.round_log[f].update(assets_covered_after=int((counts > 0).sum()), unused=int(self.round_queue[f].numel()),
+                                         edited_configs=int(self.edited[a:b].sum()), max_generation=int(self.generation[a:b].max()))
+            print('SGS_REHARVEST '+json.dumps(self.round_log), flush=True)
+            self.round_queue, self.round_start = {}, None
+        self._sync_available()
+
+    # ------------------------------------- hardness-weighted object sampling
+    def _asset_completion(self):
+        """Per object: from-scratch success over its reaching configurations' recent tries
+        (objects without tries: the overall mean); refreshed every 200 steps."""
+        if self._completion is None or self.steps-self._completion_step >= 200:
+            a, b = self.blocks['reaching']
+            tried, _ = self._tried()
+            assets = self.cfg['asset'][a:b]
+            t = torch.zeros(self.n_assets, device=self.device).index_add_(0, assets, tried[a:b].float())
+            won = torch.zeros(self.n_assets, device=self.device).index_add_(0, assets, self.sampler.outcomes[a:b].sum(-1).float())
+            self._completion = torch.where(t > 0, won/t.clamp_min(1.), won.sum()/t.sum().clamp_min(1.))
+            self._completion_step = self.steps
+        return self._completion
+
+    def _sample_hard(self, k):
+        """k configuration ids: object by hardness (InterMimicGen Eq. 9), then one of its
+        available configurations by its SGS probability."""
+        s = self.settings
+        prob = self.sampler.probabilities().double()
+        if self._asset_index is None:
+            assets = self.cfg['asset']
+            counts = torch.bincount(assets, minlength=self.n_assets)
+            self._asset_index = (torch.argsort(assets, stable=True), torch.cumsum(counts, 0)-counts, counts)
+        order, starts, counts = self._asset_index
+        cum = torch.cumsum(prob[order], 0)
+        mass = torch.zeros(self.n_assets, dtype=torch.float64, device=self.device).index_add_(0, self.cfg['asset'], prob)
+        has = mass > 0
+        w = self._asset_completion().double().clamp(s.hard_object_min, 1.).pow(-s.hard_object_beta)*has
+        p = s.hard_object_uniform*has/has.sum()+(1.-s.hard_object_uniform)*w/w.sum()
+        assets = torch.multinomial(p.float(), k, replacement=True, generator=self.generator)
+        first = starts[assets]
+        lo = torch.where(first > 0, cum[(first-1).clamp_min(0)], torch.zeros_like(cum[first]))
+        u = lo+torch.rand(k, dtype=torch.float64, device=self.device, generator=self.generator)*mass[assets]
+        idx = torch.searchsorted(cum, u, right=True)
+        idx = torch.minimum(torch.maximum(idx, first), first+counts[assets]-1)
+        self._hard_draws = getattr(self, '_hard_draws', 0)+k
+        return order[idx]
 
     # ------------------------------------------------------------ metrics
     def _publish(self):
@@ -785,6 +998,17 @@ class MjSgsTask:
                 x[f'sgs/{f}/train_robot_fall_rate'] = self.robot_fall_stats[f].mean()
             x[f'sgs/{f}/configs'] = float(self.fill_count[f])
         x['sgs/harvest_done'] = float(self.harvest_done)
+        if self.settings.reharvest_every:
+            x['sgs/reharvest/rounds'] = float(self.round)
+            for f in HARVESTED:
+                if f in self.blocks:
+                    a, b = self.blocks[f]
+                    x[f'sgs/{f}/edited_fraction'] = self.edited[a:b].float().mean()
+                    x[f'sgs/{f}/mean_generation'] = self.generation[a:b].float().mean()
+        if self.settings.hard_object_share > 0 and self._completion is not None:
+            c = self._completion
+            x['sgs/hard_object/completion_median'] = c.median()
+            x['sgs/hard_object/objects_below_5pct'] = (c < .05).float().mean()
 
     # ------------------------------------------------------------ state
     def state_dict(self):
@@ -793,7 +1017,9 @@ class MjSgsTask:
                     fill_count=dict(self.fill_count), harvest_steps=self.harvest_steps, harvest_done=self.harvest_done,
                     asset_harvest={k: v.cpu() for k, v in self.asset_harvest.items()},
                     n_assets=self.n_assets, nq=self.cfg['qpos'].shape[1], nv=self.cfg['qvel'].shape[1],
-                    validated=self.validated.cpu(), wholebody=self.wholebody)
+                    validated=self.validated.cpu(), wholebody=self.wholebody,
+                    lineage=dict(generation=self.generation.cpu(), parent=self.parent.cpu(), edited=self.edited.cpu(),
+                                 slot_version=self.slot_version.cpu(), round=self.round))
 
     def load_state_dict(self, state):
         saved = SgsSettings(**state['settings']).layout()
@@ -812,6 +1038,10 @@ class MjSgsTask:
             self.asset_harvest[k].copy_(v.to(self.device))
         if 'validated' in state:
             self.validated.copy_(state['validated'].to(self.device))
+        if 'lineage' in state:                           # older states: everything harvested, generation 0
+            for key in ('generation', 'parent', 'edited', 'slot_version'):
+                getattr(self, key).copy_(state['lineage'][key].to(self.device))
+            self.round = int(state['lineage']['round'])
         if self.settings.validate_spawns and 'reaching' in self.blocks:
             self._revalidate_reaching()
         self._sync_available()

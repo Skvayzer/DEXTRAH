@@ -133,6 +133,13 @@ def main():
     p.add_argument('--sgs-eval-every', type=int, default=16,
                    help='Every Nth env resets from fresh rho samples (Reaching) and is logged as sgs/eval_*')
     p.add_argument('--sgs-harvest-max-steps', type=int, default=6000)
+    p.add_argument('--sgs-reharvest-every', type=int, default=0,
+                   help='Self-evolving held starts (InterMimicGen flywheel): env steps between re-harvest rounds (0: off)')
+    p.add_argument('--sgs-reharvest-steps', type=int, default=300, help='Env steps of collection per round')
+    p.add_argument('--sgs-reharvest-fraction', type=float, default=.2, help='Max share of each held family replaced per round')
+    p.add_argument('--sgs-edit-fraction', type=float, default=.5, help='Share of replacements made by goal edits of verified held states')
+    p.add_argument('--sgs-hard-object-share', type=float, default=0.,
+                   help='Share of training resets drawn object-first by hardness (InterMimicGen Eq. 9; 0: off)')
     p.add_argument('--sgs-validate-spawns', action='store_true',
                    help='Reaching configurations and evaluation starts must pass the passive settle check')
     p.add_argument('--sgs-eval-pool', type=int, default=16384,
@@ -141,6 +148,12 @@ def main():
                    help='Frozen SONIC (mjlab): add 17 hand-point -> nearest object surface vectors (51 inputs, '
                         'wholebody/hand_surface.py) to actor and critic; with --init-weights from a run without them, '
                         'their network columns start at zero')
+    p.add_argument('--hand-surface-arm-links', action='store_true',
+                   help='With --hand-surface-obs: also the right elbow and wrist link -> object surface vectors '
+                        '(12 inputs, InterMimicGen link-to-surface), appended')
+    p.add_argument('--hand-surface-goal', action='store_true',
+                   help='With --hand-surface-obs: also the 17 hand points -> object surface at the GOAL pose '
+                        '(51 inputs, InterMimicGen reference geometry), appended')
     p.add_argument('--sgs-state', type=Path,
                    help='SGS state to continue (X.sgs.pt); default: the --resume checkpoint\'s')
     p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success'], default='reward',
@@ -166,6 +179,8 @@ def main():
         raise ValueError(f'--best-metric {args.best_metric} needs --sgs (its evaluation envs)')
     if args.teacher_checkpoint is not None and (not args.frozen_pretrained_sonic or not args.teacher_checkpoint.is_file()):
         raise ValueError('--teacher-checkpoint initializes a frozen-SONIC policy from an existing checkpoint')
+    if (args.hand_surface_arm_links or args.hand_surface_goal) and not args.hand_surface_obs:
+        raise ValueError('--hand-surface-arm-links / --hand-surface-goal extend --hand-surface-obs')
     if args.hand_surface_obs and (backend != 'mjlab' or not args.frozen_pretrained_sonic or args.carry):
         raise ValueError('--hand-surface-obs is implemented for the frozen-SONIC mjlab reposing task')
     if args.sgs_state is not None and (not args.sgs or not args.sgs_state.is_file()):
@@ -180,10 +195,16 @@ def main():
             args.teacher_checkpoint = Path(parent_teacher)
         elif args.teacher_checkpoint is not None and str(args.teacher_checkpoint) != parent_teacher:
             raise ValueError(f'Continuation teacher {args.teacher_checkpoint} != parent {parent_teacher}')
+        from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM, hand_surface_dim
         parent_hand = bool(parent_contract.get('body_termination', {}).get('hand_surface_obs', False))
-        if args.resume is not None and parent_hand != args.hand_surface_obs:
-            raise ValueError(f'--hand-surface-obs={args.hand_surface_obs} but the resumed run used {parent_hand}')
-        args.expand_hand_inputs = args.hand_surface_obs and not parent_hand
+        parent_dim = int(parent_contract.get('hand_surface', {}).get('dim', HAND_SURFACE_DIM if parent_hand else 0))
+        new_dim = hand_surface_dim(args.hand_surface_arm_links, args.hand_surface_goal) if args.hand_surface_obs else 0
+        if args.resume is not None and parent_dim != new_dim:
+            raise ValueError(f'Hand-surface block {new_dim} but the resumed run used {parent_dim} (use --init-weights)')
+        if new_dim < parent_dim:
+            raise ValueError(f'Hand-surface block {new_dim} smaller than the parent run\'s {parent_dim}')
+        args.expand_hand_inputs = new_dim > parent_dim
+        args.parent_hand_dim = parent_dim
     if args.num_envs < 6 or args.num_envs % 6 or not args.output.name.startswith('0_'):
         raise ValueError('Require six groups and a policy-index-prefixed output name')
     if args.output.exists():
@@ -274,6 +295,8 @@ def main():
         cfg.sonic_body.per_env_object_physics = args.per_env_object_physics
         cfg.sonic_body.spawn_on_table = args.spawn_on_table
         cfg.sonic_body.hand_surface_obs = args.hand_surface_obs
+        cfg.sonic_body.hand_surface_arm_links = args.hand_surface_arm_links
+        cfg.sonic_body.hand_surface_goal = args.hand_surface_goal
         if args.body_table_contact_monitor_only:
             cfg.sonic_body.body_table_contact_termination = True
             cfg.sonic_body.body_table_contact_terminates = False
@@ -313,7 +336,9 @@ def main():
                 temperature=args.sgs_temperature, target=args.sgs_target, kappa=args.sgs_kappa, eps=args.sgs_eps,
                 families=tuple(args.sgs_families.split(',')), eval_every=args.sgs_eval_every,
                 harvest_max_steps=args.sgs_harvest_max_steps, validate_spawns=args.sgs_validate_spawns,
-                eval_pool_size=args.sgs_eval_pool)
+                eval_pool_size=args.sgs_eval_pool, reharvest_every=args.sgs_reharvest_every,
+                reharvest_steps=args.sgs_reharvest_steps, reharvest_fraction=args.sgs_reharvest_fraction,
+                edit_fraction=args.sgs_edit_fraction, hard_object_share=args.sgs_hard_object_share)
             contract['sgs'] = dict(settings=asdict(sgs_settings), paper='arXiv:2610.12465', best_metric=args.best_metric)
         bootstrap_sha = None
         if args.bootstrap is not None:
@@ -356,7 +381,9 @@ def main():
                 'per_env_object_physics_upstream_scene_path_no_physx_replication']
         if args.sgs:
             contract['intentional_changes'] = contract['intentional_changes'] + ['sgs_success_guided_episode_configurations'] + (
-                ['sgs_spawn_validation'] if args.sgs_validate_spawns else [])
+                ['sgs_spawn_validation'] if args.sgs_validate_spawns else []) + (
+                ['sgs_self_evolving_held_starts'] if args.sgs_reharvest_every else []) + (
+                ['sgs_hardness_weighted_object_sampling'] if args.sgs_hard_object_share else [])
         if args.body_table_contact_termination:
             contract['intentional_changes'] = contract['intentional_changes'] + [
                 'terminate_on_body_table_contact_except_right_forearm_hand_fingers']
@@ -480,8 +507,12 @@ def main():
         hand_dim = getattr(env, 'hand_surface_dim', 0)
         if args.hand_surface_obs:
             from dextrah_lab.wholebody import hand_surface
-            contract['intentional_changes'] = contract['intentional_changes'] + ['hand_to_surface_observation_51d']
-            contract['hand_surface'] = dict(points=['palm_centre', '5_fingertip_pads', *hand_surface.HAND_SURFACE_LINKS],
+            contract['intentional_changes'] = contract['intentional_changes'] + [f'hand_to_surface_observation_{hand_dim}d']
+            contract['hand_surface'] = dict(points=['palm_centre', '5_fingertip_pads', *hand_surface.HAND_SURFACE_LINKS]
+                                            + (list(hand_surface.ARM_SURFACE_LINKS) if args.hand_surface_arm_links else []),
+                goal_surface=('the 17 hand points -> object surface at the goal pose, appended (actor = critic: goal is exact)'
+                              if args.hand_surface_goal else None),
+                arm_links=bool(args.hand_surface_arm_links), goal=bool(args.hand_surface_goal),
                 dim=hand_dim, encoding='world-axis vector to nearest object-primitive surface, decimetres, norm clip 3',
                 actor_object_pose='same delayed/noised pose as the other actor object observations',
                 critic_object_pose='true', network='zero-initialized input columns in the task LSTM and critic layer 1')
@@ -584,7 +615,8 @@ def main():
                 from dextrah_lab.wholebody.hand_surface import check_zero_hand_columns, load_expanded_initial_weights
                 report['init_weights'] = load_expanded_initial_weights(algo, args.init_weights, hand_dim)
                 report['init_weights']['inert_hand_inputs'] = check_zero_hand_columns(
-                    algo.model, algo.central_value_net.model, env.cfg.observation_space, env.cfg.state_space, hand_dim, args.device)
+                    algo.model, algo.central_value_net.model, env.cfg.observation_space, env.cfg.state_space,
+                    hand_dim-args.parent_hand_dim, args.device)
                 print('HAND_SURFACE_INIT '+json.dumps(report['init_weights']['inert_hand_inputs']), flush=True)
             else:
                 report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)

@@ -259,8 +259,11 @@ class G1SonicTouchMjEnv:
             # Opt-in hand-to-surface observation (wholebody/hand_surface.py), after the body extra.
             self._hand_surface, self.hand_surface_dim = None, 0
             if getattr(cfg.sonic_body, 'hand_surface_obs', False):
-                from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM, HandSurface, install_actor_pose_capture
-                self._hand_surface, self.hand_surface_dim = HandSurface(self), HAND_SURFACE_DIM
+                from dextrah_lab.wholebody.hand_surface import HandSurface, install_actor_pose_capture
+                # Opt-in InterMimicGen extensions: arm-link and goal-surface vectors (appended).
+                self._hand_surface = HandSurface(self, arm_links=getattr(cfg.sonic_body, 'hand_surface_arm_links', False),
+                                                 goal=getattr(cfg.sonic_body, 'hand_surface_goal', False))
+                self.hand_surface_dim = self._hand_surface.dim
                 install_actor_pose_capture(obs_utils)
             cfg.observation_space = TASK_ACTOR_DIM+BODY_EXTRA_DIM+self.hand_surface_dim
             cfg.state_space = TASK_CRITIC_DIM+BODY_EXTRA_DIM+self.hand_surface_dim

@@ -15,6 +15,13 @@ Encoding: world-axis vectors (as the other relative observations), in decimetres
 norm clipped at 3 (30 cm): 17 x 3 = 51 values, normalised by their own running
 mean/std. Network columns for them start at zero (sapg_network/frozen_sapg), so
 a policy expanded with them initially acts exactly as before.
+
+Opt-in extensions after InterMimicGen (arXiv:2610.06850, App. C.1: link-to-surface
+vectors for every body link, for the current and the reference geometry), appended
+after the 51 values in this order so older checkpoints expand by zero columns:
+* arm_links: the right elbow and three wrist link origins -> object surface (12 values);
+* goal: the 17 hand points -> the object's surface at the GOAL pose (51 values; the
+  goal is observed exactly, so actor and critic get the same values).
 """
 import torch
 
@@ -24,6 +31,11 @@ HAND_SURFACE_LINKS = ('right_index_proximal_link', 'right_middle_proximal_link',
                       'right_pinky_distal_link', 'right_thumb_distal_link')
 HAND_SURFACE_POINTS = 1+5+len(HAND_SURFACE_LINKS)       # palm centre + fingertip pads + links
 HAND_SURFACE_DIM = 3*HAND_SURFACE_POINTS
+ARM_SURFACE_LINKS = ('right_elbow_link', 'right_wrist_roll_link', 'right_wrist_pitch_link', 'right_wrist_yaw_link')
+
+
+def hand_surface_dim(arm_links=False, goal=False):
+    return HAND_SURFACE_DIM+3*len(ARM_SURFACE_LINKS)*bool(arm_links)+HAND_SURFACE_DIM*bool(goal)
 SCALE = 10.                                             # metres -> decimetres
 CLIP = 3.                                               # 30 cm
 
@@ -84,16 +96,19 @@ def encode(vectors):
 class HandSurface:
     """Per-env hand-to-surface observation of the mjlab whole-body env."""
 
-    def __init__(self, env):
+    def __init__(self, env, arm_links=False, goal=False):
         from dextrah_lab.mj.compat import p2p
         from dextrah_lab.mj.scene import object_indices
         self.env, device = env, env.device
+        self.arm_links, self.goal = bool(arm_links), bool(goal)
+        self.dim = hand_surface_dim(arm_links, goal)
         self._offset = p2p('obs_utils')._apply_local_offset
         names = env.robot.body_names
-        missing = [n for n in HAND_SURFACE_LINKS if n not in names]
+        links = HAND_SURFACE_LINKS+(ARM_SURFACE_LINKS if self.arm_links else ())
+        missing = [n for n in links if n not in names]
         if missing:
             raise ValueError(f'Hand-surface links missing from the robot: {missing}')
-        self.link_ids = torch.tensor([names.index(n) for n in HAND_SURFACE_LINKS], device=device)
+        self.link_ids = torch.tensor([names.index(n) for n in links], device=device)
         bank = env.object_bank
         t = lambda x: torch.as_tensor(x, device=device, dtype=torch.float32)
         self.pos, self.size = t(bank.pos), t(bank.size)                # link frame, per asset and slot
@@ -116,16 +131,26 @@ class HandSurface:
         links = state[:, self.link_ids, :3]
         return torch.cat((palm, tips, links), 1)-origin
 
-    def vectors(self, obj_pos, obj_quat):
+    def vectors(self, obj_pos, obj_quat, points=None):
         """Nearest-surface vectors for an env-local object link pose (pos, wxyz quat)."""
         a = self.env._object_asset_index_per_env
         R = quat_to_mat(obj_quat)
         centre = obj_pos[:, None]+torch.einsum('nij,nsj->nsi', R, self.pos[a])
         rot = R[:, None] @ self.rot[a]
-        return nearest_surface_vectors(self.points(), centre, rot, self.size[a], self.is_box, self.used[a])
+        points = self.points() if points is None else points
+        return nearest_surface_vectors(points, centre, rot, self.size[a], self.is_box, self.used[a])
+
+    def goal_pose(self):
+        """Env-local goal pose of the object link (as obs_utils: goal_viz root pose)."""
+        g = self.env.goal_viz.data
+        return g.root_pos_w-self.env.scene.env_origins, g.root_quat_w
 
     def observation(self, obj_pos, obj_quat):
-        return encode(self.vectors(obj_pos, obj_quat))
+        points = self.points()
+        out = encode(self.vectors(obj_pos, obj_quat, points))
+        if self.goal:
+            out = torch.cat((out, encode(self.vectors(*self.goal_pose(), points[:, :HAND_SURFACE_POINTS]))), -1)
+        return out
 
 
 def install_actor_pose_capture(obs_utils):
@@ -187,37 +212,57 @@ def expand_state_dict(state, model_state, columns):
     return out, added
 
 
+ACTOR_LSTM_KEY = 'a2c_network.source.rnn.rnn.weight_ih_l0'
+CRITIC_FIRST_KEY = 'model.a2c_network.actor_mlp.0.weight'
+
+
 def load_expanded_initial_weights(algo, checkpoint, hand_dim):
-    """--init-weights from a checkpoint without hand-surface inputs into an expanded
-    model: every trained tensor copied, zero input columns for the new inputs (actor
-    task LSTM, critic first layer), fresh normalizer for them; fresh optimizers and
-    counters (as carry_training.load_initial_weights)."""
+    """--init-weights from a checkpoint with a smaller (or no) hand-surface block into an
+    expanded model: every trained tensor copied, zero input columns for the added inputs
+    (appended at the end of the hand block: actor task LSTM, critic first layer). The
+    hand normaliser gets the added channels (mean 0, var 1) and its count reset to 1 so
+    every channel re-estimates at the first update (a fresh normaliser when the
+    checkpoint had no block). Fresh optimizers and counters (as
+    carry_training.load_initial_weights)."""
     import hashlib
     from pathlib import Path
     from .task_contract import BODY_EXTRA_DIM, TASK_ACTOR_DIM, TASK_CRITIC_DIM
     payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
     state = payload[0] if 0 in payload else payload
-    actor, added_actor = expand_state_dict(
-        state['model'], algo.model.state_dict(), {'a2c_network.source.rnn.rnn.weight_ih_l0': (TASK_ACTOR_DIM, hand_dim)})
+    added = algo.model.state_dict()[ACTOR_LSTM_KEY].shape[1]-state['model'][ACTOR_LSTM_KEY].shape[1]
+    old_dim = hand_dim-added
+    if added <= 0 or old_dim < 0:
+        raise ValueError(f'Checkpoint hand block cannot expand to {hand_dim} (+{added} inputs)')
+    model, critic_state = dict(state['model']), dict(state['assymetric_vf_nets'])
+    if old_dim:
+        for d, prefix in ((model, ''), (critic_state, 'model.')):
+            k = prefix+'running_mean_std.hand.'
+            d[k+'running_mean'] = torch.cat((d[k+'running_mean'], d[k+'running_mean'].new_zeros(added)))
+            d[k+'running_var'] = torch.cat((d[k+'running_var'], d[k+'running_var'].new_ones(added)))
+            d[k+'count'] = torch.ones_like(d[k+'count'])
+    actor, added_actor = expand_state_dict(model, algo.model.state_dict(), {ACTOR_LSTM_KEY: (TASK_ACTOR_DIM+old_dim, added)})
     algo.model.load_state_dict(actor, strict=True)
-    critic, added_critic = expand_state_dict(
-        state['assymetric_vf_nets'], algo.central_value_net.state_dict(),
-        {'model.a2c_network.actor_mlp.0.weight': (TASK_CRITIC_DIM+BODY_EXTRA_DIM, hand_dim)})
+    critic, added_critic = expand_state_dict(critic_state, algo.central_value_net.state_dict(),
+                                             {CRITIC_FIRST_KEY: (TASK_CRITIC_DIM+BODY_EXTRA_DIM+old_dim, added)})
     algo.central_value_net.load_state_dict(critic, strict=True)
     with Path(checkpoint).open('rb') as f:
         digest = hashlib.file_digest(f, 'sha256').hexdigest()
     return dict(checkpoint=str(Path(checkpoint).resolve()), checkpoint_sha256=digest,
                 source_epoch=int(state.get('epoch', -1)), source_frame=int(state.get('frame', -1)),
                 optimizers='fresh', epoch_and_frame='start at zero', hand_surface_dim=hand_dim,
-                zero_columns=dict(actor_lstm_input=[TASK_ACTOR_DIM, TASK_ACTOR_DIM+hand_dim],
-                                  critic_first_layer=[TASK_CRITIC_DIM+BODY_EXTRA_DIM, TASK_CRITIC_DIM+BODY_EXTRA_DIM+hand_dim]),
+                checkpoint_hand_surface_dim=old_dim, added_inputs=added,
+                normaliser='added channels mean 0 / var 1, count reset to 1' if old_dim else 'fresh',
+                zero_columns=dict(actor_lstm_input=[TASK_ACTOR_DIM+old_dim, TASK_ACTOR_DIM+hand_dim],
+                                  critic_first_layer=[TASK_CRITIC_DIM+BODY_EXTRA_DIM+old_dim,
+                                                      TASK_CRITIC_DIM+BODY_EXTRA_DIM+hand_dim]),
                 new_tensors=added_actor+['critic.'+k for k in added_critic])
 
 
 @torch.no_grad()
 def check_zero_hand_columns(model, critic, obs_dim, state_dim, hand_dim, device, n=64):
-    """The expanded actor and critic ignore the hand inputs at initialization: same
-    outputs for zero and random hand-surface values."""
+    """The expanded actor and critic ignore the added inputs at initialization: same
+    outputs for zero and random values of the last ``hand_dim`` observation inputs (the
+    added part of the hand block)."""
     model.eval()
     critic.eval()
     try:

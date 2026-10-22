@@ -1,3 +1,4 @@
+from pathlib import Path
 """Hand-to-surface observation: geometry against brute force, zero-column surgery."""
 import math
 import unittest
@@ -115,6 +116,54 @@ class SurgeryTests(unittest.TestCase):
         plain = TaskBodyNormalizer(task, 5, True).eval()
         torch.testing.assert_close(y[:, :5+BODY_EXTRA_DIM], plain(x[:, :5+BODY_EXTRA_DIM]))
         self.assertNotIn('hand.running_mean', {k for k in plain.state_dict()})
+
+    def test_expand_initial_weights_from_smaller_hand_block(self):
+        """51-input hand block (job 1414) -> 51 + 12 arm + 51 goal: trained columns kept in
+        place, zero columns appended to the block, normaliser channels appended, count reset."""
+        import tempfile
+        from types import SimpleNamespace
+        from dextrah_lab.wholebody.task_contract import BODY_EXTRA_DIM, TASK_ACTOR_DIM, TASK_CRITIC_DIM
+        old, new = hs.HAND_SURFACE_DIM, hs.hand_surface_dim(True, True)
+        self.assertEqual((old, new), (51, 114))
+        g = torch.Generator().manual_seed(0)
+        def nets(h):
+            actor = {hs.ACTOR_LSTM_KEY: torch.randn(8, TASK_ACTOR_DIM+h+32, generator=g),
+                     'running_mean_std.hand.running_mean': torch.randn(h, dtype=torch.float64, generator=g),
+                     'running_mean_std.hand.running_var': torch.rand(h, dtype=torch.float64, generator=g)+.5,
+                     'running_mean_std.hand.count': torch.tensor(1e9, dtype=torch.float64), 'other': torch.randn(3, generator=g)}
+            critic = {hs.CRITIC_FIRST_KEY: torch.randn(8, TASK_CRITIC_DIM+BODY_EXTRA_DIM+h+32, generator=g),
+                      'model.running_mean_std.hand.running_mean': torch.randn(h, dtype=torch.float64, generator=g),
+                      'model.running_mean_std.hand.running_var': torch.rand(h, dtype=torch.float64, generator=g)+.5,
+                      'model.running_mean_std.hand.count': torch.tensor(1e9, dtype=torch.float64)}
+            return actor, critic
+        ckpt_actor, ckpt_critic = nets(old)
+        model_actor, model_critic = nets(new)
+        class Net:
+            def __init__(self, d): self.d = d
+            def state_dict(self): return self.d
+            def load_state_dict(self, d, strict=True):
+                assert set(d) == set(self.d) and all(d[k].shape == self.d[k].shape for k in d)
+                self.d = d
+        algo = SimpleNamespace(model=Net(model_actor), central_value_net=Net(model_critic))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'ckpt.pth'
+            torch.save({'model': ckpt_actor, 'assymetric_vf_nets': ckpt_critic, 'epoch': 5, 'frame': 9}, path)
+            report = hs.load_expanded_initial_weights(algo, path, new)
+        self.assertEqual((report['checkpoint_hand_surface_dim'], report['added_inputs']), (old, new-old))
+        w, w0 = algo.model.d[hs.ACTOR_LSTM_KEY], ckpt_actor[hs.ACTOR_LSTM_KEY]
+        at = TASK_ACTOR_DIM+old
+        self.assertTrue(torch.equal(w[:, :at], w0[:, :at]))                   # task + old hand columns
+        self.assertTrue(torch.equal(w[:, at:at+new-old], torch.zeros(8, new-old)))
+        self.assertTrue(torch.equal(w[:, at+new-old:], w0[:, at:]))           # SAPG embedding columns
+        c, c0 = algo.central_value_net.d[hs.CRITIC_FIRST_KEY], ckpt_critic[hs.CRITIC_FIRST_KEY]
+        at = TASK_CRITIC_DIM+BODY_EXTRA_DIM+old
+        self.assertTrue(torch.equal(c[:, :at], c0[:, :at]) and torch.equal(c[:, at+new-old:], c0[:, at:]))
+        self.assertTrue(torch.equal(c[:, at:at+new-old], torch.zeros(8, new-old)))
+        m = algo.model.d['running_mean_std.hand.running_mean']
+        self.assertTrue(torch.equal(m[:old], ckpt_actor['running_mean_std.hand.running_mean']) and not bool(m[old:].any()))
+        self.assertTrue(bool((algo.model.d['running_mean_std.hand.running_var'][old:] == 1).all()))
+        self.assertEqual(float(algo.model.d['running_mean_std.hand.count']), 1.)
+        self.assertEqual(float(algo.central_value_net.d['model.running_mean_std.hand.count']), 1.)
 
 
 if __name__ == '__main__':

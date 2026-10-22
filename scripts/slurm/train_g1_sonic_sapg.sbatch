@@ -55,6 +55,8 @@ fi
 if [[ "${MEMORY_TRACE:-0}" == 1 ]]; then extra_args+=(--memory-trace); fi
 if [[ "${LEAN_SAPG_BATCHES:-0}" == 1 ]]; then extra_args+=(--lean-sapg-batches); fi
 if [[ -n "${GRASP_REWARD_SCALE:-}" ]]; then extra_args+=(--grasp-reward-scale "$GRASP_REWARD_SCALE"); fi
+if [[ "${HAND_SURFACE_ARM_LINKS:-0}" == 1 ]]; then extra_args+=(--hand-surface-arm-links); fi
+if [[ "${HAND_SURFACE_GOAL:-0}" == 1 ]]; then extra_args+=(--hand-surface-goal); fi
 if [[ -n "${OBJECT_ENERGY_SCALE:-}" ]]; then extra_args+=(--object-energy-scale "$OBJECT_ENERGY_SCALE"); fi
 if [[ "${BOUNDARY_GC_FREEZE:-0}" == 1 ]]; then extra_args+=(--boundary-gc-freeze); fi
 if [[ -n "${BOUNDARY_GC_INTERVAL:-}" ]]; then
@@ -91,6 +93,11 @@ if [[ "${SGS:-0}" == 1 ]]; then
     if [[ -n "${SGS_EVAL_EVERY:-}" ]]; then extra_args+=(--sgs-eval-every "$SGS_EVAL_EVERY"); fi
     if [[ -n "${SGS_HARVEST_MAX_STEPS:-}" ]]; then extra_args+=(--sgs-harvest-max-steps "$SGS_HARVEST_MAX_STEPS"); fi
     if [[ "${SGS_VALIDATE_SPAWNS:-0}" == 1 ]]; then extra_args+=(--sgs-validate-spawns); fi
+    if [[ -n "${SGS_REHARVEST_EVERY:-}" ]]; then extra_args+=(--sgs-reharvest-every "$SGS_REHARVEST_EVERY"); fi
+    if [[ -n "${SGS_REHARVEST_STEPS:-}" ]]; then extra_args+=(--sgs-reharvest-steps "$SGS_REHARVEST_STEPS"); fi
+    if [[ -n "${SGS_REHARVEST_FRACTION:-}" ]]; then extra_args+=(--sgs-reharvest-fraction "$SGS_REHARVEST_FRACTION"); fi
+    if [[ -n "${SGS_EDIT_FRACTION:-}" ]]; then extra_args+=(--sgs-edit-fraction "$SGS_EDIT_FRACTION"); fi
+    if [[ -n "${SGS_HARD_OBJECT_SHARE:-}" ]]; then extra_args+=(--sgs-hard-object-share "$SGS_HARD_OBJECT_SHARE"); fi
     if [[ -n "${SGS_EVAL_POOL:-}" ]]; then extra_args+=(--sgs-eval-pool "$SGS_EVAL_POOL"); fi
 fi
 if [[ -n "${BEST_METRIC:-}" ]]; then extra_args+=(--best-metric "$BEST_METRIC"); fi
