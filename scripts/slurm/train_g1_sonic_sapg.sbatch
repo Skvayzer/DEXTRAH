@@ -98,6 +98,7 @@ if [[ "${SGS:-0}" == 1 ]]; then
     if [[ -n "${SGS_REHARVEST_FRACTION:-}" ]]; then extra_args+=(--sgs-reharvest-fraction "$SGS_REHARVEST_FRACTION"); fi
     if [[ -n "${SGS_EDIT_FRACTION:-}" ]]; then extra_args+=(--sgs-edit-fraction "$SGS_EDIT_FRACTION"); fi
     if [[ -n "${SGS_HARD_OBJECT_SHARE:-}" ]]; then extra_args+=(--sgs-hard-object-share "$SGS_HARD_OBJECT_SHARE"); fi
+    if [[ -n "${SGS_HELD_MAX_BODY_ACTION:-}" ]]; then extra_args+=(--sgs-held-max-body-action "$SGS_HELD_MAX_BODY_ACTION"); fi
     if [[ -n "${SGS_EVAL_POOL:-}" ]]; then extra_args+=(--sgs-eval-pool "$SGS_EVAL_POOL"); fi
 fi
 if [[ -n "${BEST_METRIC:-}" ]]; then extra_args+=(--best-metric "$BEST_METRIC"); fi

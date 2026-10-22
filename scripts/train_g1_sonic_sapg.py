@@ -138,6 +138,9 @@ def main():
     p.add_argument('--sgs-reharvest-steps', type=int, default=300, help='Env steps of collection per round')
     p.add_argument('--sgs-reharvest-fraction', type=float, default=.2, help='Max share of each held family replaced per round')
     p.add_argument('--sgs-edit-fraction', type=float, default=.5, help='Share of replacements made by goal edits of verified held states')
+    p.add_argument('--sgs-held-max-body-action', type=float, default=0.,
+                   help='Whole body: harvest held states only while SONIC body actions (and history) stay within '
+                        'this bound; saved held states beyond it are replaced on load (0: off)')
     p.add_argument('--sgs-hard-object-share', type=float, default=0.,
                    help='Share of training resets drawn object-first by hardness (InterMimicGen Eq. 9; 0: off)')
     p.add_argument('--sgs-validate-spawns', action='store_true',
@@ -338,7 +341,8 @@ def main():
                 harvest_max_steps=args.sgs_harvest_max_steps, validate_spawns=args.sgs_validate_spawns,
                 eval_pool_size=args.sgs_eval_pool, reharvest_every=args.sgs_reharvest_every,
                 reharvest_steps=args.sgs_reharvest_steps, reharvest_fraction=args.sgs_reharvest_fraction,
-                edit_fraction=args.sgs_edit_fraction, hard_object_share=args.sgs_hard_object_share)
+                edit_fraction=args.sgs_edit_fraction, hard_object_share=args.sgs_hard_object_share,
+                held_max_body_action=args.sgs_held_max_body_action)
             contract['sgs'] = dict(settings=asdict(sgs_settings), paper='arXiv:2610.12465', best_metric=args.best_metric)
         bootstrap_sha = None
         if args.bootstrap is not None:

@@ -119,6 +119,12 @@ class SgsSettings:
     edit_fraction: float = .5            # share of a round's replacements made by goal edits
     edit_parent_success: float = .5      # edits copy held states with at least this success over their tries
     edit_goal_growth: float = .5         # near-goal edits: goal fraction bound grows by this per generation
+    # Whole body (opt-in): held states only while frozen SONIC's executed body action and its
+    # stored history stay within this bound (normalized SONIC action units; 0: off). Policies
+    # pin the right wrist at its joint limit (~21) in ~20-27% of lifted steps; restoring such
+    # states with a reset policy memory destabilized PPO (job 1447). Saved held states outside
+    # the bound are replaced by goal edits of in-bound ones when the state is loaded.
+    held_max_body_action: float = 0.
     # Hardness-weighted object sampling (opt-in).
     hard_object_share: float = 0.        # share of training resets drawn object-first
     hard_object_beta: float = .5
@@ -733,6 +739,10 @@ class MjSgsTask:
         held = env._lifted_object & grasp & slow & finite & (z > table_top+s.table_clearance_m) & ~env.reset_buf & ~self.eval_mask
         if self.wholebody:
             held &= ~env._body_fallen & ~env._body_numerical_failure & ~env._body_history.fresh
+            bound = s.held_max_body_action
+            if bound > 0:
+                action_history = env._body_history.buffers[3]          # (n, frames, 29) executed body actions
+                held &= (action_history.abs().amax((1, 2)) <= bound) & (env._last_body_action.abs().amax(1) <= bound)
         return held
 
     def in_goal_volume(self):
@@ -1044,7 +1054,28 @@ class MjSgsTask:
             self.round = int(state['lineage']['round'])
         if self.settings.validate_spawns and 'reaching' in self.blocks:
             self._revalidate_reaching()
+        if self.wholebody and self.settings.held_max_body_action > 0:
+            self._sanitize_held()
         self._sync_available()
+
+    def _sanitize_held(self):
+        """Replace saved held states whose stored SONIC action history exceeds
+        held_max_body_action by goal edits of in-bound held states of the same family."""
+        bound, report = self.settings.held_max_body_action, {}
+        start = sum(self.hist_dims[:3])
+        for f in HARVESTED:
+            if f not in self.blocks:
+                continue
+            a, b = self.blocks[f]
+            slots = torch.arange(a, b, device=self.device)
+            peak = self.cfg['history'][a:b, :, start:start+self.hist_dims[3]].abs().amax((1, 2))
+            bad = self.filled[a:b] & (peak > bound)
+            good = self.filled[a:b] & ~bad
+            if bool(bad.any()) and bool(good.any()):
+                pick = torch.multinomial(good.float(), int(bad.sum()), replacement=True, generator=self.generator)
+                self._make_edits(f, slots[bad], slots[pick])
+            report[f] = dict(replaced=int(bad.sum()), in_bound=int(good.sum()))
+        print('SGS_SANITIZED '+json.dumps(dict(held_max_body_action=bound, **report)), flush=True)
 
     def _revalidate_reaching(self):
         """Check saved reaching configurations not validated yet; redraw (same asset)

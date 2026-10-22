@@ -199,6 +199,44 @@ class WholeBodySgsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixed_task.load_state_dict(state)
 
+    def test_held_body_action_bound_filters_and_sanitizes(self):
+        env, task = fixed.make_task(make_env(), held_max_body_action=10.)
+        ids = torch.arange(N_ENV)
+        task.before_reset(ids)
+        task.after_reset(ids)
+        observe(env)
+        env._lifted_object[:] = True
+        env.touch_force_w[:, 0, 0] = 1.
+        env.touch_force_w[:, 2, 0] = 1.
+        env.object.data.root_pos_w[:] = torch.tensor([0., .1, 1.])
+        env._body_history.buffers[3][0, :, 28] = 21.4            # wrist pinned at its limit in the history
+        env._last_body_action[2, 27] = -15.                      # ... or in the current action
+        held = task.held_mask()
+        self.assertFalse(bool(held[0]) or bool(held[2]))
+        self.assertTrue(bool(held[1]))
+        # Saved held states beyond the bound are replaced by goal edits of in-bound ones on load.
+        env2, task2 = fixed.make_task(make_env())
+        task2.before_reset(ids)
+        task2.after_reset(ids)
+        observe(env2)
+        env2._lifted_object[:] = True
+        env2.touch_force_w[:, 0, 0] = 1.
+        env2.touch_force_w[:, 2, 0] = 1.
+        env2.object.data.root_pos_w[:] = torch.tensor([0., .1, 1.])
+        while not task2.harvest_done:
+            task2.after_step()
+        a, b = task2.blocks['stable_grasp']
+        start = sum(task2.hist_dims[:3])
+        task2.cfg['history'][a:a+3, :, start+28] = 21.4
+        state = task2.state_dict()
+        env3, task3 = fixed.make_task(make_env(), held_max_body_action=10.)
+        with mock.patch.object(task3.goal_sampling, 'sample_absolute_goal_pose', wraps=task3.goal_sampling.sample_absolute_goal_pose):
+            task3.load_state_dict(state)
+        peak = task3.cfg['history'][a:b, :, start:start+29].abs().amax((1, 2))
+        self.assertTrue(bool((peak <= 10.).all()))
+        self.assertTrue(bool(task3.edited[a:a+3].all()) and not bool(task3.edited[a+3:b].any()))
+        self.assertTrue(bool((task3.sampler.count[a:a+3] == 0).all()))
+
 
 if __name__ == '__main__':
     unittest.main()
