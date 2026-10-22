@@ -77,6 +77,9 @@ def main():
                         'per step (dextrah_lab/wholebody/grasp_reward.py); 0 = compute and log only')
     p.add_argument('--object-energy-scale', type=float, default=0.,
                    help='mjlab: - scale * bounded object-acceleration energy per step (InterMimicGen regularizer)')
+    p.add_argument('--dual-clip', type=float, default=0.,
+                   help='Dual-clip PPO constant C > 1 (caps the actor loss of negative-advantage samples at -C A; '
+                        'dextrah_lab/wholebody/dual_clip.py); 0: rl_games\' loss')
     p.add_argument('--lean-sapg-batches', action='store_true',
                    help='exact lower-peak-memory SAPG batch handling (dextrah_lab/wholebody/sapg_memory.py)')
     p.add_argument('--boundary-gc-freeze', action='store_true',
@@ -402,6 +405,9 @@ def main():
         contract['boundary_gc_interval'] = args.boundary_gc_interval
         contract['boundary_gc_freeze'] = bool(args.boundary_gc_freeze)
         contract['lean_sapg_batches'] = bool(args.lean_sapg_batches)
+        if args.dual_clip:
+            contract['dual_clip'] = dict(c=args.dual_clip, reference='Ye et al. AAAI 2020')
+            contract['intentional_changes'] = contract['intentional_changes'] + ['ppo_dual_clip']
         if args.grasp_reward_scale is not None or args.object_energy_scale:
             from dextrah_lab.wholebody import grasp_reward as gr
             contract['grasp_reward'] = dict(
@@ -626,6 +632,9 @@ def main():
                 report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)
             if args.critic_warmup_epochs:
                 install_critic_warmup(algo, args.critic_warmup_epochs)
+        if args.dual_clip:
+            from dextrah_lab.wholebody.dual_clip import install_dual_clip
+            report['dual_clip'] = install_dual_clip(algo, args.dual_clip)
         if args.lean_sapg_batches:
             from dextrah_lab.wholebody.sapg_memory import install_lean_sapg_batches
             report['lean_sapg_batches'] = install_lean_sapg_batches(algo)

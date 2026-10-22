@@ -54,6 +54,7 @@ if [[ -n "${SIM_WORKER_THREADS:-}" ]]; then
 fi
 if [[ "${MEMORY_TRACE:-0}" == 1 ]]; then extra_args+=(--memory-trace); fi
 if [[ "${LEAN_SAPG_BATCHES:-0}" == 1 ]]; then extra_args+=(--lean-sapg-batches); fi
+if [[ -n "${DUAL_CLIP:-}" ]]; then extra_args+=(--dual-clip "$DUAL_CLIP"); fi
 if [[ -n "${GRASP_REWARD_SCALE:-}" ]]; then extra_args+=(--grasp-reward-scale "$GRASP_REWARD_SCALE"); fi
 if [[ "${HAND_SURFACE_ARM_LINKS:-0}" == 1 ]]; then extra_args+=(--hand-surface-arm-links); fi
 if [[ "${HAND_SURFACE_GOAL:-0}" == 1 ]]; then extra_args+=(--hand-surface-goal); fi
