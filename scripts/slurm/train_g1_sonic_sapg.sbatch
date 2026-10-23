@@ -59,6 +59,9 @@ if [[ -n "${GRASP_REWARD_SCALE:-}" ]]; then extra_args+=(--grasp-reward-scale "$
 if [[ "${HAND_SURFACE_ARM_LINKS:-0}" == 1 ]]; then extra_args+=(--hand-surface-arm-links); fi
 if [[ "${HAND_SURFACE_GOAL:-0}" == 1 ]]; then extra_args+=(--hand-surface-goal); fi
 if [[ -n "${OBJECT_ENERGY_SCALE:-}" ]]; then extra_args+=(--object-energy-scale "$OBJECT_ENERGY_SCALE"); fi
+if [[ -n "${SONIC_ACTION_PENALTY_SCALE:-}" ]]; then extra_args+=(--sonic-action-penalty-scale "$SONIC_ACTION_PENALTY_SCALE"); fi
+if [[ -n "${SONIC_ACTION_BOUND:-}" ]]; then extra_args+=(--sonic-action-bound "$SONIC_ACTION_BOUND"); fi
+if [[ -n "${FALL_PENALTY:-}" ]]; then extra_args+=(--fall-penalty "$FALL_PENALTY"); fi
 if [[ "${BOUNDARY_GC_FREEZE:-0}" == 1 ]]; then extra_args+=(--boundary-gc-freeze); fi
 if [[ -n "${BOUNDARY_GC_INTERVAL:-}" ]]; then
     extra_args+=(--boundary-gc-interval "$BOUNDARY_GC_INTERVAL")

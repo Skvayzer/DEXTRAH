@@ -151,6 +151,7 @@ class G1SonicTouchMjEnv:
         self._sgs = None
         self._fast_step = False
         self._grasp_reward = None
+        self._body_penalty = None
         self.episode_length_buf = torch.zeros(num_envs, device=device, dtype=torch.long)
         self.reset_terminated = torch.zeros(num_envs, device=device, dtype=torch.bool)
         self.reset_time_outs = torch.zeros_like(self.reset_terminated)
@@ -370,6 +371,15 @@ class G1SonicTouchMjEnv:
         self._contacts_cfg['palm_body'] = int(self.sim.mj_model.body(f'robot/{self.robot.body_names[self._palm_body_id]}').id)
         self._grasp_reward = GraspReward(self, scale, energy_scale)
         return self._grasp_reward
+
+    def enable_body_penalty(self, action_scale=0., action_bound=8., fall_penalty=0.):
+        """Opt-in penalties on out-of-range frozen-SONIC body actions and robot falls
+        (dextrah_lab/wholebody/body_penalty.py). Whole body only."""
+        from dextrah_lab.wholebody.body_penalty import BodyPenalty
+        if self._fixed_body:
+            raise ValueError('Body penalties apply to the frozen-SONIC whole body')
+        self._body_penalty = BodyPenalty(self, action_scale, action_bound, fall_penalty)
+        return self._body_penalty
 
     def enable_fast_step(self):
         """Opt-in faster env.step with the same simulation and observations (checked by
@@ -628,6 +638,14 @@ class G1SonicTouchMjEnv:
             if bool(lifted.any()):
                 self.extras['grasp/C_opp_lifted'] = logs['C_opp'][lifted].mean()
                 self.extras['grasp/opposed_contact_rate_lifted'] = (logs['C_opp'][lifted] > .5).float().mean()
+        if self._body_penalty is not None:
+            # Opt-in SONIC action / fall penalties (enable_body_penalty).
+            extra, terms, logs = self._body_penalty()
+            reward = reward+extra
+            self._reward_terms.update(terms)
+            self._reward_terms['total_reward'] = reward
+            for k, v in logs.items():
+                self.extras[f'body/{k}'] = v.mean()
         logging_utils.log_step_metrics(self)
         if self.reset_buf.any():
             self.extras['final_observation'] = {'critic': obs_utils.build_critic_observation(self, reward=reward).clone()}

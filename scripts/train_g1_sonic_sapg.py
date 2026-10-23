@@ -75,6 +75,10 @@ def main():
     p.add_argument('--grasp-reward-scale', type=float, default=None,
                    help='mjlab: + scale * InterMimicGen contact-prioritized grasp score with thumb-finger opposition '
                         'per step (dextrah_lab/wholebody/grasp_reward.py); 0 = compute and log only')
+    p.add_argument('--sonic-action-penalty-scale', type=float, default=0.,
+                   help='mjlab whole body: - scale * sum_j max(|SONIC action_j| - bound, 0) per step (body_penalty.py)')
+    p.add_argument('--sonic-action-bound', type=float, default=8., help='Bound for --sonic-action-penalty-scale')
+    p.add_argument('--fall-penalty', type=float, default=0., help='mjlab whole body: - value on a robot-fall termination')
     p.add_argument('--object-energy-scale', type=float, default=0.,
                    help='mjlab: - scale * bounded object-acceleration energy per step (InterMimicGen regularizer)')
     p.add_argument('--dual-clip', type=float, default=0.,
@@ -405,6 +409,13 @@ def main():
         contract['boundary_gc_interval'] = args.boundary_gc_interval
         contract['boundary_gc_freeze'] = bool(args.boundary_gc_freeze)
         contract['lean_sapg_batches'] = bool(args.lean_sapg_batches)
+        if args.sonic_action_penalty_scale or args.fall_penalty:
+            from dextrah_lab.wholebody import body_penalty
+            contract['body_penalty'] = dict(sonic_action_scale=args.sonic_action_penalty_scale,
+                                            sonic_action_bound=args.sonic_action_bound, fall_penalty=args.fall_penalty,
+                                            definition=body_penalty.__doc__.strip())
+            contract['intentional_changes'] = contract['intentional_changes'] + (
+                ['sonic_action_penalty'] if args.sonic_action_penalty_scale else []) + (['fall_penalty'] if args.fall_penalty else [])
         if args.dual_clip:
             contract['dual_clip'] = dict(c=args.dual_clip, reference='Ye et al. AAAI 2020')
             contract['intentional_changes'] = contract['intentional_changes'] + ['ppo_dual_clip']
@@ -495,6 +506,8 @@ def main():
                                     mujoco_cfg=mj_settings['mujoco_options'])
             if args.grasp_reward_scale is not None or args.object_energy_scale:
                 env.enable_grasp_reward(args.grasp_reward_scale or 0., args.object_energy_scale)
+            if args.sonic_action_penalty_scale or args.fall_penalty:
+                env.enable_body_penalty(args.sonic_action_penalty_scale, args.sonic_action_bound, args.fall_penalty)
             if args.mj_fast_step:
                 env.enable_fast_step()
             if args.mj_nan_capture:
