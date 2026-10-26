@@ -129,6 +129,9 @@ def main():
                    help='1: finger stabilizer only (latent residual 0, adapter frozen); 2: + bounded arm residual')
     p.add_argument('--carry-level', type=int, default=None, help='Initial speed-curriculum level (default 0, or the resumed state)')
     p.add_argument('--carry-settings', default='{}', help='JSON overrides of CarrySettings fields')
+    p.add_argument('--carry-state', type=Path, default=None,
+                   help='X.carry.pt to continue (sampler outcome windows + curriculum level) when starting from '
+                        '--init-weights, e.g. stage 2 from a stage-1 checkpoint (a resume loads it automatically)')
     p.add_argument('--init-weights', type=Path,
                    help='Load actor/critic weights only (fresh optimizers, epoch 0) from a same-architecture checkpoint')
     p.add_argument('--critic-warmup-epochs', type=int, default=0,
@@ -545,7 +548,11 @@ def main():
                                    held_settings=held_settings, clips_path=args.carry_clips, num_envs=args.num_envs,
                                    device=args.device, nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
                                    mujoco_cfg=mj_settings['mujoco_options'])
-                carry_file = args.resume.with_suffix('.carry.pt') if args.resume else None
+                if args.carry_state is not None and args.resume:
+                    raise ValueError('--carry-state is for --init-weights starts; a resume loads its own X.carry.pt')
+                if args.carry_state is not None and not args.carry_state.exists():
+                    raise FileNotFoundError(args.carry_state)
+                carry_file = args.carry_state or (args.resume.with_suffix('.carry.pt') if args.resume else None)
                 if carry_file is not None and carry_file.exists():
                     env._sgs.load_state_dict(torch.load(carry_file, map_location='cpu', weights_only=False))
                     if args.carry_level is not None:
