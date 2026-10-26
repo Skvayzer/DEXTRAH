@@ -26,14 +26,15 @@ import math
 
 import torch
 
-from isaaclab.utils.math import matrix_from_quat, quat_conjugate, quat_mul, yaw_quat
+from .compat import install, p2p
+install()                                   # isaaclab.utils.math etc. without Isaac Sim (as mj/env.py)
+from isaaclab.utils.math import matrix_from_quat, quat_conjugate, quat_mul, yaw_quat  # noqa: E402
 from dextrah_lab.wholebody.carry import MovingFrame, field_slice, quat_from_yaw, transform_clean_observation, yaw_of
 from dextrah_lab.wholebody.carry_compose import (LEVELS, CarrySettings, ClipSequencer, Curriculum, WalkingClips,
                                                  body_joint_masks, carry_reward_v2, compose_body, finger_command,
                                                  hand_command)
-from dextrah_lab.wholebody.contract import BODY_JOINTS
-from .compat import p2p
-from .env import G1SonicTouchMjEnv
+from dextrah_lab.wholebody.contract import BODY_JOINTS  # noqa: E402
+from .env import G1SonicTouchMjEnv  # noqa: E402
 
 obs_utils = p2p('obs_utils')
 TABLE_PARKING_Z = -2.
