@@ -753,7 +753,7 @@ def main():
         start_frame, start_time = int(algo.frame), time.monotonic()
         torch.cuda.reset_peak_memory_stats()
         print('SONIC_SAPG_TRAINING_START '+json.dumps(dict(envs=args.num_envs, groups=6,
-            actions=70 if frozen else 35, task_reward='unchanged', touch_hz=70,
+            actions=70 if frozen else 35, task_reward='carry (replaces reposing)' if args.mj_carry else 'unchanged', touch_hz=70,
             body_decoder_trainable=not frozen, pretrained_sonic_sha256=WEIGHTS_SHA256)), flush=True)
         # 528 died midway through its 26th watchdog traceback ("File ???").
         # Background frame walking is a suspected trigger, not a proven cause.
