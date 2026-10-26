@@ -290,7 +290,9 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         lo, hi = math.log(s.mass_scale[0]), math.log(s.mass_scale[1])
         scale = torch.exp(lo+(hi-lo)*torch.rand(len(ids), device=self.device, generator=g))
         asset = self._object_asset_index_per_env[ids]
-        mass = held.tab['mass'][asset]*scale
+        base = held.tab['mass'][asset]
+        mass = torch.minimum(base*scale, torch.clamp(base, min=s.mass_max_kg))
+        scale = mass/base
         m.body_mass[ids, body] = mass
         m.body_inertia[ids, body] = held.tab['inertia'][asset]*scale[:, None]
         if s.com_offset_m > 0:

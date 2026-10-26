@@ -55,7 +55,9 @@ class CarrySettings:
     drop_steps: int = 6                 # ... for this many policy steps, or object below drop_floor_m
     drop_floor_m: float = .25
     retain_m: float = .05               # success: retained within this at the end (DexCompose d_ret)
-    mass_scale: tuple = (.5, 3.)        # object mass / inertia scale per episode (log-uniform)
+    mass_scale: tuple = (.7, 2.)        # object mass / inertia scale per episode (log-uniform) ...
+    mass_max_kg: float = .6             # ... capped at this mass (job 1551: a 0.89 kg hammer (2.4 x 0.37 kg) made the
+                                        # MuJoCo Warp float32 solver non-finite in 256/256 repeats, 0.71 kg and less in 0/256)
     com_offset_m: float = .02           # object COM shift per axis (uniform)
     push_probability: float = 1/120.    # per policy step: a push to the right wrist starts
     push_force_n: float = 15.
