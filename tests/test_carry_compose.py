@@ -4,7 +4,7 @@ import unittest
 import torch
 
 from dextrah_lab.wholebody.carry import WalkingClips
-from dextrah_lab.wholebody.carry_compose import (LEVELS, CarrySettings, ClipSequencer, Curriculum, body_joint_masks,
+from dextrah_lab.wholebody.carry_compose import (LEVELS, CarrySettings, ClipSequencer, Curriculum, StartWindowRate, body_joint_masks,
                                                  carry_reward_v2, clips_up_to, compose_body, finger_command, hand_command)
 from dextrah_lab.wholebody.contract import BODY_JOINTS
 
@@ -89,6 +89,31 @@ class CarryComposeTests(unittest.TestCase):
         c2 = Curriculum(s, 'cpu'); c2.load_state_dict(state)
         self.assertEqual(c2.level, 1)
         self.assertEqual(c2.count, 0)           # a resume restarts the promotion window
+
+    def test_start_window_rate_is_unbiased_by_completion_order(self):
+        L = 100
+        r = StartWindowRate(L, 'cpu', bucket=10)
+        # 10 episodes start at step 0: 4 fail early (finish at 20), 6 succeed at 100.
+        r.add(torch.zeros(4, dtype=torch.long), torch.zeros(4, dtype=torch.bool))
+        r.add(torch.zeros(6, dtype=torch.long), torch.ones(6, dtype=torch.bool))
+        self.assertEqual(r.rate(90)[1], 0)                   # starts in [-110, -10): none complete yet
+        rate, n = r.rate(150)                                # starts in [-50, 50): all finished by step 100
+        self.assertEqual(n, 10)
+        self.assertAlmostEqual(rate, .6)
+        # Bucket 42 (start 420) reuses the slot of bucket 0 (42 slots): the step-0 starts are dropped.
+        r.add(torch.full((3,), 420, dtype=torch.long), torch.ones(3, dtype=torch.bool))
+        self.assertEqual(r.rate(600), (1., 3.))
+        self.assertEqual(r.rate(150)[1], 0)
+
+    def test_exact_curriculum_promotion(self):
+        s = CarrySettings(promote_success=.75)
+        c = Curriculum(s, 'cpu', num_envs=4, episode_steps=100)
+        start = torch.zeros(8, dtype=torch.long)
+        self.assertFalse(c.record_exact(start, torch.ones(8, dtype=torch.bool), 150))   # too early (< 2L at level)
+        self.assertTrue(c.record_exact(torch.full((8,), 60, dtype=torch.long), torch.ones(8, dtype=torch.bool), 210))
+        self.assertEqual(c.level, 1)
+        c2 = Curriculum(s, 'cpu', num_envs=4, episode_steps=100)
+        self.assertFalse(c2.record_exact(start, torch.tensor([True]*5+[False]*3), 210))  # 62.5% < 75%
 
     def test_reward_warmup_and_hold(self):
         s = CarrySettings()

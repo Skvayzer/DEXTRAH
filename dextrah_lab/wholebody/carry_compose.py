@@ -228,6 +228,45 @@ class ClipSequencer:
         return self.clips.reference(self.clip, (t-self.t0).clamp(min=0), self.heading)
 
 
+class StartWindowRate:
+    """Exact success rate of the episodes that STARTED in [now - 2L, now - L) env steps (L = max
+    episode length): all of them have finished, so the rate has no completion-order bias.
+    (Recency windows of finished episodes are biased whenever starts are synchronised: run start,
+    resume, and every later wave of equal-length successful episodes.) Start-step buckets."""
+
+    def __init__(self, episode_steps, device, bucket=60):
+        self.L, self.B = int(episode_steps), int(bucket)
+        self.n = 4*self.L//self.B+2
+        self.ids = torch.full((self.n,), -1, dtype=torch.long, device=device)
+        self.succ = torch.zeros(self.n, device=device)
+        self.tot = torch.zeros(self.n, device=device)
+
+    def reset(self):
+        self.ids.fill_(-1)
+        self.succ.zero_()
+        self.tot.zero_()
+
+    def add(self, start_steps, success):
+        if start_steps.numel() == 0:
+            return
+        b = torch.div(start_steps, self.B, rounding_mode='floor')
+        slot = b % self.n
+        stale = self.ids[slot] != b
+        if bool(stale.any()):
+            s = torch.unique(slot[stale])
+            self.succ[s], self.tot[s] = 0., 0.
+            self.ids[slot[stale]] = b[stale]
+        self.succ.index_add_(0, slot, success.float())
+        self.tot.index_add_(0, slot, torch.ones_like(success, dtype=torch.float))
+
+    def rate(self, now):
+        """(success rate, episodes) over starts in [now - 2L, now - L); (nan, 0) if none."""
+        lo, hi = (now-2*self.L)//self.B, (now-self.L)//self.B
+        m = (self.ids >= lo) & (self.ids < hi)
+        n = float(self.tot[m].sum())
+        return (float(self.succ[m].sum())/n if n else float('nan')), n
+
+
 class Curriculum:
     """Speed levels (LEVELS); promotion at a rolling training success over finished episodes.
 
@@ -238,13 +277,30 @@ class Curriculum:
     (``burn_in_until``, in env steps; the caller filters), promotion needs ``min_episodes`` of them
     (default 2 x num_envs), and a resume restarts the window and the burn-in (level kept)."""
 
-    def __init__(self, settings, device, num_envs=0):
+    def __init__(self, settings, device, num_envs=0, episode_steps=None):
         self.s = settings
         self.level = settings.level
         self.window = torch.zeros(settings.promote_window, device=device)
         self.count = 0
         self.min_episodes = settings.promote_min_episodes or 2*num_envs
         self.burn_in_until = 0          # env step; set by the env (episode length after start / promotion)
+        # Exact per-start rate (StartWindowRate) when the env passes its episode length: promotion
+        # needs it >= promote_success over >= num_envs starts, and 2 episode lengths at the level.
+        self.exact = StartWindowRate(episode_steps, device) if episode_steps else None
+        self.min_starts = max(num_envs, 1)
+        self.level_since = 0
+
+    def record_exact(self, start_steps, success, now):
+        """Exact-rate path (StartWindowRate); returns True on promotion."""
+        self.exact.add(start_steps, success)
+        rate, n = self.exact.rate(now)
+        if (now-self.level_since >= 2*self.exact.L and n >= self.min_starts and rate >= self.s.promote_success
+                and self.level < len(LEVELS)-1):
+            self.level += 1
+            self.level_since = now
+            self.exact.reset()
+            return True
+        return False
 
     def record(self, success):
         n = success.numel()
@@ -262,7 +318,10 @@ class Curriculum:
             return True
         return False
 
-    def rate(self):
+    def rate(self, now=None):
+        if self.exact is not None and now is not None:
+            r, n = self.exact.rate(now)
+            return r if n else 0.
         n = min(self.count, len(self.window))
         return float(self.window[:n].mean()) if n else 0.
 
@@ -274,3 +333,6 @@ class Curriculum:
         self.level = int(state['level'])
         self.window.zero_()
         self.count = 0
+        if self.exact is not None:
+            self.exact.reset()
+        self.level_since = 0

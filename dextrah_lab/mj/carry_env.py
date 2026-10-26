@@ -80,6 +80,24 @@ class _Rolling:
         return self.values[:self.size].mean() if self.size else torch.zeros((), device=self.values.device)
 
 
+class _ExactScore:
+    """Best-checkpoint statistic (sgs/best.py interface): curriculum level + exact evaluation success
+    rate (StartWindowRate); 'full' once enough evaluation episodes are in its start window."""
+
+    def __init__(self, env, minimum=200):
+        self.env, self.minimum = env, minimum
+        self.values = [0.]
+
+    @property
+    def size(self):
+        _, n = self.env._sgs.eval_exact.rate(self.env._env_steps)
+        return 1 if n >= self.minimum else 0
+
+    def mean(self):
+        r, _ = self.env._sgs.eval_exact.rate(self.env._env_steps)
+        return torch.tensor(float(self.env._curriculum.level)+(0. if r != r else r))
+
+
 class CarryStarts:
     """env._sgs hook: holding-state starts, success-guided over the holding states, outcomes and the
     speed curriculum. Evaluation envs (every ``eval_every``-th) draw holding states uniformly."""
@@ -103,8 +121,12 @@ class CarryStarts:
         self.eval_mask[::eval_every] = True
         self.window = window
         self.train_stats = {k: _Rolling(window, d) for k in OUTCOMES}
-        self.eval_stats = {k: _Rolling(window, d) for k in OUTCOMES+('carry_score',)}
+        self.eval_stats = {k: _Rolling(window, d) for k in OUTCOMES}
+        self.eval_stats['carry_score'] = _ExactScore(env)
         self.carry_seconds = _Rolling(window, d)
+        from dextrah_lab.wholebody.carry_compose import StartWindowRate
+        steps = int(round(env.s.episode_s/env.step_dt))
+        self.train_exact, self.eval_exact = StartWindowRate(steps, d), StartWindowRate(steps, d)
         self.assets = c['asset'][self.configs]
         self.objects_covered = int(torch.unique(self.assets).numel())
 
@@ -161,7 +183,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._sgs = CarryStarts(self, self._held, generator=self._carry_generator)
         self.clips = WalkingClips.load(clips_path, d)
         self._seq = ClipSequencer(self.clips, carry, n, d, generator=self._carry_generator)
-        self._curriculum = Curriculum(carry, d, num_envs=n)
+        self._curriculum = Curriculum(carry, d, num_envs=n, episode_steps=int(round(carry.episode_s/self.step_dt)))
         self._standing_q = self._reference_q.clone()
         self._arm_ids = torch.tensor([i for i, name in enumerate(BODY_JOINTS)
                                       if any(p in name for p in ('shoulder', 'elbow', 'wrist'))], device=d)
@@ -570,15 +592,16 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         tr = ~ev & credited
         if bool(tr.any()):
             starts.sampler.record(k[tr], success[tr])
-            same = tr & (self._start_level[ids] == self._curriculum.level) & (self._start_step[ids] >= self._curriculum.burn_in_until)
-            if self._curriculum.record(success[same]):
+            same = tr & (self._start_level[ids] == self._curriculum.level)
+            if self._curriculum.record_exact(self._start_step[ids][same], success[same], self._env_steps):
                 self._seq.set_level(self._curriculum.level)
-                self._curriculum.burn_in_until = self._env_steps+int(round(s.episode_s/self.step_dt))
                 print(f'CARRY_LEVEL {self._curriculum.level} max_speed={LEVELS[self._curriculum.level]}', flush=True)
         for name, value in out.items():
             starts.train_stats[name].add(value[~ev])
             starts.eval_stats[name].add(value[ev])
-        starts.eval_stats['carry_score'].add((success[ev].float()+self._curriculum.level))
+        starts.train_exact.add(self._start_step[ids][tr], success[tr])
+        evc = ev & credited
+        starts.eval_exact.add(self._start_step[ids][evc], success[evc])
         starts.carry_seconds.add(t)
 
     def _carry_publish(self):
@@ -587,9 +610,13 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         for name in OUTCOMES:
             self.extras[f'carry/train_{name}'] = starts.train_stats[name].mean()
             self.extras[f'carry/eval_{name}'] = starts.eval_stats[name].mean()
-        self.extras['carry/eval_score'] = starts.eval_stats['carry_score'].mean()
+        self.extras['carry/eval_score'] = starts.eval_stats['carry_score'].mean().to(self.device)
         self.extras['carry/level'] = torch.tensor(float(self._curriculum.level), device=self.device)
-        self.extras['carry/level_success'] = torch.tensor(self._curriculum.rate(), device=self.device)
+        self.extras['carry/level_success'] = torch.tensor(self._curriculum.rate(self._env_steps), device=self.device)
+        for name, rate in (('train', starts.train_exact), ('eval', starts.eval_exact)):
+            r, n = rate.rate(self._env_steps)
+            if n:
+                self.extras[f'carry/{name}_success_exact'] = torch.tensor(r, device=self.device)
         self.extras['carry/episode_seconds'] = starts.carry_seconds.mean()
 
     def carry_contract(self):
