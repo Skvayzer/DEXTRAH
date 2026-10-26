@@ -28,6 +28,11 @@ def mjlab_task_config(args):
     from dextrah_lab.wholebody.task_contract import TOUCH_RUN, verify_task_contract
     checkpoint = args.resume or args.init_weights
     parent = checkpoint.parent.parent if checkpoint else args.task_run
+    parent_contract = parent/'task_contract.json'
+    if parent_contract.exists() and 'carry_mjlab' in json.loads(parent_contract.read_text()):
+        # A carry run's task is its source manipulation run's (carry changes live in the contract;
+        # job 1549 saved its env-modified termination settings, which fail the task check).
+        parent = Path(json.loads(parent_contract.read_text())['task_config_source']).parent.parent
     cfg = load_run_cfg(parent)
     cfg.scene.num_envs = args.num_envs
     cfg.bps_artifact_dir = str(args.output/'bps')

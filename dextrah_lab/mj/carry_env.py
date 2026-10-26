@@ -147,9 +147,11 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             raise ValueError('The carry env masks the goal-surface part of the hand-surface block: enable it')
         install_moving_frame_observations()
         self._carry_ready = False
-        cfg.termination.max_consecutive_successes = 0
-        cfg.episode_length_s = carry.episode_s+5.          # the carry timer ends episodes first
+        # The task config is the manipulation task's and is saved with the run: leave it unchanged.
+        # Success counting cannot trigger (the goal is parked 50 m up) and the carry timer ends
+        # episodes; the task timeout is moved beyond it on the env, not in the config.
         super().__init__(cfg, sonic=sonic, seed=seed, **kwargs)
+        self.max_episode_length = math.ceil((carry.episode_s+5.)/self.step_dt)
         from dextrah_lab.sgs.mj_task import MjSgsTask
         self.s = carry
         n, d = self.num_envs, self.device
