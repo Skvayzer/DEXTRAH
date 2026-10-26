@@ -507,8 +507,14 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             self.extras['carry/walk_body_speed'] = body_velocity[walking, :2].norm(dim=-1).mean()
         self.extras['carry/offset_error_cm'] = 100*self._offset_error[active].mean() if bool(active.any()) else self._offset_error.mean()*0
         if bool(active.any()):
-            self.extras['carry/slip_linear_ms'] = self._rel_vel_palm[active, :3].norm(dim=-1).mean()
-            self.extras['carry/slip_angular_rads'] = self._rel_vel_palm[active, 3:].norm(dim=-1).mean()
+            lin, ang = self._rel_vel_palm[:, :3].norm(dim=-1), self._rel_vel_palm[:, 3:].norm(dim=-1)
+            self.extras['carry/slip_linear_ms'] = lin[active].mean()
+            self.extras['carry/slip_angular_rads'] = ang[active].mean()
+            held = active & (self._offset_error < .03)      # holding (within 3 cm of the hold position)
+            if bool(held.any()):
+                self.extras['carry/slip_linear_held_median'] = lin[held].median()
+                self.extras['carry/slip_angular_held_median'] = ang[held].median()
+                self.extras['carry/slip_angular_held_p90'] = ang[held].quantile(.9)
         self.extras['carry/finger_residual_abs'] = self._finger_residual.abs().mean()
         self.extras['carry/latent_residual_abs'] = self._latent_residual.abs().mean()
         self.extras['carry/table_parked'] = self._table_parked.float().mean()
