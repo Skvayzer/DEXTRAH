@@ -159,7 +159,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._sgs = CarryStarts(self, self._held, generator=self._carry_generator)
         self.clips = WalkingClips.load(clips_path, d)
         self._seq = ClipSequencer(self.clips, carry, n, d, generator=self._carry_generator)
-        self._curriculum = Curriculum(carry, d)
+        self._curriculum = Curriculum(carry, d, num_envs=n)
         self._standing_q = self._reference_q.clone()
         self._arm_ids = torch.tensor([i for i, name in enumerate(BODY_JOINTS)
                                       if any(p in name for p in ('shoulder', 'elbow', 'wrist'))], device=d)
@@ -196,6 +196,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._drop_count = z(dtype=torch.long)
         self._dropped = torch.zeros(n, dtype=torch.bool, device=d)
         self._start_fail = torch.zeros(n, dtype=torch.bool, device=d)
+        self._start_level = z(dtype=torch.long)                  # curriculum level the episode started at
         self._offset_error = z()
         self._finger_residual, self._latent_residual = z(6), z(64)
         self._ref_quat = z(10, 4); self._ref_quat[..., 0] = 1.
@@ -314,6 +315,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._drop_count[ids] = 0
         self._dropped[ids] = False
         self._start_fail[ids] = False
+        self._start_level[ids] = self._curriculum.level
         self._finger_residual[ids] = 0.
         self._latent_residual[ids] = 0.
         self._push_steps[ids] = 0
@@ -546,7 +548,8 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         tr = ~ev & credited
         if bool(tr.any()):
             starts.sampler.record(k[tr], success[tr])
-            if self._curriculum.record(success[tr]):
+            same = tr & (self._start_level[ids] == self._curriculum.level)
+            if self._curriculum.record(success[same]):
                 self._seq.set_level(self._curriculum.level)
                 print(f'CARRY_LEVEL {self._curriculum.level} max_speed={LEVELS[self._curriculum.level]}', flush=True)
         for name, value in out.items():

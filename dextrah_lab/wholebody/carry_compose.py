@@ -62,6 +62,7 @@ class CarrySettings:
     push_s: tuple = (.1, .2)
     promote_success: float = .75        # curriculum: next level at this rolling training success
     promote_window: int = 4096
+    promote_min_episodes: int = 0       # episodes started at the level before promotion (0: 2 x num_envs)
     level: int = 0
     w_hold: float = 1.
     sigma_hold_m: float = .03
@@ -225,13 +226,19 @@ class ClipSequencer:
 
 
 class Curriculum:
-    """Speed levels (LEVELS); promotion at a rolling training success over finished episodes."""
+    """Speed levels (LEVELS); promotion at a rolling training success over finished episodes.
 
-    def __init__(self, settings, device):
+    Only episodes that started at the current level count (the caller filters), and promotion
+    needs ``min_episodes`` of them (default 2 x num_envs): all envs start together, so the first
+    finished episodes are early failures followed by a burst of full-length successes, and a
+    short recency window right after a start or a promotion overstates the success rate."""
+
+    def __init__(self, settings, device, num_envs=0):
         self.s = settings
         self.level = settings.level
         self.window = torch.zeros(settings.promote_window, device=device)
         self.count = 0
+        self.min_episodes = settings.promote_min_episodes or 2*num_envs
 
     def record(self, success):
         n = success.numel()
@@ -241,7 +248,8 @@ class Curriculum:
         idx = (torch.arange(n, device=w.device)+self.count) % len(w)
         w[idx] = success.float()
         self.count += n
-        if self.count >= len(w) and float(w.mean()) >= self.s.promote_success and self.level < len(LEVELS)-1:
+        if (self.count >= max(len(w), self.min_episodes) and float(w.mean()) >= self.s.promote_success
+                and self.level < len(LEVELS)-1):
             self.level += 1
             self.window.zero_()
             self.count = 0

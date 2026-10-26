@@ -73,6 +73,12 @@ class CarryComposeTests(unittest.TestCase):
         seq.update(torch.full((2,), 5.), torch.zeros(2))
         self.assertTrue(bool((seq.clip == seq.idle).all()))
 
+    def test_curriculum_needs_enough_episodes(self):
+        s = CarrySettings(promote_window=8, promote_success=.75)
+        c = Curriculum(s, 'cpu', num_envs=10)          # 2 x 10 episodes before any promotion
+        self.assertFalse(c.record(torch.tensor([True]*19)))
+        self.assertTrue(c.record(torch.tensor([True])))
+
     def test_curriculum_promotion(self):
         s = CarrySettings(promote_window=8, promote_success=.75)
         c = Curriculum(s, 'cpu')
