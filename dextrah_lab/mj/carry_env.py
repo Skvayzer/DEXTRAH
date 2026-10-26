@@ -289,7 +289,20 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         mass = held.tab['mass'][asset]*scale
         m.body_mass[ids, body] = mass
         m.body_inertia[ids, body] = held.tab['inertia'][asset]*scale[:, None]
-        m.body_ipos[ids, body] = (torch.rand(len(ids), 3, device=self.device, generator=g)*2-1)*s.com_offset_m
+        if s.com_offset_m > 0:
+            # COM shift delta (object link frame) without touching body_ipos (MuJoCo flags bodies with
+            # their inertial frame at the body origin as "simple" at compile time; a runtime body_ipos
+            # gave non-finite states on the first step, job 1545). The body frame stays at the COM:
+            # the geometry moves by -delta in the body frame and the body origin by +R delta, so the
+            # geometry stays where the holding state had it; com_offset keeps the reported link pose.
+            from isaaclab.utils.math import quat_apply
+            delta = (torch.rand(len(ids), 3, device=self.device, generator=g)*2-1)*s.com_offset_m
+            rows, cols = ids[:, None], held.geoms[None, :]
+            m.geom_pos[rows, cols] = held.tab['pos'][asset]-delta[:, None]
+            self.object.com_offset[ids] = held.tab['com'][asset]+delta
+            qadr = self.object._free_qadr
+            quat = self.sim.data.qpos[ids, qadr+3:qadr+7]
+            self.sim.data.qpos[ids, qadr:qadr+3] += quat_apply(quat, delta)
         self.object.default_mass[ids, 0] = mass
         self._object_mass[ids, 0] = mass
         # Episode state.
