@@ -80,7 +80,7 @@ if [[ "${CARRY:-0}" == 1 ]]; then
 fi
 if [[ "${MJ_CARRY:-0}" == 1 ]]; then
     # mjlab carry expert (dextrah_lab/mj/carry_env.py, after DexCompose)
-    python -m pytest -q tests/test_carry_compose.py
+    python -m unittest discover -s tests -p test_carry_compose.py
     extra_args+=(--mj-carry --carry-clips "${CARRY_CLIPS:?Set CARRY_CLIPS}" --carry-holding-state "${CARRY_HOLDING_STATE:?Set CARRY_HOLDING_STATE}")
     extra_args+=(--carry-stage "${CARRY_STAGE:-1}" --carry-episode-seconds "${CARRY_EPISODE_SECONDS:-20}")
     extra_args+=(--critic-warmup-epochs "${CRITIC_WARMUP_EPOCHS:-0}" --carry-settings "${CARRY_SETTINGS:-{\}}")
