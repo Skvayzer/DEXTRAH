@@ -62,10 +62,22 @@ def main():
     print('GOAL_MASKED', float(obs['policy'][:, env._goal_policy].abs().max()), float(obs['policy'][:, env._goal_surface_policy].abs().max()))
     actions = torch.zeros(env.num_envs, 70, device=args.device)
     ends = []
+    from isaaclab.utils.math import quat_conjugate, quat_mul
+    def rel_quat():
+        _, palm = env._palm()
+        return quat_mul(quat_conjugate(palm[:, 3:7]), env.object.data.root_quat_w)
+    prev_q, fd, inst = rel_quat(), [], []
     for step in range(args.steps):
         obs, reward, terminated, truncated, info = env.step(actions)
         assert torch.isfinite(obs['policy']).all() and torch.isfinite(reward).all()
         done = terminated | truncated
+        q = rel_quat()
+        dq = quat_mul(q, quat_conjugate(prev_q))
+        angle = 2*torch.atan2(dq[:, 1:].norm(dim=-1), dq[:, 0].abs())
+        held = (~done) & (env._offset_error < .03) & (env._episode_time() > .6)
+        if bool(held.any()):
+            fd.append((angle/env.step_dt)[held]); inst.append(env._rel_vel_palm[held, 3:].norm(dim=-1))
+        prev_q = q
         if step % 30 == 0:
             t = env._episode_time()
             print(f'STEP {step} t={t[:4].tolist()} phase={env._seq.phase(t)[:6].tolist()} parked={env._table_parked[:6].int().tolist()} '
@@ -75,6 +87,10 @@ def main():
             ends.append(done.nonzero().flatten().tolist())
     extras = {k: float(v) for k, v in env.extras.items() if k.startswith('carry/') and torch.is_tensor(v) and v.numel() == 1}
     print('CARRY_METRICS '+json.dumps(extras, indent=1), flush=True)
+    if fd:
+        fd, inst = torch.cat(fd), torch.cat(inst)
+        print('HELD_ANGULAR fd_median %.3f fd_p90 %.3f | instantaneous_median %.3f p90 %.3f (rad/s, %d samples)' % (
+            fd.median(), fd.quantile(.9), inst.median(), inst.quantile(.9), fd.numel()), flush=True)
     print('CHECK_CARRY_ENV_OK', flush=True)
 
 

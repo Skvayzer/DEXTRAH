@@ -72,7 +72,8 @@ class CarrySettings:
     w_track_yaw: float = .25
     track_sigma: float = .05
     k_slip_lin: float = .5
-    k_slip_ang: float = .05
+    k_slip_ang: float = .01             # held objects wobble ~2.8 rad/s (median, finite-difference = instantaneous,
+                                        # zero-action check 1559): mostly contact chatter, 0.05 made it -0.17/step
     alpha_residual: float = .001
     k_force: float = .01
     force_max_n: float = 15.
