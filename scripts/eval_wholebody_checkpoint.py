@@ -99,6 +99,7 @@ def build_policy(env, checkpoint, contract, device):
     payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
     payload = payload[0] if 0 in payload else payload
     model.load_state_dict(payload['model'], strict=True)
+    model.a2c_network.adapter_input_clip = float(contract.get('adapter_input_clip', 0.))   # as trained
     return model.eval().requires_grad_(False), payload
 
 

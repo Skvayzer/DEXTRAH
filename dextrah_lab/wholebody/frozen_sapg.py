@@ -45,6 +45,10 @@ class FrozenSonicSapgNetwork(nn.Module):
             nn.Linear(128, LATENT_ACTION_DIM)).to(self.source.mu.weight)
         nn.init.zeros_(self.latent_adapter[-1].weight)
         nn.init.zeros_(self.latent_adapter[-1].bias)
+        # Opt-in (train --adapter-input-clip, recorded in the contract; eval builders read it there):
+        # the adapter's 994 SONIC body inputs are raw (no normalizer); rare samples reach |x| 30-50 and
+        # last-hidden norms 6k-14k (typical ~15), per-sample KL up to 3e8 (job 1572 kl_diag). 0 = off.
+        self.adapter_input_clip = 0.
         old = self.source.sigma.detach()
         leader = int(torch.nonzero(self.source.param_ids == 0, as_tuple=True)[0].item())
         offset = (old[:, :7].mean(1)-old[leader, :7].mean()).clamp(-.693147, .693147)
@@ -68,6 +72,8 @@ class FrozenSonicSapgNetwork(nn.Module):
         features, states, ids = recurrent_task_features(self.source, task, inputs.get('rnn_states'),
             inputs.get('seq_length', 1), inputs.get('dones'), inputs.get('bptt_len', 0))
         extra = obs[:, TASK_ACTOR_DIM:TASK_ACTOR_DIM+BODY_EXTRA_DIM]
+        if self.adapter_input_clip > 0:
+            extra = extra.clamp(-self.adapter_input_clip, self.adapter_input_clip)
         latent = self.latent_adapter(torch.cat((features, extra), -1))
         fingers = self.source.mu_act(self.source.mu(features))[:, 7:13]
         value = self.source.value_act(self.source.value(features))

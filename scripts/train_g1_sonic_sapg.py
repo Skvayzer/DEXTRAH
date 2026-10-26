@@ -129,6 +129,8 @@ def main():
                    help='1: finger stabilizer only (latent residual 0, adapter frozen); 2: + bounded arm residual')
     p.add_argument('--carry-level', type=int, default=None, help='Initial speed-curriculum level (default 0, or the resumed state)')
     p.add_argument('--carry-settings', default='{}', help='JSON overrides of CarrySettings fields')
+    p.add_argument('--adapter-input-clip', type=float, default=0.,
+                   help='frozen SONIC: clip the latent adapter\'s raw SONIC body inputs to +-value (0 = off)')
     p.add_argument('--place-goals', type=float, default=0.,
                    help='mjlab manipulation: share of new goals replaced by a stable resting pose of the object on '
                         'the table (dextrah_lab/mj/placement_goals.py; Phase 2 set-down)')
@@ -405,6 +407,9 @@ def main():
             pretrained_sonic_sha256=WEIGHTS_SHA256, pretrained_sonic_frozen=frozen,
             action_dim=70 if frozen else 35)
         if frozen:
+            contract['adapter_input_clip'] = float(args.adapter_input_clip)
+            if args.adapter_input_clip:
+                contract['intentional_changes'] = contract['intentional_changes'] + ['latent_adapter_body_input_clip']
             contract.update(architecture=FROZEN_ARCHITECTURE, latent_residual_scale=.1,
                 initial_latent_std_leader=1., adapter_learning_rate=args.adapter_learning_rate,
                 body_joint_exploration_noise=False, latent_clipping=False,
@@ -691,6 +696,7 @@ def main():
                 raise ValueError('Expected the original finger bounds loss')
             install_latent_action_bounds(algo)
             install_latent_optimizer(algo, args.adapter_learning_rate)
+            algo.model.a2c_network.adapter_input_clip = float(args.adapter_input_clip)
             report['frozen_controller_validation'] = observer.controller_audit.check(algo.optimizer)
         install_complete_checkpoint(algo)
         install_atomic_checkpoint_saves(algo)

@@ -78,6 +78,7 @@ if [[ -n "${NUMERICAL_FAILURE_MODE:-}" ]]; then
 fi
 if [[ "${CONTINUOUS:-0}" == 1 ]]; then extra_args+=(--continuous); fi
 if [[ "${KL_DIAGNOSTICS:-0}" == 1 ]]; then extra_args+=(--kl-diagnostics); fi
+if [[ -n "${ADAPTER_INPUT_CLIP:-}" ]]; then extra_args+=(--adapter-input-clip "$ADAPTER_INPUT_CLIP"); fi
 if [[ -n "${PLACE_GOALS:-}" ]]; then extra_args+=(--place-goals "$PLACE_GOALS" --place-library "${PLACE_LIBRARY:?Set PLACE_LIBRARY}"); fi
 if [[ "${CARRY:-0}" == 1 ]]; then
     python -m pytest -q tests/test_carry.py
