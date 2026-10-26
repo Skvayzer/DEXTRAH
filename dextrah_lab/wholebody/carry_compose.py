@@ -230,10 +230,12 @@ class ClipSequencer:
 class Curriculum:
     """Speed levels (LEVELS); promotion at a rolling training success over finished episodes.
 
-    Only episodes that started at the current level count (the caller filters), and promotion
-    needs ``min_episodes`` of them (default 2 x num_envs): all envs start together, so the first
-    finished episodes are early failures followed by a burst of full-length successes, and a
-    short recency window right after a start or a promotion overstates the success rate."""
+    All envs start together (run start, every resume), so the first finished episodes are early
+    failures followed by a burst of full-length successes: a recency window then overstates the
+    success rate (jobs 1549, 1555 promoted at a true ~0.4). So only episodes that STARTED at the
+    current level and at least one episode length after the run start or the last promotion count
+    (``burn_in_until``, in env steps; the caller filters), promotion needs ``min_episodes`` of them
+    (default 2 x num_envs), and a resume restarts the window and the burn-in (level kept)."""
 
     def __init__(self, settings, device, num_envs=0):
         self.s = settings
@@ -241,6 +243,7 @@ class Curriculum:
         self.window = torch.zeros(settings.promote_window, device=device)
         self.count = 0
         self.min_episodes = settings.promote_min_episodes or 2*num_envs
+        self.burn_in_until = 0          # env step; set by the env (episode length after start / promotion)
 
     def record(self, success):
         n = success.numel()
@@ -266,6 +269,7 @@ class Curriculum:
         return dict(level=self.level, window=self.window.cpu(), count=self.count)
 
     def load_state_dict(self, state):
+        """Level only: the resumed envs start together again, so the window and burn-in restart."""
         self.level = int(state['level'])
-        self.window.copy_(state['window'].to(self.window.device))
-        self.count = int(state['count'])
+        self.window.zero_()
+        self.count = 0

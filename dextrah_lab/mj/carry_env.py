@@ -199,6 +199,9 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._dropped = torch.zeros(n, dtype=torch.bool, device=d)
         self._start_fail = torch.zeros(n, dtype=torch.bool, device=d)
         self._start_level = z(dtype=torch.long)                  # curriculum level the episode started at
+        self._start_step = z(dtype=torch.long)                   # env step the episode started at
+        self._env_steps = 0
+        self._curriculum.burn_in_until = int(round(carry.episode_s/self.step_dt))
         self._offset_error = z()
         self._finger_residual, self._latent_residual = z(6), z(64)
         self._ref_quat = z(10, 4); self._ref_quat[..., 0] = 1.
@@ -320,6 +323,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._dropped[ids] = False
         self._start_fail[ids] = False
         self._start_level[ids] = self._curriculum.level
+        self._start_step[ids] = self._env_steps
         self._finger_residual[ids] = 0.
         self._latent_residual[ids] = 0.
         self._push_steps[ids] = 0
@@ -552,9 +556,10 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         tr = ~ev & credited
         if bool(tr.any()):
             starts.sampler.record(k[tr], success[tr])
-            same = tr & (self._start_level[ids] == self._curriculum.level)
+            same = tr & (self._start_level[ids] == self._curriculum.level) & (self._start_step[ids] >= self._curriculum.burn_in_until)
             if self._curriculum.record(success[same]):
                 self._seq.set_level(self._curriculum.level)
+                self._curriculum.burn_in_until = self._env_steps+int(round(s.episode_s/self.step_dt))
                 print(f'CARRY_LEVEL {self._curriculum.level} max_speed={LEVELS[self._curriculum.level]}', flush=True)
         for name, value in out.items():
             starts.train_stats[name].add(value[~ev])
@@ -563,6 +568,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         starts.carry_seconds.add(t)
 
     def _carry_publish(self):
+        self._env_steps += 1                # after_step: once per env step
         starts = self._sgs
         for name in OUTCOMES:
             self.extras[f'carry/train_{name}'] = starts.train_stats[name].mean()

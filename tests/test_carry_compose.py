@@ -88,6 +88,7 @@ class CarryComposeTests(unittest.TestCase):
         state = c.state_dict()
         c2 = Curriculum(s, 'cpu'); c2.load_state_dict(state)
         self.assertEqual(c2.level, 1)
+        self.assertEqual(c2.count, 0)           # a resume restarts the promotion window
 
     def test_reward_warmup_and_hold(self):
         s = CarrySettings()
