@@ -19,10 +19,11 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
             frame anchored at the episode start pose (table B is where table A was relative to the
             robot); goal = the object's resting pose on table A at the start, moved to table B
             ('rest'), or the same raised to the lowest goal height M was trained on ('hover').
-  release   only once table B supports the object or it is at the goal and still: object-table
-            normal force > 0.5 N or within 3 cm of the goal, object and object-vs-palm speed
-            < 5 cm/s, for 0.25 s; then the fingers go to their pre-grasp commands with the arm
-            command frozen, for 2 s.
+  release   only once table B supports the object or it is at the goal, and it is still: object-table
+            normal force > 0.5 N or within 3 cm of the goal, object velocity averaged over 0.2 s
+            < 5 cm/s (held objects chatter in the hand at ~10 cm/s instantaneous), for 0.25 s; then
+            the fingers go to their pre-grasp commands with the arm command frozen, for 2 s.
+            Support at the release (the strict rule) is reported per world.
   result    placed = resting on table B (contact, speed < 5 cm/s), no hand contact, robot upright.
 
 C's end states at the hand-back (arrived holding) are saved in the SGS holding-state field layout
@@ -140,6 +141,7 @@ def run(args):
     hold_ref = z(3)
     obj_pose0, goal_b = z(7), z(7)
     last_latent, frozen_fingers = z(64), z(6)
+    velocity_ema = z(3)
     residual_mask = body_joint_masks(BODY_JOINTS, carry.residual_joints).to(d)
     standing_q = env._reference_q.clone()
     lateral = torch.tensor([-1., 0., 0.], device=d)        # robot's right for the -90 deg start yaw (checked below)
@@ -354,6 +356,8 @@ def run(args):
             offset = hold_offset()
             obj_speed = env.object.data.root_lin_vel_w.norm(dim=-1)
             rel_speed = relative_speed()
+            velocity_ema += (dt/.2)*(env.object.data.root_lin_vel_w-velocity_ema)
+            velocity_ema[done] = 0.
             obj_pos = env.object.data.root_pos_w-env.scene.env_origins
             # grasp -> settle (switch M -> C)
             ing = phase == GRASP
@@ -412,16 +416,18 @@ def run(args):
             # place -> release (table support or at the goal, and still)
             placing = phase == PLACE
             goal_dist = (obj_pos-goal_b[:, :3]).norm(dim=-1)
-            ready = placing & ((support > .5) | (goal_dist < .03)) & (obj_speed < .05) & (rel_speed < .05)
+            ready = placing & ((support > .5) | (goal_dist < .03)) & (velocity_ema.norm(dim=-1) < .05)
             still_count = torch.where(ready, still_count+1, torch.zeros_like(still_count))
             for j in torch.nonzero(placing & (still_count >= round(.25/dt))).flatten().tolist():
                 records[j].update(release_s=round(t+dt, 2), support_at_release=bool(support[j] > .5),
-                                  goal_distance_at_release_m=round(float(goal_dist[j]), 3))
+                                  goal_distance_at_release_m=round(float(goal_dist[j]), 3),
+                                  relative_speed_at_release_ms=round(float(rel_speed[j]), 3))
                 phase[j], phase_steps[j] = RELEASE, 0
             for j in torch.nonzero(placing & (obj_pos[:, 2] < table_b[:, 2]-.1)).flatten().tolist():
                 finish(j, 'dropped_place', t+dt)
             for j in torch.nonzero(placing & (phase_steps*dt > args.place_limit)).flatten().tolist():
-                finish(j, 'no_release', t+dt, goal_distance_m=round(float(goal_dist[j]), 3), table_support=bool(support[j] > .5))
+                finish(j, 'no_release', t+dt, goal_distance_m=round(float(goal_dist[j]), 3), table_support=bool(support[j] > .5),
+                       smoothed_speed_ms=round(float(velocity_ema[j].norm()), 3))
             # release -> result
             for j in torch.nonzero((phase == RELEASE) & (phase_steps*dt >= args.release_s)).flatten().tolist():
                 rel_b = (obj_pos[j]-table_b[j])
@@ -492,7 +498,8 @@ def summarize(records):
         placed = out('placed')
         errs = [r['placement_error_xy_m'] for r in rs if r.get('outcome') == 'placed']
         return dict(worlds=nn, grasped=grasped, arrived=sum(1 for r in rs if 'arrived_s' in r), arrived_holding=handed,
-                    released=sum(1 for r in rs if 'release_s' in r), placed=placed,
+                    released=sum(1 for r in rs if 'release_s' in r),
+                    released_with_table_support=sum(1 for r in rs if r.get('support_at_release')), placed=placed,
                     grasp_rate=round(grasped/nn, 3),
                     transfer_rate_given_grasp=round(handed/max(grasped, 1), 3),
                     placement_rate_given_handback=round(placed/max(handed, 1), 3),
@@ -605,13 +612,13 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=1200, help='>= assets: one env per asset')
     p.add_argument('--worlds', type=int, default=0, help='evaluated worlds (0: all)')
-    p.add_argument('--seconds', type=float, default=110.)
+    p.add_argument('--seconds', type=float, default=150.)
     p.add_argument('--speed', type=float, default=.2, help='route cruise command (m/s); C trained to 0.2')
     p.add_argument('--backoff', type=float, default=.6)
     p.add_argument('--table-offset', type=float, default=1., help='table B centre, to the robot\'s right (m)')
     p.add_argument('--grasp-limit', type=float, default=20.)
     p.add_argument('--settle-s', type=float, default=1.5)
-    p.add_argument('--carry-limit', type=float, default=45.)
+    p.add_argument('--carry-limit', type=float, default=70.)
     p.add_argument('--final-s', type=float, default=2.)
     p.add_argument('--place-limit', type=float, default=15.)
     p.add_argument('--release-s', type=float, default=2.)
