@@ -68,6 +68,11 @@ def apply_frozen_latent_action(env, actions, source_pipeline):
     else:
         body = env._sonic_reference(env._body_extra[:, :930], env._reference_q,
                                    env._reference_qd, env._reference_ori6, executed[:, :64])
+    compose = getattr(env, '_body_compose', None)
+    if compose is not None:
+        # Opt-in action ownership (mj/carry_env.py, stage 2): bare SONIC (zero residual) on the
+        # walking joints, the residual decode on the rest.
+        body = compose(body, executed[:, :64])
     env._last_latent_action.copy_(executed[:, :64])
     env._last_decoded_sonic_action.copy_(body)
     whole = torch.cat((env.sonic_to_policy_body(body), executed[:, 64:]), -1)
