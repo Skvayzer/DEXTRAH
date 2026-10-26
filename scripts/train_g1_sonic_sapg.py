@@ -129,6 +129,10 @@ def main():
                    help='1: finger stabilizer only (latent residual 0, adapter frozen); 2: + bounded arm residual')
     p.add_argument('--carry-level', type=int, default=None, help='Initial speed-curriculum level (default 0, or the resumed state)')
     p.add_argument('--carry-settings', default='{}', help='JSON overrides of CarrySettings fields')
+    p.add_argument('--place-goals', type=float, default=0.,
+                   help='mjlab manipulation: share of new goals replaced by a stable resting pose of the object on '
+                        'the table (dextrah_lab/mj/placement_goals.py; Phase 2 set-down)')
+    p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (scripts/mj_rest_poses.py)')
     p.add_argument('--kl-diagnostics', action='store_true',
                    help='Log a per-epoch KL breakdown (latent vs fingers, per-sample peaks) and latent adapter input peaks')
     p.add_argument('--carry-state', type=Path, default=None,
@@ -201,6 +205,9 @@ def main():
             raise ValueError('mjlab training continues an existing run or names the task with --task-run')
         if args.task_run is not None and (args.resume or args.init_weights):
             raise ValueError('--task-run is for fresh starts (a continuation takes its task from the parent run)')
+    if args.place_goals and (backend != 'mjlab' or args.carry or args.mj_carry or args.place_library is None
+                             or not args.place_library.is_file()):
+        raise ValueError('--place-goals needs the mjlab manipulation task and an existing --place-library')
     if args.sgs and (backend != 'mjlab' or args.carry):
         raise ValueError('--sgs is implemented for the mjlab reposing task')
     if args.best_metric != 'reward' and not (args.sgs or (args.mj_carry and args.best_metric == 'carry_eval')):
@@ -601,6 +608,13 @@ def main():
                 report['sgs'] = dict(contract['sgs'], resumed_from=str(sgs_file) if sgs_state else None,
                                      spawn_check=dict(env._sgs.spawn_stats))
                 print('SGS_ENABLED '+json.dumps(report['sgs']), flush=True)
+            if args.place_goals:
+                from dextrah_lab.mj.placement_goals import PlacementGoals, install_placement_goals
+                placement = PlacementGoals(env, args.place_library, args.place_goals, seed=cfg.seed)
+                install_placement_goals(env, placement)
+                contract['placement_goals'] = placement.contract(args.place_library)
+                contract['intentional_changes'] = contract['intentional_changes'] + ['placement_goals_on_table']
+                print('PLACEMENT_GOALS '+json.dumps({k: v for k, v in contract['placement_goals'].items() if k != 'definition'}), flush=True)
         else:
             env = G1SonicTouchEnv(cfg, sonic=sonic)
         if args.diagnostic_capture_seconds > 0:
