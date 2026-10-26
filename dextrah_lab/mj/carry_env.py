@@ -236,8 +236,13 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
     def _hold_kinematics(self):
         centre, palm = self._palm()
         obj = self.object.data
-        offset_w = obj.root_pos_w-centre
-        rel_linear = obj.root_lin_vel_w-(palm[:, 7:10]+torch.cross(palm[:, 10:13], offset_w, dim=-1))
+        offset_w = obj.root_pos_w-centre                  # hold position: object link vs palm centre
+        # Velocities are at the body COMs (mjlab body_com_vel_w / root_com_vel_w), so the rigid-attachment
+        # prediction uses the COM positions (the link/centre offset added w x (COM - link) spuriously:
+        # ~0.1-0.3 m/s for a hammer at walking palm rotation rates, job 1556).
+        palm_com = self.robot.data._d.body_com_pos_w[:, self.robot.body_perm][:, self._palm_body_id]
+        obj_com = self.object.free_qpos[:, :3]            # object body frame is at its COM
+        rel_linear = obj.root_lin_vel_w-(palm[:, 7:10]+torch.cross(palm[:, 10:13], obj_com-palm_com, dim=-1))
         rel_angular = obj.root_ang_vel_w-palm[:, 10:13]
         q = palm[:, 3:7]
         return self._palm_frame(offset_w, q), self._palm_frame(rel_linear, q), self._palm_frame(rel_angular, q)
