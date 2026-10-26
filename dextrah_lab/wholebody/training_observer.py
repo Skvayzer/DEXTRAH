@@ -65,6 +65,11 @@ class SonicTransferObserver(AlgoObserver):
             data['decoder_weight_change_l2'] = float((network.decoder[0].weight-self.initial_decoder).detach().norm())
         for key, value in data.items():
             algo.writer.add_scalar('sonic_transfer/'+key, value, frame)
+        diagnostics = getattr(algo, '_kl_diagnostics', None)
+        if diagnostics is not None:
+            for key, value in diagnostics.scalars().items():
+                algo.writer.add_scalar('kl_diag/'+key, value, frame)
+            diagnostics.reset()
         (self.output/'progress.json').write_text(json.dumps(data, indent=2))
         import wandb
         if wandb.run:

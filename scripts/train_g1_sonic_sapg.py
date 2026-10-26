@@ -129,6 +129,8 @@ def main():
                    help='1: finger stabilizer only (latent residual 0, adapter frozen); 2: + bounded arm residual')
     p.add_argument('--carry-level', type=int, default=None, help='Initial speed-curriculum level (default 0, or the resumed state)')
     p.add_argument('--carry-settings', default='{}', help='JSON overrides of CarrySettings fields')
+    p.add_argument('--kl-diagnostics', action='store_true',
+                   help='Log a per-epoch KL breakdown (latent vs fingers, per-sample peaks) and latent adapter input peaks')
     p.add_argument('--carry-state', type=Path, default=None,
                    help='X.carry.pt to continue (sampler outcome windows + curriculum level) when starting from '
                         '--init-weights, e.g. stage 2 from a stage-1 checkpoint (a resume loads it automatically)')
@@ -746,6 +748,10 @@ def main():
         if args.mj_carry and args.carry_stage == 1:
             from dextrah_lab.wholebody.carry_training import freeze_latent_residual
             report['carry_latent_freeze'] = freeze_latent_residual(algo)
+        if args.kl_diagnostics:
+            from dextrah_lab.wholebody.kl_diagnostics import KlDiagnostics
+            KlDiagnostics(algo)
+            report['kl_diagnostics'] = 'per-epoch kl_diag/* scalars (logging only)'
         if args.dual_clip:
             from dextrah_lab.wholebody.dual_clip import install_dual_clip
             report['dual_clip'] = install_dual_clip(algo, args.dual_clip)

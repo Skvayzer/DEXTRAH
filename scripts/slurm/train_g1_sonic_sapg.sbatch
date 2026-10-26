@@ -77,6 +77,7 @@ if [[ -n "${NUMERICAL_FAILURE_MODE:-}" ]]; then
     extra_args+=(--numerical-failure-mode "$NUMERICAL_FAILURE_MODE")
 fi
 if [[ "${CONTINUOUS:-0}" == 1 ]]; then extra_args+=(--continuous); fi
+if [[ "${KL_DIAGNOSTICS:-0}" == 1 ]]; then extra_args+=(--kl-diagnostics); fi
 if [[ "${CARRY:-0}" == 1 ]]; then
     python -m pytest -q tests/test_carry.py
     extra_args+=(--carry --carry-clips "${CARRY_CLIPS:?Set CARRY_CLIPS}" --grasp-bank "${GRASP_BANK:?Set GRASP_BANK}")
