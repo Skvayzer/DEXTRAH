@@ -62,7 +62,11 @@ class CarrySettings:
     push_probability: float = 1/120.    # per policy step: a push to the right wrist starts
     push_force_n: float = 15.
     push_s: tuple = (.1, .2)
-    promote_success: float = .75        # curriculum: next level at this rolling training success
+    promote_success: float = .75        # curriculum: next level at this exact success rate (StartWindowRate)
+    promote_on: str = 'uniform'         # 'uniform': evaluation envs (holding states drawn uniformly, a fixed
+                                        # distribution); 'train': the success-guided training starts, whose
+                                        # difficulty moves with the sampler (early on it favours states that
+                                        # have succeeded: SGS windows start as H failures)
     promote_window: int = 4096
     promote_min_episodes: int = 0       # episodes started at the level before promotion (0: 2 x num_envs)
     level: int = 0
@@ -277,7 +281,7 @@ class Curriculum:
     (``burn_in_until``, in env steps; the caller filters), promotion needs ``min_episodes`` of them
     (default 2 x num_envs), and a resume restarts the window and the burn-in (level kept)."""
 
-    def __init__(self, settings, device, num_envs=0, episode_steps=None):
+    def __init__(self, settings, device, num_envs=0, episode_steps=None, min_starts=None):
         self.s = settings
         self.level = settings.level
         self.window = torch.zeros(settings.promote_window, device=device)
@@ -287,7 +291,7 @@ class Curriculum:
         # Exact per-start rate (StartWindowRate) when the env passes its episode length: promotion
         # needs it >= promote_success over >= num_envs starts, and 2 episode lengths at the level.
         self.exact = StartWindowRate(episode_steps, device) if episode_steps else None
-        self.min_starts = max(num_envs, 1)
+        self.min_starts = max(min_starts if min_starts is not None else num_envs, 1)
         self.level_since = 0
 
     def record_exact(self, start_steps, success, now):

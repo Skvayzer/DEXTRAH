@@ -115,6 +115,14 @@ class CarryComposeTests(unittest.TestCase):
         c2 = Curriculum(s, 'cpu', num_envs=4, episode_steps=100)
         self.assertFalse(c2.record_exact(start, torch.tensor([True]*5+[False]*3), 210))  # 62.5% < 75%
 
+    def test_exact_curriculum_min_starts(self):
+        s = CarrySettings(promote_success=.75)
+        c = Curriculum(s, 'cpu', num_envs=64, episode_steps=100, min_starts=8)     # uniform gate: eval envs only
+        start = torch.zeros(8, dtype=torch.long)
+        self.assertTrue(c.record_exact(start, torch.ones(8, dtype=torch.bool), 210))
+        c2 = Curriculum(s, 'cpu', num_envs=64, episode_steps=100)
+        self.assertFalse(c2.record_exact(start, torch.ones(8, dtype=torch.bool), 210))
+
     def test_reward_warmup_and_hold(self):
         s = CarrySettings()
         n = 2
