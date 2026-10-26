@@ -18,4 +18,4 @@ export PYTHONPATH="$source_snapshot/third_party/mujoco_warp_cone_fix:$source_sna
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
 cd "$source_snapshot"
 echo "Commit: $commit"
-python scripts/mj_table_to_table.py --m-checkpoint "${M_CHECKPOINT:?}" --c-checkpoint "${C_CHECKPOINT:?}" --output "${OUTPUT:?}" ${EXTRA_ARGS:-}
+python scripts/mj_table_to_table.py --m-checkpoint "${M_CHECKPOINT:?}" --c-checkpoint "${C_CHECKPOINT:?}" ${PLACE_CHECKPOINT:+--place-checkpoint "$PLACE_CHECKPOINT"} --output "${OUTPUT:?}" ${EXTRA_ARGS:-}

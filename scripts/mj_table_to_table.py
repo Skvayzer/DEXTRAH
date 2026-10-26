@@ -106,6 +106,11 @@ def run(args):
     n = env.num_envs
     obs_dim, hand_dim = cfg.observation_space, env.hand_surface_dim
     m_model, m_payload = build_policy(env, args.m_checkpoint, m_contract, device)
+    # Optional placement policy at table B (e.g. M fine-tuned with placement goals); M grasps at table A.
+    p_model, p_payload = m_model, m_payload
+    if args.place_checkpoint is not None:
+        p_contract = json.loads((args.place_checkpoint.resolve().parent.parent/'task_contract.json').read_text())
+        p_model, p_payload = build_policy(env, args.place_checkpoint, p_contract, device)
     c_model, c_payload = build_policy_dims(env, args.c_checkpoint, c_contract, device,
                                            obs_dim+CONTEXT_DIM, hand_dim+CONTEXT_DIM)
     sizes = obs_utils._obs_field_sizes(13, 5)
@@ -294,6 +299,7 @@ def run(args):
         rest_seen = torch.zeros(n, dtype=torch.bool, device=d)
         goal_ready = False
         m_states = tuple(s.to(d) for s in m_model.get_default_rnn_state())
+        p_states = tuple(s.to(d) for s in p_model.get_default_rnn_state())
         c_states = tuple(s.to(d) for s in c_model.get_default_rnn_state())
         for step in range(steps):
             t = step*dt
@@ -328,6 +334,10 @@ def run(args):
                                  prev_actions=None, rnn_states=c_states))
             m_states, c_states = m_out['rnn_states'], c_out['rnn_states']
             m_mu, c_mu = m_out['mus'], c_out['mus']
+            if p_model is not m_model:
+                p_out = p_model(dict(obs=torch.cat((obs['policy'], leader), -1), is_train=False, prev_actions=None, rnn_states=p_states))
+                p_states = p_out['rnn_states']
+                m_mu = torch.where((phase == PLACE)[:, None], p_out['mus'], m_mu)
             c_action = torch.cat((carry.beta_latent*torch.tanh(c_mu[:, :64]),
                                   (q_ref+carry.beta_fingers*torch.tanh(c_mu[:, 64:70])).clamp(-1, 1)), -1)
             action = torch.where(c_mode[:, None], c_action, m_mu)
@@ -340,7 +350,7 @@ def run(args):
             frozen_fingers = torch.where(keep[:, None], frozen_fingers, action[:, 64:70])
             obs, _, terminated, truncated, info = env.step(action)
             done = terminated | truncated
-            for s_ in m_states+c_states:
+            for s_ in m_states+c_states+(p_states if p_model is not m_model else ()):
                 s_[:, done, :] = 0
             phase_steps += 1
             # -------- episode ends (robot fall, object on the floor, numerical failure)
@@ -424,7 +434,7 @@ def run(args):
                     finish(j, 'arrived_not_holding', t+dt)
                     continue
                 handback.append(j)
-                for s_ in m_states:
+                for s_ in m_states+(p_states if p_model is not m_model else ()):
                     s_[:, j, :] = 0
                 home_pos[j], home_yaw[j] = start_pos[j], start_yaw[j]     # table B where table A was
                 env._reference_q[j] = standing_q[j]
@@ -503,6 +513,7 @@ def run(args):
     np.savez(args.output/'objects.npz', size=bank.size, pos=bank.pos, quat=bank.quat, used=bank.used, com=bank.com,
              slot_geoms=slot_geoms, body=body)
     meta = dict(m_checkpoint=str(args.m_checkpoint), m_epoch=int(m_payload['epoch']), c_checkpoint=str(args.c_checkpoint),
+                place_checkpoint=str(args.place_checkpoint) if args.place_checkpoint else None, place_epoch=int(p_payload['epoch']),
                 c_epoch=int(c_payload['epoch']), carry_settings=c_contract['carry_mjlab']['settings'], video=video, step_dt=dt, fps=args.fps, args={k: str(v) for k, v in vars(args).items()},
                 planner=first_nav.report(), policies='SAPG leaders, mean actions', domain_randomization='off')
     return meta, records, cfg
@@ -631,6 +642,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--m-checkpoint', type=Path, required=True, help='manipulation expert (with X.sgs.pt beside it)')
     p.add_argument('--c-checkpoint', type=Path, required=True, help='carry expert (stage 2)')
+    p.add_argument('--place-checkpoint', type=Path, default=None, help='policy for the table-B placement (default: M)')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--num-envs', type=int, default=1200, help='>= assets: one env per asset')
     p.add_argument('--worlds', type=int, default=0, help='evaluated worlds (0: all)')
