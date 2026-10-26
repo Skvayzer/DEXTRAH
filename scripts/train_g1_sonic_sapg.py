@@ -116,6 +116,14 @@ def main():
     p.add_argument('--carry-clips', type=Path, help='Precomputed planner walking clips (.npz)')
     p.add_argument('--grasp-bank', type=Path, help='Grasp snapshots from build_grasp_bank.py')
     p.add_argument('--carry-episode-seconds', type=float, default=20.)
+    p.add_argument('--mj-carry', action='store_true',
+                   help='mjlab carry expert (dextrah_lab/mj/carry_env.py, after DexCompose): holding-state starts, '
+                        'walking clips, finger stabilizer + bounded arm residual, carry reward')
+    p.add_argument('--carry-holding-state', type=Path, help='X.sgs.pt of the manipulation run whose holding states start episodes')
+    p.add_argument('--carry-stage', type=int, choices=[1, 2], default=1,
+                   help='1: finger stabilizer only (latent residual 0, adapter frozen); 2: + bounded arm residual')
+    p.add_argument('--carry-level', type=int, default=None, help='Initial speed-curriculum level (default 0, or the resumed state)')
+    p.add_argument('--carry-settings', default='{}', help='JSON overrides of CarrySettings fields')
     p.add_argument('--init-weights', type=Path,
                    help='Load actor/critic weights only (fresh optimizers, epoch 0) from a same-architecture checkpoint')
     p.add_argument('--critic-warmup-epochs', type=int, default=0,
@@ -166,7 +174,7 @@ def main():
                         '(51 inputs, InterMimicGen reference geometry), appended')
     p.add_argument('--sgs-state', type=Path,
                    help='SGS state to continue (X.sgs.pt); default: the --resume checkpoint\'s')
-    p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success'], default='reward',
+    p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success', 'carry_eval'], default='reward',
                    help='Best checkpoint by training reward (rl_games) or, with --sgs, by the rolling statistic of the '
                         'fresh-rho evaluation envs')
     if backend == 'isaac':
@@ -185,8 +193,19 @@ def main():
             raise ValueError('--task-run is for fresh starts (a continuation takes its task from the parent run)')
     if args.sgs and (backend != 'mjlab' or args.carry):
         raise ValueError('--sgs is implemented for the mjlab reposing task')
-    if args.best_metric != 'reward' and not args.sgs:
+    if args.best_metric != 'reward' and not (args.sgs or (args.mj_carry and args.best_metric == 'carry_eval')):
         raise ValueError(f'--best-metric {args.best_metric} needs --sgs (its evaluation envs)')
+    if args.mj_carry:
+        if backend != 'mjlab' or args.sgs or args.carry:
+            raise ValueError('--mj-carry is the mjlab carry expert (not with --sgs / the Isaac --carry)')
+        if not (args.hand_surface_obs and args.hand_surface_arm_links and args.hand_surface_goal):
+            raise ValueError('--mj-carry keeps the full hand-surface block (it masks its goal part)')
+        if not (args.carry_clips and args.carry_clips.is_file() and args.carry_holding_state and args.carry_holding_state.is_file()):
+            raise ValueError('--mj-carry needs --carry-clips and --carry-holding-state')
+        if args.resume is None and args.init_weights is None:
+            raise ValueError('--mj-carry starts from the manipulation expert (--init-weights) or resumes a carry run')
+        if args.best_metric not in ('reward', 'carry_eval'):
+            raise ValueError('--mj-carry best metric: carry_eval')
     if args.teacher_checkpoint is not None and (not args.frozen_pretrained_sonic or not args.teacher_checkpoint.is_file()):
         raise ValueError('--teacher-checkpoint initializes a frozen-SONIC policy from an existing checkpoint')
     if (args.hand_surface_arm_links or args.hand_surface_goal) and not args.hand_surface_obs:
@@ -209,6 +228,9 @@ def main():
         parent_hand = bool(parent_contract.get('body_termination', {}).get('hand_surface_obs', False))
         parent_dim = int(parent_contract.get('hand_surface', {}).get('dim', HAND_SURFACE_DIM if parent_hand else 0))
         new_dim = hand_surface_dim(args.hand_surface_arm_links, args.hand_surface_goal) if args.hand_surface_obs else 0
+        if args.mj_carry:
+            from dextrah_lab.mj.carry_env import CONTEXT_DIM
+            new_dim += CONTEXT_DIM          # carry context block, appended after the hand block
         if args.resume is not None and parent_dim != new_dim:
             raise ValueError(f'Hand-surface block {new_dim} but the resumed run used {parent_dim} (use --init-weights)')
         if new_dim < parent_dim:
@@ -236,13 +258,13 @@ def main():
     # thread while a local USD availability check is running (smoke 556).
     import wandb
     if args.wandb == 'online':
-        wandb.init(project='adept', entity='skvayzer', group='g1-carry-expert' if args.carry else 'g1-sonic-bps128-touch',
+        wandb.init(project='adept', entity='skvayzer', group='g1-carry-expert' if (args.carry or args.mj_carry) else 'g1-sonic-bps128-touch',
             name=args.output.name, id='unique_id_'+args.output.name, resume='allow',
             dir=str(args.output), sync_tensorboard=True, mode='online',
             config=dict(source_commit=os.environ.get('FULLBODY_SOURCE_COMMIT'), num_envs=args.num_envs),
             tags=['sapg', 'sonic', 'g1', 'revo2', 'bps128', 'touch70', 'floating-body',
                   'frozen-pretrained-sonic' if args.frozen_pretrained_sonic else 'trainable-sonic-decoder',
-                  'continuous' if args.continuous else 'training-smoke', 'backend-'+backend] + (['carry-expert'] if args.carry else []))
+                  'continuous' if args.continuous else 'training-smoke', 'backend-'+backend] + (['carry-expert'] if (args.carry or args.mj_carry) else []))
         if wandb.run is None or wandb.run.settings.mode != 'online':
             raise RuntimeError('Requested online logging did not initialize')
         wandb.run.summary.update(dict(experiment_status='initializing_simulation', optimizer_updates_started=False))
@@ -500,10 +522,51 @@ def main():
                 wandb.config.update(dict(carry=contract['carry'], intentional_changes=contract['intentional_changes']),
                                     allow_val_change=True)
         elif backend == 'mjlab':
-            from dextrah_lab.mj.env import G1SonicTouchMjEnv
-            env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device,
-                                    nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
-                                    mujoco_cfg=mj_settings['mujoco_options'])
+            if args.mj_carry:
+                from dataclasses import fields as _fields
+                from dextrah_lab.mj.carry_env import G1CarryMjEnv
+                from dextrah_lab.sgs.mj_task import SgsSettings
+                from dextrah_lab.wholebody.carry_compose import CarrySettings
+                overrides = json.loads(args.carry_settings)
+                known = {f.name for f in _fields(CarrySettings)}
+                if set(overrides)-known:
+                    raise ValueError(f'Unknown CarrySettings fields {sorted(set(overrides)-known)}')
+                overrides = {k: tuple(v) if isinstance(v, list) else v for k, v in overrides.items()}
+                carry_settings = CarrySettings(**dict(overrides, stage=args.carry_stage, episode_s=args.carry_episode_seconds,
+                                                      level=args.carry_level if args.carry_level is not None else overrides.get('level', 0)))
+                held_contract = json.loads((args.carry_holding_state.parent.parent/'task_contract.json').read_text())
+                held_settings = SgsSettings(**dict(held_contract['sgs']['settings'], eval_pool_size=0))
+                env = G1CarryMjEnv(cfg, sonic=sonic, carry=carry_settings, holding_state=args.carry_holding_state,
+                                   held_settings=held_settings, clips_path=args.carry_clips, num_envs=args.num_envs,
+                                   device=args.device, nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
+                                   mujoco_cfg=mj_settings['mujoco_options'])
+                carry_file = args.resume.with_suffix('.carry.pt') if args.resume else None
+                if carry_file is not None and carry_file.exists():
+                    env._sgs.load_state_dict(torch.load(carry_file, map_location='cpu', weights_only=False))
+                    if args.carry_level is not None:
+                        env._curriculum.level = args.carry_level
+                        env._seq.set_level(args.carry_level)
+                def _sha(path):
+                    with Path(path).open('rb') as f:
+                        return hashlib.file_digest(f, 'sha256').hexdigest()
+                contract['carry_mjlab'] = dict(env.carry_contract(), clips=str(args.carry_clips), clips_sha256=_sha(args.carry_clips),
+                    holding_state=str(args.carry_holding_state), holding_state_sha256=_sha(args.carry_holding_state),
+                    resumed_state=str(carry_file) if carry_file is not None and carry_file.exists() else None,
+                    critic_warmup_epochs=args.critic_warmup_epochs, paper='DexCompose arXiv:2606.28323')
+                contract['unchanged'] = [x for x in contract['unchanged']
+                                         if x not in ('reward', 'goals', 'success_counters', 'task_terminations')]
+                contract['intentional_changes'] = contract['intentional_changes'] + [
+                    'carry_reward_replaces_reposing_reward', 'no_object_goal_goal_masked', 'holding_state_starts',
+                    'table_parked_after_grasp_check', 'walking_clip_references_grasp_arm_reference',
+                    'moving_body_frame_palm_object_observations', 'carry_context_inputs', 'drop_termination',
+                    'finger_stabilizer_action_parameterization', 'object_mass_com_randomization', 'wrist_pushes'] + (
+                    ['bounded_latent_residual_arm_ownership'] if args.carry_stage == 2 else ['latent_residual_disabled'])
+                print('MJ_CARRY '+json.dumps(contract['carry_mjlab'], default=str)[:2000], flush=True)
+            else:
+                from dextrah_lab.mj.env import G1SonicTouchMjEnv
+                env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device,
+                                        nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
+                                        mujoco_cfg=mj_settings['mujoco_options'])
             if args.grasp_reward_scale is not None or args.object_energy_scale:
                 env.enable_grasp_reward(args.grasp_reward_scale or 0., args.object_energy_scale)
             if args.sonic_action_penalty_scale or args.fall_penalty:
@@ -609,6 +672,15 @@ def main():
                 torch.save(env._sgs.state_dict(), str(target)+'.pending')
                 os.replace(str(target)+'.pending', target)
             algo.save = save_with_sgs
+        if args.mj_carry:
+            # Every network checkpoint X.pth gets the carry state beside it (X.carry.pt).
+            network_save_carry = algo.save
+            def save_with_carry(filename, override_state=None):
+                network_save_carry(filename, override_state)
+                target = Path(str(filename)+'.carry.pt')
+                torch.save(env._sgs.state_dict(), str(target)+'.pending')
+                os.replace(str(target)+'.pending', target)
+            algo.save = save_with_carry
         if args.resume:
             previous = json.loads((args.resume.parent.parent/'task_contract.json').read_text())
             for key in ('source_sha256', 'bank_sha256', 'bootstrap_sha256', 'action_units'):
@@ -643,8 +715,22 @@ def main():
                 print('HAND_SURFACE_INIT '+json.dumps(report['init_weights']['inert_hand_inputs']), flush=True)
             else:
                 report['init_weights'] = load_initial_weights(algo, args.init_weights, reset_values=args.carry)
+            if args.mj_carry:
+                from dextrah_lab.wholebody.carry_training import init_carry_heads, reset_all_value_normalizers
+                parent = json.loads((args.init_weights.parent.parent/'task_contract.json').read_text())
+                if 'carry_mjlab' not in parent:
+                    # From the manipulation expert: both residual heads start at zero (DexCompose).
+                    report['init_weights']['carry_heads'] = init_carry_heads(algo, fingers=True, latent=True)
+                    report['init_weights']['value_normalizers_reset'] = reset_all_value_normalizers(algo)
+                elif args.carry_stage == 2 and parent['carry_mjlab']['settings']['stage'] == 1:
+                    # Stage 2 from a stage-1 carry checkpoint: the arm residual starts at zero.
+                    report['init_weights']['carry_heads'] = init_carry_heads(algo, fingers=False, latent=True)
+                print('CARRY_INIT '+json.dumps(report['init_weights'].get('carry_heads')), flush=True)
             if args.critic_warmup_epochs:
                 install_critic_warmup(algo, args.critic_warmup_epochs)
+        if args.mj_carry and args.carry_stage == 1:
+            from dextrah_lab.wholebody.carry_training import freeze_latent_residual
+            report['carry_latent_freeze'] = freeze_latent_residual(algo)
         if args.dual_clip:
             from dextrah_lab.wholebody.dual_clip import install_dual_clip
             report['dual_clip'] = install_dual_clip(algo, args.dual_clip)

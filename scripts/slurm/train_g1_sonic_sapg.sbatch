@@ -78,6 +78,14 @@ if [[ "${CARRY:-0}" == 1 ]]; then
     extra_args+=(--carry --carry-clips "${CARRY_CLIPS:?Set CARRY_CLIPS}" --grasp-bank "${GRASP_BANK:?Set GRASP_BANK}")
     extra_args+=(--critic-warmup-epochs "${CRITIC_WARMUP_EPOCHS:-0}")
 fi
+if [[ "${MJ_CARRY:-0}" == 1 ]]; then
+    # mjlab carry expert (dextrah_lab/mj/carry_env.py, after DexCompose)
+    python -m pytest -q tests/test_carry_compose.py
+    extra_args+=(--mj-carry --carry-clips "${CARRY_CLIPS:?Set CARRY_CLIPS}" --carry-holding-state "${CARRY_HOLDING_STATE:?Set CARRY_HOLDING_STATE}")
+    extra_args+=(--carry-stage "${CARRY_STAGE:-1}" --carry-episode-seconds "${CARRY_EPISODE_SECONDS:-20}")
+    extra_args+=(--critic-warmup-epochs "${CRITIC_WARMUP_EPOCHS:-0}" --carry-settings "${CARRY_SETTINGS:-{\}}")
+    if [[ -n "${CARRY_LEVEL:-}" ]]; then extra_args+=(--carry-level "$CARRY_LEVEL"); fi
+fi
 if [[ "${NO_TABLE_BODY_SUPPORT:-0}" == 1 ]]; then extra_args+=(--no-table-body-support); fi
 if [[ "${BODY_TABLE_CONTACT_TERMINATION:-0}" == 1 ]]; then extra_args+=(--body-table-contact-termination); fi
 if [[ "${PER_ENV_OBJECT_PHYSICS:-0}" == 1 ]]; then extra_args+=(--per-env-object-physics); fi

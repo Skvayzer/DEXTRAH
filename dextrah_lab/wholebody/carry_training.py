@@ -81,3 +81,35 @@ def install_delayed_best(algo, epochs):
 
     algo.update_epoch = MethodType(update_epoch, algo)
     return dict(blocked_until_epoch=start+epochs, delay_epochs=epochs)
+
+
+@torch.no_grad()
+def init_carry_heads(algo, *, fingers=True, latent=True, logstd=-1.5):
+    """DexCompose (arXiv:2606.28323, App. B.1) residual heads: mean head initialised to zero,
+    log-std to -1.5. Frozen-SONIC SAPG network: the latent adapter's last layer (64 latent
+    residuals) and the source mu rows 7:13 (6 fingers, here the finger stabilizer's correction)."""
+    net = algo.model.a2c_network
+    report = {}
+    if latent:
+        net.latent_adapter[-1].weight.zero_()
+        net.latent_adapter[-1].bias.zero_()
+        net.logstd[:, :64] = logstd
+        report['latent'] = 'mean head zero, log-std %.2f' % logstd
+    if fingers:
+        net.source.mu.weight[7:13].zero_()
+        net.source.mu.bias[7:13].zero_()
+        net.logstd[:, 64:70] = logstd
+        report['fingers'] = 'mean rows zero, log-std %.2f' % logstd
+    return report
+
+
+def freeze_latent_residual(algo):
+    """Carry stage 1: the latent residual is not executed (the env zeroes it); keep its head and
+    log-std fixed so the unused dimensions add nothing to the PPO ratio or entropy."""
+    net = algo.model.a2c_network
+    net.latent_adapter.requires_grad_(False)
+    mask = torch.ones_like(net.logstd)
+    mask[:, :64] = 0.
+    handle = net.logstd.register_hook(lambda grad: grad*mask)
+    algo._carry_latent_freeze = handle
+    return dict(latent_adapter='requires_grad False', latent_logstd='gradient masked')
