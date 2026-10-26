@@ -544,7 +544,10 @@ def main():
                 if carry_file is not None and carry_file.exists():
                     env._sgs.load_state_dict(torch.load(carry_file, map_location='cpu', weights_only=False))
                     if args.carry_level is not None:
+                        # Explicit level on resume: start its promotion window afresh.
                         env._curriculum.level = args.carry_level
+                        env._curriculum.window.zero_()
+                        env._curriculum.count = 0
                         env._seq.set_level(args.carry_level)
                 def _sha(path):
                     with Path(path).open('rb') as f:
