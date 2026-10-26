@@ -8,8 +8,8 @@ walk         Bare SONIC: zero latent residual, mid-range fingers, released-plann
              idle afterwards. The empty hand leaves the object, so only robot falls and
              numerical failures end an episode.
 carry        The checkpoint's SAPG leader (mean actions) grasps from a validated reaching start
-             with the task's own goals. After a confirmed grasp (object lifted, >= 2 fingers on
-             it, for 1 s) the object goal becomes the grasp pose fixed in the robot's yaw frame,
+             with the task's own goals. After a confirmed grasp (object lifted with at least
+             --grasp-min-fingers distal pads on it, for 1 s) the object goal becomes the grasp pose fixed in the robot's yaw frame,
              SONIC follows the planner (legs/waist; the trained standing arm reference is kept,
              as in the 2026-09-15 Isaac test) and a known-map waypoint route walks to a second,
              virtual table: back off, sideways to the second table, forward to the same
@@ -303,7 +303,7 @@ def run(args):
                         w.attempt = None
                     continue
                 if w.role != 'walk' and w.phase == 'grasp':
-                    w.grasp_count = w.grasp_count+1 if (lifted[k] and touching[k] >= 2) else 0
+                    w.grasp_count = w.grasp_count+1 if (lifted[k] and touching[k] >= args.grasp_min_fingers) else 0
                     if w.grasp_count >= GRASP_STEPS:
                         # Freeze the grasp pose in the robot's yaw frame; start the route.
                         _, yaw = body_frame(rq[k], (0., 0.))
@@ -353,7 +353,7 @@ def run(args):
     carry = {j: dict(role=w.role, type=str(kind[j]), asset=int(asset[j]), attempts=w.attempts, robot_falls=w.falls)
              for j, w in worlds.items() if w.role != 'walk'}
     meta = dict(checkpoint=str(args.checkpoint), run=str(run_dir), epoch=int(payload['epoch']), fps=args.fps, step_dt=dt,
-                seconds=args.seconds, speed=args.speed, backoff=args.backoff, table_offset=args.table_offset,
+                seconds=args.seconds, speed=args.speed, grasp_min_fingers=args.grasp_min_fingers, backoff=args.backoff, table_offset=args.table_offset,
                 table_a=table_a.tolist(), table_b=table_b.tolist(), selected=selected,
                 envs=[dict(env=j, asset=int(asset[j]), type=str(kind[j]), role=worlds[j].role, name=worlds[j].name) for j in selected],
                 walk=walk, carry=carry, planner=first.report(), domain_randomization='off', policy='SAPG leader, mean actions')
@@ -478,6 +478,8 @@ def main():
     p.add_argument('--backoff', type=float, default=.6, help='step back from the first table (m)')
     p.add_argument('--table-offset', type=float, default=1., help='second table centre, to the robot\'s right (m)')
     p.add_argument('--carry-limit', type=float, default=30., help='seconds per carry attempt before "no arrival"')
+    p.add_argument('--grasp-min-fingers', type=int, default=1,
+                   help='distal pads in object contact for the grasp check (the policy often holds with one pad + palm)')
     p.add_argument('--carry-per-type', type=int, default=2)
     p.add_argument('--carry-zero-per-type', type=int, default=1)
     p.add_argument('--walk-repeats', type=int, default=2)
