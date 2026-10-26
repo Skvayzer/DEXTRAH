@@ -506,6 +506,9 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             self.extras['carry/walk_planned_speed'] = self._planned_velocity[walking, :2].norm(dim=-1).mean()
             self.extras['carry/walk_body_speed'] = body_velocity[walking, :2].norm(dim=-1).mean()
         self.extras['carry/offset_error_cm'] = 100*self._offset_error[active].mean() if bool(active.any()) else self._offset_error.mean()*0
+        if bool(active.any()):
+            self.extras['carry/slip_linear_ms'] = self._rel_vel_palm[active, :3].norm(dim=-1).mean()
+            self.extras['carry/slip_angular_rads'] = self._rel_vel_palm[active, 3:].norm(dim=-1).mean()
         self.extras['carry/finger_residual_abs'] = self._finger_residual.abs().mean()
         self.extras['carry/latent_residual_abs'] = self._latent_residual.abs().mean()
         self.extras['carry/table_parked'] = self._table_parked.float().mean()
