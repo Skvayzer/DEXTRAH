@@ -363,9 +363,14 @@ def run(args):
             obj_pos = env.object.data.root_pos_w-env.scene.env_origins
             if t < 3.:
                 # Resting pose on table A: still, untouched, on the table (the start drops it from ~10 cm).
-                resting_a = (obj_speed < .02) & (hand_contact < .05) & (support > .5) & (phase == GRASP)
+                resting_a = (obj_speed < .03) & (hand_contact < .05) & (support > .02) & (phase == GRASP)
                 obj_pose0[resting_a] = torch.cat((obj_pos, env.object.data.root_quat_w), -1)[resting_a]
                 rest_seen |= resting_a
+                if step == round(1./dt):
+                    for j in worlds.tolist():
+                        records[j]['at_1s'] = dict(speed=round(float(obj_speed[j]), 3), hand_contact=round(float(hand_contact[j]), 3),
+                                                   support_n=round(float(support[j]), 3), lifted=bool(lifted[j]),
+                                                   height_above_table_m=round(float(obj_pos[j, 2]-table_a[j, 2]-TABLE_SIZE[2]/2), 3))
             elif not goal_ready:
                 goal_b[:] = obj_pose0
                 goal_b[:, :2] += shift[:2]
