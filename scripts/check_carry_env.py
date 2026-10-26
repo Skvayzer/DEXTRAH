@@ -17,7 +17,7 @@ def main():
     p.add_argument('--device', default='cpu')
     p.add_argument('--stage', type=int, default=2)
     p.add_argument('--level', type=int, default=2)
-    p.add_argument('--mass-scale', type=float, nargs=2, default=(.5, 3.))
+    p.add_argument('--mass-scale', type=float, nargs=2, default=(.7, 2.))
     p.add_argument('--com', type=float, default=.02)
     p.add_argument('--base-env', action='store_true', help='control: the plain manipulation env, same steps')
     args = p.parse_args()
