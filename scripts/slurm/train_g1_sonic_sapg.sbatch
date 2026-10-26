@@ -41,7 +41,11 @@ if [[ "${FROZEN_PRETRAINED_SONIC:-0}" == 1 ]]; then
     if [[ "${BACKEND:-isaac}" != mjlab ]]; then
         python -m pytest -q tests/test_frozen_sonic_sapg.py tests/test_sonic_source_actions.py
     fi
-    extra_args+=(--frozen-pretrained-sonic --adapter-learning-rate "${ADAPTER_LEARNING_RATE:-0.0003}")
+    # Adapter LR 3e-4 learns the latent adapter from zero (manipulation). Carry stage 2 retrains a
+    # residual head on adapter layers frozen through stage 1: at 3e-4 (30x the 1e-5 task LR, fresh
+    # Adam) its hidden layers drifted and KL spiked to 1381 within 111 epochs (job 1563) -> 1e-5.
+    if [[ "${MJ_CARRY:-0}" == 1 && "${CARRY_STAGE:-1}" == 2 ]]; then default_adapter_lr=1e-5; else default_adapter_lr=0.0003; fi
+    extra_args+=(--frozen-pretrained-sonic --adapter-learning-rate "${ADAPTER_LEARNING_RATE:-$default_adapter_lr}")
 else
     extra_args+=(--bootstrap "${STUDENT_CHECKPOINT:?Set STUDENT_CHECKPOINT to the validated touch-derived bootstrap}")
 fi
