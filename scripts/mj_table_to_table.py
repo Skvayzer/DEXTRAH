@@ -17,7 +17,8 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
   final     standing 2 s (C's final phase); arrival holding = palm-frame offset within 5 cm.
   place     switch to M (LSTM zero, as on its SGS held starts), standing reference, observation
             frame anchored at the episode start pose (table B is where table A was relative to the
-            robot); goal = the object's resting pose on table A at the start, moved to table B
+            robot); goal = the object's resting pose on table A (the last still, untouched pose in
+            the first 3 s: validated reaching starts drop the object from ~10 cm), moved to table B
             ('rest'), or the same raised to the lowest goal height M was trained on ('hover').
   release   only once table B supports the object or it is at the goal, and it is still: object-table
             normal force > 0.5 N or within 3 cm of the goal, object velocity averaged over 0.2 s
@@ -288,10 +289,9 @@ def run(args):
         start_yaw[:] = yaw0
         obj_pose0[:] = torch.cat((env.object.data.root_pos_w-env.scene.env_origins, env.object.data.root_quat_w), -1)
         q_open[:] = finger_command_now(torch.arange(n, device=d))
-        goal_b[:] = obj_pose0
-        goal_b[:, :2] += shift[:2]
         hover = torch.as_tensor(variant == 'hover', device=d)
-        goal_b[:, 2] = torch.where(hover, goal_b[:, 2].clamp(min=float(cfg.reset.target_volume_mins[2])), goal_b[:, 2])
+        rest_seen = torch.zeros(n, dtype=torch.bool, device=d)
+        goal_ready = False
         m_states = tuple(s.to(d) for s in m_model.get_default_rnn_state())
         c_states = tuple(s.to(d) for s in c_model.get_default_rnn_state())
         for step in range(steps):
@@ -344,9 +344,11 @@ def run(args):
             phase_steps += 1
             # -------- episode ends (robot fall, object on the floor, numerical failure)
             fell = info['episode_final']['robot_fall'].bool() if 'robot_fall' in info.get('episode_final', {}) else torch.zeros_like(done)
+            reasons = {k: v for k, v in env._termination_reasons.items()}
             for j in torch.nonzero(done & (phase != DONE)).flatten().tolist():
                 p = PHASES[int(phase[j])]
-                finish(j, ('robot_fell_' if bool(fell[j]) else 'ended_')+p, t+dt)
+                finish(j, ('robot_fell_' if bool(fell[j]) else 'ended_')+p, t+dt,
+                       termination=[k for k, v in reasons.items() if bool(v[j])])
             # -------- state for the checks
             lifted = env._lifted_object
             force = env._last_contacts['finger_object_force_l1']
@@ -359,6 +361,19 @@ def run(args):
             velocity_ema += (dt/.2)*(env.object.data.root_lin_vel_w-velocity_ema)
             velocity_ema[done] = 0.
             obj_pos = env.object.data.root_pos_w-env.scene.env_origins
+            if t < 3.:
+                # Resting pose on table A: still, untouched, on the table (the start drops it from ~10 cm).
+                resting_a = (obj_speed < .02) & (hand_contact < .05) & (support > .5) & (phase == GRASP)
+                obj_pose0[resting_a] = torch.cat((obj_pos, env.object.data.root_quat_w), -1)[resting_a]
+                rest_seen |= resting_a
+            elif not goal_ready:
+                goal_b[:] = obj_pose0
+                goal_b[:, :2] += shift[:2]
+                goal_b[:, 2] = torch.where(hover, goal_b[:, 2].clamp(min=float(cfg.reset.target_volume_mins[2])), goal_b[:, 2])
+                goal_ready = True
+                for j in worlds.tolist():
+                    records[j]['rest_pose_found'] = bool(rest_seen[j])
+                    records[j]['goal_height_above_table_m'] = round(float(goal_b[j, 2]-table_b[j, 2]-TABLE_SIZE[2]/2), 3)
             # grasp -> settle (switch M -> C)
             ing = phase == GRASP
             grasp_count = torch.where(ing & lifted & (touching >= args.grasp_min_fingers), grasp_count+1, torch.zeros_like(grasp_count))
@@ -393,7 +408,8 @@ def run(args):
                 phase[j], phase_steps[j] = WALK, 0
                 records[j]['walk_start_s'] = round(t+dt, 2)
             for j in torch.nonzero((phase == WALK) & (phase_steps*dt > args.carry_limit)).flatten().tolist():
-                finish(j, 'no_arrival', t+dt, remaining_m=round(route[j].distance, 3))
+                finish(j, 'no_arrival', t+dt, remaining_m=round(route[j].distance, 3), waypoint=int(route[j].index),
+                       position=[round(float(x), 3) for x in (env.robot.data.root_pos_w[j, :2]-env.scene.env_origins[j, :2])])
             # final -> place (switch C -> M) if still holding
             for j in torch.nonzero((phase == FINAL) & (phase_steps*dt >= args.final_s)).flatten().tolist():
                 holding = float((offset[j]-hold_ref[j]).norm()) < carry.retain_m
