@@ -111,8 +111,6 @@ def collect(args):
     n, dt = env.num_envs, env.step_dt
     if not getattr(env, '_v2', False):
         raise ValueError('The collector logs carry v2 quantities (support, arm channel); use a carry v2 checkpoint')
-    env.contacts.object_table = True
-    env.contacts.object_ground = True
 
     # End reasons of finished episodes, captured before the reset clears them.
     end_code = torch.zeros(n, dtype=torch.uint8, device=device)
@@ -170,6 +168,9 @@ def collect(args):
     noise = args.action_noise
     sigma = None if noise == 'policy' else float(noise)
     obs, _ = env.reset()
+    # contact reader exists after the first reset (the carry v2 env already enables both channels)
+    env.contacts.object_table = True
+    env.contacts.object_ground = True
     states = tuple(s.to(device) for s in model.get_default_rnn_state())
     leader = torch.zeros(n, 1, device=device)
     steps = round(args.seconds/dt)
