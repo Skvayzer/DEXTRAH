@@ -29,18 +29,31 @@ def main():
     p.add_argument('--max-chunks', type=int, default=None)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--device', default='cuda:0')
+    p.add_argument('--wandb', choices=['online', 'disabled'], default='online')
     args = p.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
     report = dict(completed=False, args={k: str(v) for k, v in vars(args).items()})
+    import wandb
+    if args.wandb == 'online':
+        job = os.environ.get('SLURM_JOB_ID', 'local')
+        wandb.init(project='adept', entity='skvayzer', group='neurosim', name=f'neurosim_{args.output.parent.name}_{job}',
+                   tags=['neurosim', 'world-model', 'hand-object'], dir=str(args.output),
+                   config={k: str(v) for k, v in vars(args).items()})
+        (args.output/'wandb.json').write_text(json.dumps(dict(id=wandb.run.id, url=wandb.run.url), indent=2))
+        print(f'WANDB {wandb.run.url}', flush=True)
     try:
         report.update(train(args))
         report['completed'] = True
     except BaseException as error:
         report.update(error=str(error), traceback=traceback.format_exc())
         traceback.print_exc()
+        if wandb.run:
+            wandb.run.summary.update(dict(error=str(error)[:500]))
     finally:
+        if wandb.run:
+            wandb.finish(exit_code=0 if report['completed'] else 1)
         (args.output/'report.json').write_text(json.dumps(report, indent=2))
         print('NEUROSIM_TRAIN_DONE '+json.dumps(dict(completed=report['completed'], final=report.get('final'))), flush=True)
 
@@ -67,6 +80,9 @@ def train(args):
                  losses=int(t['lost'].sum()), loss_rate_per_s=float(t['lost'].sum())/max(T*N*context['dt'], 1e-9),
                  contact_rate=[round(float(x), 4) for x in t['contact'].mean((0, 1))], load_s=round(time.time()-t0, 1))
     print('NEUROSIM_DATA '+json.dumps(stats), flush=True)
+    import wandb
+    if wandb.run:
+        wandb.config.update(dict(data=stats), allow_val_change=True)
     t = {k: v.to(dev) for k, v in t.items()}
     g = torch.Generator().manual_seed(args.seed)
     hidden = tuple(int(x) for x in args.hidden.split(','))
@@ -90,6 +106,9 @@ def train(args):
         opt.step(); sched.step()
         if it % 200 == 0:
             print(f'NEUROSIM_ITER {it} loss {float(loss):.4f} grad {grad:.3f} '+' '.join(f'{k} {v:.4f}' for k, v in logs.items()), flush=True)
+            if wandb.run:
+                wandb.log(dict({'train/loss': float(loss), 'train/grad_norm': grad, 'train/lr': sched.get_last_lr()[0]},
+                               **{f'train/{k}': v for k, v in logs.items()}), step=it)
         if it % args.eval_every == 0 or it == args.iters:
             model.eval()
             with torch.no_grad():
@@ -99,11 +118,29 @@ def train(args):
                        test=dict((k, round(v, 5)) for k, v in test_logs.items()), wall_s=round(time.time()-t0, 1))
             history.append(row)
             print('NEUROSIM_EVAL '+json.dumps(row), flush=True)
+            if wandb.run:
+                wandb.log(dict({'test/loss': row['test_loss']}, **{f'test/{k}': v for k, v in row['test'].items()}), step=it)
     model.eval()
     final = dict(open_loop=open_loop(model, t, test_envs_d, generator=g),
                  loss_within_0p5s=loss_prediction(model, t, test_envs_d, generator=g),
                  open_loop_train_objects=open_loop(model, t, train_envs_d, generator=g))
     print('NEUROSIM_FINAL '+json.dumps(final), flush=True)
+    if wandb.run:
+        flat = {}
+        for split in ('open_loop', 'open_loop_train_objects'):
+            for h, row in final[split].items():
+                for name in ('pos_mm', 'rot_deg', 'hand_q_rad', 'force_log1p'):
+                    for who in ('model', 'persistence'):
+                        flat[f'{split}/h{h}/{name}/{who}_median'] = row[name][who]['median']
+                for name in ('pos_mm', 'rot_deg'):
+                    if 'moving' in row:
+                        for who in ('model', 'persistence'):
+                            flat[f'{split}/h{h}/moving/{name}/{who}_median'] = row['moving'][name][who]['median']
+                flat[f'{split}/h{h}/contact_auc_mean'] = sum(row['contact_auc'])/len(row['contact_auc'])
+                flat[f'{split}/h{h}/support_auc'] = row['support_auc']
+        lp = final['loss_within_0p5s']
+        flat.update({f'loss_0p5s/{k}': lp[k] for k in ('auc', 'events', 'base_rate', 'mean_predicted', 'brier', 'brier_climatology')})
+        wandb.run.summary.update(flat)
     torch.save(dict(state_dict=model.state_dict(), layout=layout.__dict__, hidden=hidden, dt=model.dt,
                     test_assets=torch.unique(asset[test_mask]).tolist(), args=vars(args)), args.output/'world_model.pt')
     return dict(data=stats, history=history, final=final, wall_s=round(time.time()-t0, 1))
