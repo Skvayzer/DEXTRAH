@@ -4,9 +4,10 @@ import unittest
 import torch
 
 from dextrah_lab.wholebody.carry import WalkingClips
-from dextrah_lab.wholebody.carry_compose import (LEVELS, CarrySettings, ClipSequencer, Curriculum, StartWindowRate, body_joint_masks,
-                                                 carry_reward_v2, carry_reward_v3, clips_up_to, compose_body, finger_command,
-                                                 hand_command, region_distance)
+from dextrah_lab.wholebody.carry_compose import (LEVELS, RIGHT_ARM_JOINTS, CarrySettings, ClipSequencer, Curriculum,
+                                                 StartWindowRate, arm_delta_step, body_joint_masks, carry_arm_reference,
+                                                 carry_context_v2, carry_reward_v2, carry_reward_v3, clips_up_to, compose_body,
+                                                 finger_command, hand_command, hand_support, region_distance)
 from dextrah_lab.wholebody.contract import BODY_JOINTS
 
 
@@ -173,6 +174,29 @@ class CarryComposeTests(unittest.TestCase):
                                    active=torch.tensor([True, False]))
         self.assertAlmostEqual(float(r[0]), s.w_hold+s.w_track_lin+s.w_track_yaw, places=5)
         self.assertEqual(float(r[1]), 0.)          # warm-up: nothing counts, not even the drop
+
+    def test_v2_shared_helpers(self):
+        s = CarrySettings(version=2, arm_channel=True, postures='unused.npz')
+        qg, qc = torch.zeros(2, 7), torch.ones(2, 7)
+        D = torch.full((2, 7), .01)
+        t = torch.tensor([s.warmup_s, s.warmup_s+s.settle_s])           # secure phase start / end
+        q = carry_arm_reference(qg, qc, D, t, s.warmup_s, s.settle_s)
+        self.assertTrue(torch.allclose(q[0], qg[0]+.01) and torch.allclose(q[1], qc[1]+.01))
+        mid = carry_arm_reference(qg, qc, 0*D, torch.tensor([s.warmup_s+s.settle_s/2]*2), s.warmup_s, s.settle_s)
+        self.assertTrue(torch.allclose(mid, torch.full_like(mid, .5)))  # minimum jerk is symmetric
+        D1 = arm_delta_step(torch.zeros(1, 7), torch.ones(1, 7), s)
+        self.assertTrue(torch.allclose(D1, torch.full_like(D1, s.arm_filter*s.arm_delta_rad)))
+        fingers = torch.tensor([[0., .6, 0., 0., 0.], [0., 0., 0., 0., 0.], [1., 1., 0., 0., 0.]])
+        palm = torch.tensor([0., 0., .0])
+        flags, count, ok = hand_support(fingers, palm, torch.tensor([0., 0., .2]), torch.zeros(3), torch.tensor([.05, .05, .05]))
+        self.assertEqual(count.tolist(), [1, 0, 2])
+        self.assertEqual(ok.tolist(), [True, False, False])            # no contact / touching the table
+        _, _, far = hand_support(fingers[:1], palm[:1], torch.zeros(1), torch.zeros(1), torch.tensor([.2]))
+        self.assertFalse(bool(far[0]))
+        ctx = carry_context_v2(torch.ones(2, 3), torch.ones(2, 3), q, D, torch.zeros(2, 6), torch.zeros(2, 2))
+        self.assertEqual(ctx.shape[-1], 25)
+        self.assertEqual(len(RIGHT_ARM_JOINTS), 7)
+        self.assertTrue(all(j in BODY_JOINTS for j in RIGHT_ARM_JOINTS))
 
 
 if __name__ == '__main__':

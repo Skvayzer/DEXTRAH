@@ -201,6 +201,38 @@ def carry_reward_v2(s, *, offset_error, rel_linear, rel_angular, body_velocity, 
     return sum(terms.values()), terms
 
 
+RIGHT_ARM_JOINTS = ('right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
+                    'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint')
+
+
+def carry_arm_reference(q_grasp, q_carry, arm_delta, t, warmup_s, settle_s):
+    """Carry v2 right-arm reference: minimum jerk from the grasp-time angles to the carry posture over
+    the secure phase (it starts after the warm-up; t = seconds since the carry start), plus the
+    policy's filtered change."""
+    from .carry_posture import min_jerk
+    blend = min_jerk((t-warmup_s)/settle_s)[:, None]
+    return q_grasp+blend*(q_carry-q_grasp)+arm_delta
+
+
+def arm_delta_step(arm_delta, raw, s):
+    """Carry v2 arm change: D <- (1-f) D + f delta tanh(a) (raw = tanh(a) of the first 7 latent outputs)."""
+    return (1-s.arm_filter)*arm_delta+s.arm_filter*s.arm_delta_rad*raw
+
+
+def hand_support(finger_force, palm_force, table_force, ground_force, distance, near_m=.15, force_n=.5, free_n=.05):
+    """Carry v2 support: contact flags (5 pads + palm > force_n), their count, and supported = >= 1 contact,
+    object within near_m of the palm centre, no object-table / object-floor contact (< free_n)."""
+    flags = torch.cat((finger_force > force_n, (palm_force > force_n)[:, None]), -1)
+    count = flags.sum(-1)
+    supported = (count >= 1) & (distance < near_m) & (table_force < free_n) & (ground_force < free_n)
+    return flags.float(), count, supported
+
+
+def carry_context_v2(obj_torso, carry_target, arm_now, arm_delta, contact_flags, privileged):
+    """The carry v2 context block appended after v1's (privileged = supported, opposition; zeros for the actor)."""
+    return torch.cat((obj_torso-carry_target, arm_now, arm_delta, contact_flags, privileged), -1)
+
+
 def region_distance(p, lo, hi):
     """Distance (n,) of points p (n, 3) to the axis-aligned box [lo, hi] (0 inside)."""
     lo = torch.as_tensor(lo, dtype=p.dtype, device=p.device)

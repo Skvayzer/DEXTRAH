@@ -30,10 +30,10 @@ from .compat import install, p2p
 install()                                   # isaaclab.utils.math etc. without Isaac Sim (as mj/env.py)
 from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_conjugate, quat_mul, yaw_quat  # noqa: E402
 from dextrah_lab.wholebody.carry import MovingFrame, field_slice, quat_from_yaw, transform_clean_observation, yaw_of
-from dextrah_lab.wholebody.carry_compose import (LEVELS, CarrySettings, ClipSequencer, Curriculum, WalkingClips,
-                                                 body_joint_masks, carry_reward_v2, carry_reward_v3, compose_body,
-                                                 finger_command, hand_command, region_distance)
-from dextrah_lab.wholebody.carry_posture import min_jerk
+from dextrah_lab.wholebody.carry_compose import (LEVELS, RIGHT_ARM_JOINTS, CarrySettings, ClipSequencer, Curriculum,
+                                                 WalkingClips, arm_delta_step, body_joint_masks, carry_arm_reference,
+                                                 carry_context_v2, carry_reward_v2, carry_reward_v3, compose_body,
+                                                 finger_command, hand_command, hand_support, region_distance)
 from dextrah_lab.wholebody.contract import BODY_JOINTS  # noqa: E402
 from .env import G1SonicTouchMjEnv  # noqa: E402
 
@@ -45,6 +45,17 @@ CONTEXT_DIM = sum(n for _, n in CONTEXT)
 # carry v2 (docs/carry_v2_design.md): appended after the v1 context, so a v1 network expands with zero columns.
 CONTEXT_V2 = (('object_minus_carry_target', 3), ('right_arm_reference', 7), ('right_arm_delta', 7),
               ('hand_object_contacts', 6), ('supported', 1), ('opposition', 1))   # last two: critic only
+
+
+def grasp_in_torso(torso, palm, obj_pos):
+    """Carry posture lookup inputs: object position in the palm-link frame, palm orientation in the torso
+    frame (torso / palm: body states (k, >= 7))."""
+    t_po = quat_apply_inverse(palm[:, 3:7], obj_pos-palm[:, :3])
+    return t_po, quat_mul(quat_conjugate(torso[:, 3:7]), palm[:, 3:7])
+
+
+def object_in_torso(torso, obj_pos):
+    return quat_apply_inverse(torso[:, 3:7], obj_pos-torso[:, :3])
 
 
 def context_dim(version=1):
@@ -262,9 +273,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         if s.arm_channel:
             from dextrah_lab.wholebody.carry_posture import CarryPostures
             self._postures = CarryPostures(s.postures, d, target=s.carry_target, target_jitter=s.carry_jitter)
-        right = ('right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint', 'right_elbow_joint',
-                 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint')
-        self._right_arm = torch.tensor([BODY_JOINTS.index(j) for j in right], device=d)
+        self._right_arm = torch.tensor([BODY_JOINTS.index(j) for j in RIGHT_ARM_JOINTS], device=d)
         names = self.robot.body_names
         self._torso_body, self._palm_link = names.index('torso_link'), names.index('right_base_link')
         self._pelvis_mj = int(self.sim.mj_model.body('robot/pelvis').id)
@@ -332,8 +341,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             # Carry posture for THIS grasp: object (own palm offset) nearest the carry target, palm kept.
             torso = data.body_state_w[ids, self._torso_body]
             palm = data.body_state_w[ids, self._palm_link]
-            t_po = quat_apply_inverse(palm[:, 3:7], self.object.data.root_pos_w[ids]-palm[:, :3])
-            palm_torso = quat_mul(quat_conjugate(torso[:, 3:7]), palm[:, 3:7])
+            t_po, palm_torso = grasp_in_torso(torso, palm, self.object.data.root_pos_w[ids])
             q_now = data.joint_pos[ids][:, self._body_ids][:, self._right_arm]
             target = self._postures.sample_targets(len(ids), self._carry_generator)
             _, q_c, _ = self._postures.select(t_po, palm_torso, q_now, target)
@@ -478,8 +486,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         if getattr(self, '_v2', False) and self.s.arm_channel:
             # Carry v2: right arm from the grasp-time angles to the carry posture (minimum jerk over the
             # secure phase), plus the policy's low-pass-filtered bounded change.
-            blend = min_jerk((t-self.s.warmup_s)/self.s.settle_s)[:, None]
-            self._arm_now = self._q_grasp+blend*(self._q_carry-self._q_grasp)+self._arm_D
+            self._arm_now = carry_arm_reference(self._q_grasp, self._q_carry, self._arm_D, t, self.s.warmup_s, self.s.settle_s)
             q[:, :, self._right_arm] = self._arm_now[:, None]
         qd[:, :, self._arm_ids] = 0.
         self._reference_q, self._reference_qd, self._ref_quat = q, qd, root
@@ -533,7 +540,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             self._action_delta = raw-self._prev_raw
             self._prev_raw = raw
             if s.arm_channel:
-                self._arm_D = (1-s.arm_filter)*self._arm_D+s.arm_filter*s.arm_delta_rad*raw[:, :7]
+                self._arm_D = arm_delta_step(self._arm_D, raw[:, :7], s)
             self._latent_residual = torch.zeros_like(actions[:, :64])
             super()._pre_physics_step(torch.cat((self._latent_residual, fingers), -1))
             self._v2_disturbances()
@@ -622,12 +629,10 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             # palm centre, no object-table / object-floor contact. Drop = unsupported for unsupported_s.
             c = self._last_contacts
             zero = torch.zeros_like(height)
-            flags = torch.cat((c['finger_object_force_l1'] > .5, (c['palm_object_force_l1'] > .5)[:, None]), -1)
-            self._contact_flags, self._n_contacts = flags.float(), flags.sum(-1)
             centre, _ = self._palm()
-            near = (self.object.data.root_pos_w-centre).norm(dim=-1) < .15
-            free = (c.get('object_table_force', zero) < .05) & (c.get('object_ground_force', zero) < .05)
-            self._supported = (self._n_contacts >= 1) & near & free
+            self._contact_flags, self._n_contacts, self._supported = hand_support(
+                c['finger_object_force_l1'], c['palm_object_force_l1'], c.get('object_table_force', zero),
+                c.get('object_ground_force', zero), (self.object.data.root_pos_w-centre).norm(dim=-1))
             counting = t > s.warmup_s
             self._unsupported = torch.where(counting & ~self._supported, self._unsupported+1, torch.zeros_like(self._unsupported))
             if s.hold_mode == 'support':
@@ -666,7 +671,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         active = self._episode_time() > s.warmup_s
         if self._v2:
             torso = data.body_state_w[:, self._torso_body]
-            self._obj_torso = quat_apply_inverse(torso[:, 3:7], self.object.data.root_pos_w-torso[:, :3])
+            self._obj_torso = object_in_torso(torso, self.object.data.root_pos_w)
             self._region_d = region_distance(self._obj_torso, s.region_lo, s.region_hi)
             logs = getattr(self, '_grasp_logs', None) or {}
             self._opposition = logs.get('C_opp', torch.zeros_like(self._region_d))
@@ -753,7 +758,8 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         # v2 (appended): object - carry target (torso frame), right-arm reference, filtered arm change,
         # hand-object contacts (5 pads + palm); critic only: supported, opposition.
         priv = torch.stack((self._supported.float(), self._opposition), -1) if critic else torch.zeros(self.num_envs, 2, device=self.device)
-        return torch.cat((ctx, self._obj_torso-self._carry_target, self._arm_now, self._arm_D, self._contact_flags, priv), -1)
+        return torch.cat((ctx, carry_context_v2(self._obj_torso, self._carry_target, self._arm_now, self._arm_D,
+                                                self._contact_flags, priv)), -1)
 
     def _carry_critic(self, critic):
         critic = critic.clone()

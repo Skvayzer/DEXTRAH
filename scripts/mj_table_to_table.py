@@ -31,6 +31,16 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
 
 C's end states at the hand-back (arrived holding) are saved in the SGS holding-state field layout
 (handback_states.pt) as starts for a later placement fine-tune of M.
+
+Carry v2 experts (contract version 2, docs/carry_v2_design.md) run with their own semantics, via the
+helpers the training env uses: at the switch the carry posture for this grasp (nominal carry target,
+no jitter); right-arm reference = minimum jerk from the grasp-time angles to that posture over C's
+secure phase + the filtered arm channel (first 7 latent outputs); latent residual off; asymmetric
+finger bound; v2 context. The settle phase lasts C's warm-up + secure phase. Hold rule (--hold-rule,
+default 'support' for v2, 'offset' for v1): 'support' = drop when not supported by the hand (>= 1
+pad / palm contact, within 15 cm of the palm, no table / floor contact) for C's unsupported_s or below
+the floor height, holding at the hand-back = supported; 'offset' = v1's palm-frame offset rules.
+--contact-condim builds the scene with that contact model (C v2 trains with condim 4).
 """
 import argparse
 import json
@@ -77,11 +87,13 @@ def run(args):
     import mujoco_warp
     import dextrah_lab.mj.env as mjenv
     from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_conjugate, quat_mul, yaw_quat
-    from dextrah_lab.mj.carry_env import CONTEXT_DIM, install_moving_frame_observations, obs_utils
+    from dextrah_lab.mj.carry_env import context_dim, grasp_in_torso, install_moving_frame_observations, object_in_torso, obs_utils
     from dextrah_lab.mj.scene import TABLE_SIZE
     from dextrah_lab.sgs.mj_task import MjSgsTask, SgsSettings
     from dextrah_lab.wholebody.carry import MovingFrame, field_slice, yaw_of
-    from dextrah_lab.wholebody.carry_compose import CarrySettings, body_joint_masks, compose_body, hand_command
+    from dextrah_lab.wholebody.carry_compose import (RIGHT_ARM_JOINTS, CarrySettings, arm_delta_step, body_joint_masks,
+                                                     carry_arm_reference, carry_context_v2, compose_body, finger_command,
+                                                     hand_command, hand_support)
     from dextrah_lab.wholebody.contract import BODY_JOINTS
     from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM
     from dextrah_lab.wholebody.navigation_reference import NavigationReference, yaw_of as np_yaw
@@ -98,8 +110,18 @@ def run(args):
     c_contract = json.loads((c_run/'task_contract.json').read_text())
     carry = CarrySettings(**{k: tuple(v) if isinstance(v, list) else v
                              for k, v in c_contract['carry_mjlab']['settings'].items()})
-    if carry.stage != 2 or carry.residual_joints != 'arms' or carry.arm_reference != 'grasp':
+    c_v2 = carry.version == 2
+    if c_v2:
+        if not carry.arm_channel:
+            raise ValueError('A carry v2 expert on the route needs the arm channel')
+    elif carry.stage != 2 or carry.residual_joints != 'arms' or carry.arm_reference != 'grasp':
         raise ValueError(f'Expected a stage-2 carry expert with arm ownership, got {carry.stage}/{carry.residual_joints}')
+    if args.settle_s is None:
+        args.settle_s = carry.warmup_s+carry.settle_s
+    if args.hold_rule is None:
+        args.hold_rule = 'support' if c_v2 else 'offset'
+    print('ROUTE_C '+json.dumps(dict(version=carry.version, settle_s=args.settle_s, hold_rule=args.hold_rule,
+                                     contact_condim=args.contact_condim)), flush=True)
     install_moving_frame_observations()
     args.no_randomization = True
     env, cfg = rwv.build_env(args, m_run, m_contract, device)
@@ -113,8 +135,8 @@ def run(args):
     if args.place_checkpoint is not None:
         p_contract = json.loads((args.place_checkpoint.resolve().parent.parent/'task_contract.json').read_text())
         p_model, p_payload = build_policy(env, args.place_checkpoint, p_contract, device)
-    c_model, c_payload = build_policy_dims(env, args.c_checkpoint, c_contract, device,
-                                           obs_dim+CONTEXT_DIM, hand_dim+CONTEXT_DIM)
+    c_ctx = context_dim(carry.version)
+    c_model, c_payload = build_policy_dims(env, args.c_checkpoint, c_contract, device, obs_dim+c_ctx, hand_dim+c_ctx)
     sizes = obs_utils._obs_field_sizes(13, 5)
     goal_slice = field_slice(cfg.obs.obs_list, sizes, 'keypoints_rel_goal')
     goal_surface = slice(TASK_ACTOR_DIM+BODY_EXTRA_DIM+hand_dim-HAND_SURFACE_DIM, TASK_ACTOR_DIM+BODY_EXTRA_DIM+hand_dim)
@@ -161,6 +183,16 @@ def run(args):
     velocity_ema = z(3)
     residual_mask = body_joint_masks(BODY_JOINTS, carry.residual_joints).to(d)
     standing_q = env._reference_q.clone()
+    # carry v2 state
+    right_arm = torch.tensor([BODY_JOINTS.index(j) for j in RIGHT_ARM_JOINTS], device=d)
+    q_grasp, q_carry, arm_D, arm_now = z(7), z(7), z(7), z(7)
+    c_steps, unsupported = z(dtype=torch.long), z(dtype=torch.long)
+    carry_target = torch.tensor(carry.carry_target, device=d).expand(n, 3)
+    torso_idx, palm_link = env.robot.body_names.index('torso_link'), env.robot.body_names.index('right_base_link')
+    postures = None
+    if c_v2:
+        from dextrah_lab.wholebody.carry_posture import CarryPostures
+        postures = CarryPostures(carry.postures, d, target=carry.carry_target, target_jitter=0.)
     lateral = torch.tensor([-1., 0., 0.], device=d)        # robot's right for the -90 deg start yaw (checked below)
     shift = args.table_offset*lateral                       # table A -> table B
     table_a, table_b = z(3), z(3)                           # per world, after the reset (table height varies)
@@ -211,6 +243,11 @@ def run(args):
             idx = torch.tensor(ids, device=d)
             q = torch.as_tensor(np.stack(Q), device=d)
             q[:, :, arm_ids] = arm_ref[idx][:, None]                 # C's arm reference: angles at the switch
+            if c_v2:
+                # C's episode time after this step (the training env counts the step before observing)
+                tc = (c_steps[idx]+1).float()*env.step_dt
+                arm_now[idx] = carry_arm_reference(q_grasp[idx], q_carry[idx], arm_D[idx], tc, carry.warmup_s, carry.settle_s)
+                q[:, :, right_arm] = arm_now[idx][:, None]
             qd = torch.as_tensor(np.stack(QD), device=d)
             qd[:, :, arm_ids] = 0.
             env._reference_q[idx] = q
@@ -279,7 +316,18 @@ def run(args):
         cmd = torch.as_tensor(command, device=d, dtype=torch.float32)
         torque = env.robot.data.applied_torque[:, env._hand_joint_ids].clamp(-5, 5)
         context = torch.cat((z(1), cmd, one_hot, z(6), torque), -1)
+        if c_v2:
+            torso = env.robot.data.body_state_w[:, torso_idx]
+            flags, _, _ = support_state()
+            context = torch.cat((context, carry_context_v2(object_in_torso(torso, env.object.data.root_pos_w), carry_target,
+                                                           arm_now, arm_D, flags, z(2))), -1)
         return torch.cat((obs, context), -1)
+
+    def support_state():
+        c = env._last_contacts
+        centre, _ = palm()
+        return hand_support(c['finger_object_force_l1'], c['palm_object_force_l1'], c.get('object_table_force', z()),
+                            c.get('object_ground_force', z()), (env.object.data.root_pos_w-centre).norm(dim=-1))
 
     def finish(j, outcome, t, **extra):
         records[j].update(outcome=outcome, end_s=round(t, 2), **extra)
@@ -296,6 +344,7 @@ def run(args):
     with torch.inference_mode():
         obs, _ = env.reset()
         env.contacts.object_table = True                 # object-table normal force (placement support)
+        env.contacts.object_ground = True                # object-floor normal force (support rule)
         table_a[:] = env.table.data.root_pos_w-env.scene.env_origins
         table_b[:] = table_a+shift
         yaw0 = yaw_of(env.robot.data.root_quat_w)
@@ -348,8 +397,13 @@ def run(args):
                 p_out = p_model(dict(obs=torch.cat((obs['policy'], leader), -1), is_train=False, prev_actions=None, rnn_states=p_states))
                 p_states = p_out['rnn_states']
                 m_mu = torch.where((phase == PLACE)[:, None], p_out['mus'], m_mu)
-            c_action = torch.cat((carry.beta_latent*torch.tanh(c_mu[:, :64]),
-                                  (q_ref+carry.beta_fingers*torch.tanh(c_mu[:, 64:70])).clamp(-1, 1)), -1)
+            if c_v2:
+                c_action = torch.cat((torch.zeros_like(c_mu[:, :64]),
+                                      finger_command(q_ref, c_mu[:, 64:70], carry.beta_fingers, carry.finger_close, carry.finger_open)), -1)
+                arm_D[:] = torch.where(c_mode[:, None], arm_delta_step(arm_D, torch.tanh(c_mu[:, :7]), carry), arm_D)
+            else:
+                c_action = torch.cat((carry.beta_latent*torch.tanh(c_mu[:, :64]),
+                                      (q_ref+carry.beta_fingers*torch.tanh(c_mu[:, 64:70])).clamp(-1, 1)), -1)
             action = torch.where(c_mode[:, None], c_action, m_mu)
             release = phase == RELEASE
             action = torch.where(release[:, None], torch.cat((last_latent, q_open), -1), action)
@@ -363,6 +417,7 @@ def run(args):
             for s_ in m_states+c_states+(p_states if p_model is not m_model else ()):
                 s_[:, done, :] = 0
             phase_steps += 1
+            c_steps += c_mode.long()
             # -------- episode ends (robot fall, object on the floor, numerical failure)
             fell = info['episode_final']['robot_fall'].bool() if 'robot_fall' in info.get('episode_final', {}) else torch.zeros_like(done)
             reasons = {k: v for k, v in env._termination_reasons.items()}
@@ -413,17 +468,34 @@ def run(args):
                 anchored[j] = True
                 for s_ in c_states:
                     s_[:, j, :] = 0
+                c_steps[j], unsupported[j], arm_D[j] = 0, 0, 0.
+                if c_v2:
+                    body = env.robot.data.body_state_w[jj]
+                    q_now = env.robot.data.joint_pos[jj][:, env._body_ids][:, right_arm]
+                    t_po, palm_torso = grasp_in_torso(body[:, torso_idx], body[:, palm_link], env.object.data.root_pos_w[jj])
+                    _, q_c, p_c = postures.select(t_po, palm_torso, q_now, carry_target[jj])
+                    q_grasp[j], q_carry[j], arm_now[j] = q_now[0], q_c[0], q_now[0]
+                    records[j]['carry_posture'] = dict(max_joint_change_rad=round(float((q_c-q_now).abs().max()), 3),
+                                                       predicted_object_minus_target_m=round(float((p_c-carry_target[jj]).norm()), 3))
                 nav[j] = NavigationReference(planner_path, session=first_nav.session, speed_limit=max(.3, args.speed))
                 phase[j], phase_steps[j] = SETTLE, 0
                 drop_count[j] = 0
                 records[j]['grasp_s'] = round(t+dt, 2)
             for j in torch.nonzero(ing & (phase_steps*dt > args.grasp_limit)).flatten().tolist():
                 finish(j, 'no_grasp', t+dt)
-            # carrying: drops (C's criterion: 12 cm beyond the hold for 6 steps, or below 25 cm)
+            # carrying: drops ('offset': v1's 12 cm beyond the hold for 6 steps; 'support': C v2's support rule;
+            # both: or below the floor height)
             carrying = torch.isin(phase, torch.tensor(C_PHASES, device=d))
             far = carrying & ((offset-hold_ref).norm(dim=-1) > carry.drop_excess_m)
             drop_count = torch.where(far, drop_count+1, torch.zeros_like(drop_count))
-            dropped = carrying & ((drop_count >= carry.drop_steps) | (obj_pos[:, 2] < carry.drop_floor_m))
+            _, _, supported = support_state()
+            counting = carrying & (c_steps.float()*dt > carry.warmup_s)
+            unsupported = torch.where(counting & ~supported, unsupported+1, torch.zeros_like(unsupported))
+            if args.hold_rule == 'support':
+                lost = unsupported >= int(round(carry.unsupported_s/dt))
+            else:
+                lost = drop_count >= carry.drop_steps
+            dropped = carrying & (lost | (obj_pos[:, 2] < carry.drop_floor_m))
             for j in torch.nonzero(dropped).flatten().tolist():
                 finish(j, 'dropped_'+PHASES[int(phase[j])], t+dt)
             # settle -> walk
@@ -438,7 +510,9 @@ def run(args):
                        position=[round(float(x), 3) for x in (env.robot.data.root_pos_w[j, :2]-env.scene.env_origins[j, :2])])
             # final -> place (switch C -> M) if still holding
             for j in torch.nonzero((phase == FINAL) & (phase_steps*dt >= args.final_s)).flatten().tolist():
-                holding = float((offset[j]-hold_ref[j]).norm()) < carry.retain_m
+                holding_offset = float((offset[j]-hold_ref[j]).norm()) < carry.retain_m
+                records[j].update(holding_offset_at_handback=holding_offset, supported_at_handback=bool(supported[j]))
+                holding = bool(supported[j]) if args.hold_rule == 'support' else holding_offset
                 records[j]['holding_at_handback'] = holding
                 if not holding:
                     finish(j, 'arrived_not_holding', t+dt)
@@ -675,7 +749,10 @@ def main():
     p.add_argument('--backoff', type=float, default=.6)
     p.add_argument('--table-offset', type=float, default=1., help='table B centre, to the robot\'s right (m)')
     p.add_argument('--grasp-limit', type=float, default=20.)
-    p.add_argument('--settle-s', type=float, default=1.5)
+    p.add_argument('--settle-s', type=float, default=None, help="default: C's warm-up + secure phase (v1 0.5 + 1.0 s)")
+    p.add_argument('--hold-rule', choices=('offset', 'support'), default=None, help="default 'support' for carry v2, 'offset' for v1")
+    p.add_argument('--contact-condim', type=int, default=None, help='scene contact model (C v2 trains with 4); raise --njmax')
+    p.add_argument('--contact-torsional', type=float, default=None)
     p.add_argument('--carry-limit', type=float, default=70.)
     p.add_argument('--final-s', type=float, default=2.)
     p.add_argument('--place-limit', type=float, default=15.)

@@ -11,6 +11,13 @@ parameters on every geom (dextrah_lab/mj/robot.ContactParams), the carry expert 
 deterministic mean actions at the given curriculum level, and the script reports for held objects
 (within 3 cm of the hold, after the warm-up): object-vs-palm angular and linear speed, standing
 (settle / final) vs walking; drops per held second (hazard); C's exact success rates.
+
+Slip diagnostic (carry v2 reward review, 2026-10-27): percentiles of the raw, 0.1 s and 0.3 s smoothed
+(exponential average) relative speeds for held objects in the secure phase (table present), walking
+and the final stand; and net rotation vs path: every 0.5 s, for objects held throughout, the angle
+between the object's palm-relative orientation at the window start and end vs the integral of
+|w_rel| over the window. Vibration: a large integral with little net rotation. Held = supported by
+the hand (carry v2) or within 3 cm of the hold (v1). Optional solimp (dmin, dmax) per setting.
 """
 import argparse
 import json
@@ -20,10 +27,11 @@ from pathlib import Path
 import traceback
 
 
-def run_setting(args, condim, torsional):
+def run_setting(args, condim, torsional, solimp=None):
     import numpy as np
     import torch
-    from dextrah_lab.mj.carry_env import CONTEXT_DIM, G1CarryMjEnv
+    from isaaclab.utils.math import quat_conjugate, quat_mul
+    from dextrah_lab.mj.carry_env import G1CarryMjEnv
     from dextrah_lab.mj.env import load_run_cfg
     from dextrah_lab.mj.factory import DEFAULT_MUJOCO, WORKSPACE
     from dextrah_lab.mj.robot import ContactParams
@@ -36,7 +44,11 @@ def run_setting(args, condim, torsional):
     run = args.checkpoint.resolve().parent.parent
     contract = json.loads((run/'task_contract.json').read_text())
     cm = contract['carry_mjlab']
-    settings = CarrySettings(**{k: tuple(v) if isinstance(v, list) else v for k, v in cm['settings'].items()})
+    raw_settings = {k: tuple(v) if isinstance(v, list) else v for k, v in cm['settings'].items()}
+    if args.no_disturbance:
+        raw_settings.update(disturbance=0., push_probability=0.)
+    settings = CarrySettings(**raw_settings)
+    v2 = settings.version == 2
     task_run = Path(contract['task_config_source']).parent.parent
     task_contract = json.loads((task_run/'task_contract.json').read_text())
     cfg = load_run_cfg(task_run)
@@ -45,7 +57,11 @@ def run_setting(args, condim, torsional):
     holding = Path(cm['holding_state'])
     held_contract = json.loads((holding.parent.parent/'task_contract.json').read_text())
     sonic = FrozenSonic(WORKSPACE/'GRAIL', WORKSPACE/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', device)
-    params = SceneParams(contact=ContactParams(condim=condim, torsional=torsional))
+    base = ContactParams()
+    contact = dict(condim=condim, torsional=torsional)
+    if solimp is not None:
+        contact['solimp'] = (solimp[0], solimp[1])+tuple(base.solimp[2:])
+    params = SceneParams(contact=ContactParams(**contact))
     njmax = args.njmax if condim == 3 else int(args.njmax*condim/3)
     env = G1CarryMjEnv(cfg, sonic=sonic, carry=settings, holding_state=holding,
                        held_settings=SgsSettings(**dict(held_contract['sgs']['settings'], eval_pool_size=0)),
@@ -71,8 +87,26 @@ def run_setting(args, condim, torsional):
     stand_ang, walk_ang, stand_lin, walk_lin = [], [], [], []
     held_seconds = {'stand': 0., 'walk': 0.}
     episodes = successes = falls = 0
+    dt, n = env.step_dt, env.num_envs
+    buckets = ('secure', 'walk', 'final')
+    signals = ('ang_raw', 'ang_0.1s', 'ang_0.3s', 'lin_raw', 'lin_0.1s', 'lin_0.3s')
+    samples = {b: {k: [] for k in signals} for b in buckets}
+    ema1, ema3 = torch.zeros(n, 6, device=device), torch.zeros(n, 6, device=device)
+    W = round(.5/dt)
+    q_prev = torch.zeros(n, 4, device=device); q_prev[:, 0] = 1.
+    integral = torch.zeros(n, device=device)
+    held_all = torch.zeros(n, dtype=torch.bool, device=device)
+    win_bucket = torch.zeros(n, dtype=torch.long, device=device)
+    windows = {b: dict(net=[], path=[]) for b in buckets}
+
+    def bucket_of(ph):
+        return torch.where(ph == ClipSequencer.WALK, 1, torch.where(ph == ClipSequencer.FINAL, 2, 0))
+
+    def rel_quat():
+        _, palm = env._palm()
+        return quat_mul(quat_conjugate(palm[:, 3:7]), env.object.data.root_quat_w)
     with torch.inference_mode():
-        for step in range(round(args.seconds/env.step_dt)):
+        for step in range(round(args.seconds/dt)):
             out = model(dict(obs=torch.cat((obs['policy'], leader), -1), is_train=False, prev_actions=None, rnn_states=states))
             states = out['rnn_states']
             phase_before = env._seq.phase(env._episode_time())
@@ -81,14 +115,41 @@ def run_setting(args, condim, torsional):
             for s_ in states:
                 s_[:, done, :] = 0
             t = env._episode_time()
-            held = (env._offset_error < .03) & (t > settings.warmup_s+.1) & ~done
+            rel = env._rel_vel_palm
+            ema1 += min(1., dt/.1)*(rel-ema1)
+            ema3 += min(1., dt/.3)*(rel-ema3)
+            ema1[done] = 0.; ema3[done] = 0.
+            hold = env._supported if v2 else env._offset_error < .03
+            held = hold & (t > settings.warmup_s+.1) & ~done
             walking = phase_before == ClipSequencer.WALK
             standing = (phase_before == ClipSequencer.SETTLE) | (phase_before == ClipSequencer.FINAL)
-            ang, lin = env._rel_vel_palm[:, 3:].norm(dim=-1), env._rel_vel_palm[:, :3].norm(dim=-1)
+            ang, lin = rel[:, 3:].norm(dim=-1), rel[:, :3].norm(dim=-1)
             for mask, a_list, l_list, key in ((held & standing, stand_ang, stand_lin, 'stand'), (held & walking, walk_ang, walk_lin, 'walk')):
                 if bool(mask.any()):
                     a_list.append(ang[mask].cpu()); l_list.append(lin[mask].cpu())
-                held_seconds[key] += float(mask.sum())*env.step_dt
+                held_seconds[key] += float(mask.sum())*dt
+            b_now = bucket_of(phase_before)
+            if step % 2 == 0:
+                values = dict(zip(signals, (ang, ema1[:, 3:].norm(dim=-1), ema3[:, 3:].norm(dim=-1),
+                                            lin, ema1[:, :3].norm(dim=-1), ema3[:, :3].norm(dim=-1))))
+                for i, b in enumerate(buckets):
+                    m = held & (b_now == i)
+                    if bool(m.any()):
+                        for k in signals:
+                            samples[b][k].append(values[k][m].cpu())
+            # net rotation vs path over 0.5 s windows
+            integral += ang*dt
+            held_all &= held & (b_now == win_bucket)
+            if step % W == W-1:
+                q_now = rel_quat()
+                dot = (q_now*q_prev).sum(-1).abs().clamp(max=1.)
+                net = 2*torch.acos(dot)
+                for i, b in enumerate(buckets):
+                    m = held_all & (win_bucket == i)
+                    if bool(m.any()):
+                        windows[b]['net'].append(net[m].cpu()); windows[b]['path'].append(integral[m].cpu())
+                q_prev, integral = q_now, torch.zeros_like(integral)
+                held_all, win_bucket = held.clone(), b_now.clone()
             falls += int((done & env._body_fallen).sum())
             episodes += int(done.sum())
     q = lambda xs, p: float(torch.cat(xs).quantile(p)) if xs else float('nan')
@@ -103,7 +164,21 @@ def run_setting(args, condim, torsional):
                drop_hazard_per_s=dict(stand=drops['stand']/max(held_seconds['stand'], 1e-9),
                                       walk=drops['walk']/max(held_seconds['walk'], 1e-9)),
                held_seconds=held_seconds, drops=drops, falls=falls, episodes_ended=episodes, exact=rates,
-               outcomes={k: float(v.mean()) for k, v in env._sgs.train_stats.items()})
+               outcomes={k: float(v.mean()) for k, v in env._sgs.train_stats.items()},
+               solimp=list(params.contact.solimp), disturbance=settings.disturbance, slip_scales=dict(
+                   angular=getattr(settings, 'slip_w_scale', None), linear=getattr(settings, 'slip_v_scale', None)))
+    pct = (.1, .25, .5, .75, .9)
+    res['slip_percentiles'] = {b: {k: ([round(float(torch.cat(v).quantile(p_)), 4) for p_ in pct] if v else None)
+                                   for k, v in samples[b].items()} for b in buckets}
+    res['slip_percentiles']['levels'] = list(pct)
+    res['net_rotation_0.5s'] = {}
+    for b in buckets:
+        if windows[b]['net']:
+            net, path = torch.cat(windows[b]['net']), torch.cat(windows[b]['path'])
+            res['net_rotation_0.5s'][b] = dict(windows=int(len(net)), net_rate_median=round(float(net.median())/.5, 4),
+                                               path_rate_median=round(float(path.median())/.5, 4),
+                                               net_over_path_median=round(float((net/path.clamp_min(1e-6)).median()), 4),
+                                               net_rate_p90=round(float(net.quantile(.9))/.5, 4))
     print('CONTACT_TEST '+json.dumps(res), flush=True)
     del env
     torch.cuda.empty_cache()
@@ -116,7 +191,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--checkpoint', type=Path, required=True, help='carry expert checkpoint')
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--settings', default='3:0.005/4:0.005/4:0.02/6:0.02', help='condim:torsional list, "/"-separated (sbatch --export splits on commas)')
+    p.add_argument('--settings', default='3:0.005/4:0.005/4:0.02/6:0.02',
+                   help='condim:torsional[:solimp_dmin:solimp_dmax] list, "/"-separated (sbatch --export splits on commas)')
+    p.add_argument('--no-disturbance', action='store_true', help='pushes off (carry v2 disturbance 0, v1 wrist pushes 0)')
     p.add_argument('--level', type=int, default=2)
     p.add_argument('--seconds', type=float, default=60.)
     p.add_argument('--num-envs', type=int, default=1200)
@@ -130,8 +207,9 @@ def main():
         from dextrah_lab.mj.compat import install
         install()
         for item in args.settings.replace(',', '/').split('/'):
-            c, tors = item.split(':')
-            results.append(run_setting(args, int(c), float(tors)))
+            f = item.split(':')
+            solimp = (float(f[2]), float(f[3])) if len(f) == 4 else None
+            results.append(run_setting(args, int(f[0]), float(f[1]), solimp))
             args.output.write_text(json.dumps(results, indent=2))
         report.update(completed=True)
         print('CONTACT_TEST_COMPLETE', flush=True)

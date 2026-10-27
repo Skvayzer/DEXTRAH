@@ -83,8 +83,17 @@ def build_env(args, run, contract, device):
                 raise KeyError(f'domain_randomization.{key} missing')
             setattr(cfg.domain_randomization, key, value)
     sonic = FrozenSonic(WORKSPACE/'GRAIL', WORKSPACE/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', device)
+    scene_params = None
+    if getattr(args, 'contact_condim', None) is not None or getattr(args, 'contact_torsional', None) is not None:
+        # Opt-in contact model on every geom (as the training flags --contact-condim / --contact-torsional).
+        from dextrah_lab.mj.robot import ContactParams
+        from dextrah_lab.mj.scene import SceneParams
+        base = ContactParams()
+        scene_params = SceneParams(contact=ContactParams(
+            condim=getattr(args, 'contact_condim', None) or base.condim,
+            torsional=base.torsional if getattr(args, 'contact_torsional', None) is None else args.contact_torsional))
     return G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=device, nconmax=args.nconmax,
-                             njmax=args.njmax, mujoco_cfg=DEFAULT_MUJOCO, seed=args.seed), cfg
+                             njmax=args.njmax, mujoco_cfg=DEFAULT_MUJOCO, seed=args.seed, scene_params=scene_params), cfg
 
 
 def record(args):
