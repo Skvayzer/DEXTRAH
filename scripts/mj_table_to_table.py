@@ -192,7 +192,7 @@ def run(args):
     postures = None
     if c_v2:
         from dextrah_lab.wholebody.carry_posture import CarryPostures
-        postures = CarryPostures(carry.postures, d, target=carry.carry_target, target_jitter=0.)
+        postures = CarryPostures(carry.postures, d, target=carry.carry_target, target_jitter=0., w_q=carry.posture_w_q)
     lateral = torch.tensor([-1., 0., 0.], device=d)        # robot's right for the -90 deg start yaw (checked below)
     shift = args.table_offset*lateral                       # table A -> table B
     table_a, table_b = z(3), z(3)                           # per world, after the reset (table height varies)
@@ -515,7 +515,15 @@ def run(args):
             carrying = torch.isin(phase, torch.tensor(C_PHASES, device=d))
             far = carrying & ((offset-hold_ref).norm(dim=-1) > carry.drop_excess_m)
             drop_count = torch.where(far, drop_count+1, torch.zeros_like(drop_count))
-            _, _, supported = support_state()
+            _, n_contacts, supported = support_state()
+            if c_v2 and carry.posture_min_contacts > 0:
+                # C's weak-grasp gate at the end of its warm-up (as the training env): no carry move. The arm blend
+                # is still 0 at this step, so applying it after the step matches training.
+                at_check = carrying & (c_steps == int(round(carry.warmup_s/dt)))
+                weak = at_check & (n_contacts < carry.posture_min_contacts)
+                q_carry[weak] = q_grasp[weak]
+                for j in torch.nonzero(at_check).flatten().tolist():
+                    records[j]['posture_skipped'] = bool(weak[j])
             counting = carrying & (c_steps.float()*dt > carry.warmup_s)
             unsupported = torch.where(counting & ~supported, unsupported+1, torch.zeros_like(unsupported))
             if args.hold_rule == 'support':
