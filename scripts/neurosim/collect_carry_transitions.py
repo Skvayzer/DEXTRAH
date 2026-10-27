@@ -18,6 +18,12 @@ lists the fields):
 Actions: deterministic means (--action-noise 0), Gaussian noise on the raw outputs (SuperMimic collects
 with N(0, 0.1^2)), or samples from the policy's own distribution (--action-noise policy).
 
+Coverage of pre-drop states (review Q3, issue 4): a fixed share of worlds (--perturb-fraction) is perturbed:
+Gaussian noise on the EXECUTED finger commands (the raw outputs are mapped back through the exact inverse of
+the finger stabiliser, so tanh saturation does not shrink it), loosened-grip events (an offset toward open for
+0.5-2 s), and extra horizontal object pushes through the env's own push mechanism. Logged per row
+('loosen', 'extra_push') and per world ('perturbed' in context.pt).
+
 Episode ends: values logged at a done step already belong to the reset episode; the end reason of the
 finished episode is captured before the reset (the env's outcome hook), so transitions into a done step
 carry only their end label.
@@ -48,6 +54,14 @@ def main():
     p.add_argument('--level', type=int, default=2)
     p.add_argument('--action-noise', default='0.1', help="'policy' (sample the policy) or a Gaussian std on the raw outputs")
     p.add_argument('--contact-condim', type=int, default=None, help='default: the run contract (C v2: 4)')
+    p.add_argument('--perturb-fraction', type=float, default=0., help='share of worlds with coverage perturbations')
+    p.add_argument('--target-noise', type=float, default=.3, help='perturbed worlds: std of the executed finger commands')
+    p.add_argument('--loosen-rate', type=float, default=.2, help='perturbed worlds: loosening events per second')
+    p.add_argument('--loosen-s', type=float, nargs=2, default=(.5, 2.))
+    p.add_argument('--loosen-offset', type=float, nargs=2, default=(.1, .4), help='command units toward open')
+    p.add_argument('--push-rate', type=float, default=.2, help='perturbed worlds: extra object pushes per second')
+    p.add_argument('--push-n', type=float, default=3., help='extra push magnitude U(0, push_n) N, horizontal')
+    p.add_argument('--push-s', type=float, nargs=2, default=(.1, .5))
     p.add_argument('--nconmax', type=int, default=64)
     p.add_argument('--njmax', type=int, default=400)
     p.add_argument('--seed', type=int, default=0)
@@ -167,6 +181,19 @@ def collect(args):
 
     noise = args.action_noise
     sigma = None if noise == 'policy' else float(noise)
+    from dextrah_lab.wholebody.carry_compose import finger_command
+    g = torch.Generator(device=device).manual_seed(args.seed+1)
+    rnd = lambda *shape: torch.rand(*shape, device=device, generator=g)
+    perturbed = rnd(n) < args.perturb_fraction
+    loosen_left = torch.zeros(n, dtype=torch.long, device=device)
+    loosen_amt = torch.zeros(n, device=device)
+    close, open_ = settings.finger_close, settings.finger_open
+
+    def raw_for_command(c, q_ref):
+        # exact inverse of finger_command(q_ref, raw, beta, close, open) where it is not clamped
+        d = c-q_ref
+        t_ = torch.where(d >= 0, d/close, d/open_)
+        return torch.atanh(t_.clamp(-.999, .999))
     obs, _ = env.reset()
     # contact reader exists after the first reset (the carry v2 env already enables both channels)
     env.contacts.object_table = True
@@ -182,18 +209,42 @@ def collect(args):
         for step in range(steps):
             out = model(dict(obs=torch.cat((obs['policy'], leader), -1), is_train=False, prev_actions=None, rnn_states=states))
             states = out['rnn_states']
-            raw = out['mus']
+            mus = out['mus']
+            raw = mus
             if sigma is None:
                 raw = out['actions'] if 'actions' in out else raw+out['sigmas']*torch.randn_like(raw)
             elif sigma > 0:
                 raw = raw+sigma*torch.randn_like(raw)
+            extra_push = torch.zeros(n, dtype=torch.bool, device=device)
+            if bool(perturbed.any()):
+                # loosening events (offset toward open), executed-command noise, extra object pushes
+                start = perturbed & (loosen_left == 0) & (rnd(n) < args.loosen_rate*dt)
+                lo, hi = args.loosen_s
+                loosen_left = torch.where(start, torch.round((lo+(hi-lo)*rnd(n))/dt).long(), (loosen_left-1).clamp(min=0))
+                lo, hi = args.loosen_offset
+                loosen_amt = torch.where(start, lo+(hi-lo)*rnd(n), loosen_amt)
+                q_ref = env._q_ref
+                c = finger_command(q_ref, mus[:, 64:70], settings.beta_fingers, close, open_)
+                c = c+args.target_noise*torch.randn(c.shape, device=device, generator=g)
+                c = (c-(loosen_amt*(loosen_left > 0).float())[:, None]).clamp(-1., 1.)
+                raw = raw.clone()
+                raw[:, 64:70] = torch.where(perturbed[:, None], raw_for_command(c, q_ref), raw[:, 64:70])
+                extra_push = perturbed & (env._object_steps == 0) & (rnd(n) < args.push_rate*dt)
+                ids = torch.nonzero(extra_push).flatten()
+                if ids.numel():
+                    a = rnd(len(ids))*2*math.pi
+                    direction = torch.stack((a.cos(), a.sin(), torch.zeros_like(a)), -1)
+                    lo, hi = args.push_s
+                    env._object_force[ids] = direction*(args.push_n*rnd(len(ids)))[:, None]
+                    env._object_steps[ids] = torch.round((lo+(hi-lo)*rnd(len(ids)))/dt).long().clamp(min=1)
             end_code.zero_()
             obs, _, terminated, truncated, _ = env.step(raw)
             done = terminated | truncated
             for s_ in states:
                 s_[:, done, :] = 0
             row = snapshot()
-            row.update(raw_arm=raw[:, :7], raw_fingers=raw[:, 64:70], done=done.float(), end=end_code.float())
+            row.update(raw_arm=raw[:, :7], raw_fingers=raw[:, 64:70], done=done.float(), end=end_code.float(),
+                       loosen=(loosen_amt*(loosen_left > 0).float()), extra_push=extra_push.float())
             for k, v in row.items():
                 chunk.setdefault(k, []).append(v.float().reshape(n, -1).clone())
             for r in END_REASONS[1:]:
@@ -204,7 +255,11 @@ def collect(args):
                 chunk, chunk_id = {}, chunk_id+1
                 print(f'NEUROSIM_CHUNK {chunk_id} step {step+1}/{steps} ends {ends} {time.time()-t0:.0f}s', flush=True)
     bps = env._bps_features.cpu()
-    torch.save(dict(bps=bps, asset=env._object_asset_index_per_env.cpu(), hand_joint_names=[names[i] for i in hand_ids.tolist()],
+    torch.save(dict(bps=bps, asset=env._object_asset_index_per_env.cpu(), perturbed=perturbed.cpu(),
+                    perturbation=dict(fraction=args.perturb_fraction, target_noise=args.target_noise, loosen_rate=args.loosen_rate,
+                                      loosen_s=list(args.loosen_s), loosen_offset=list(args.loosen_offset), push_rate=args.push_rate,
+                                      push_n=args.push_n, push_s=list(args.push_s)),
+                    hand_joint_names=[names[i] for i in hand_ids.tolist()],
                     actuated=act_pos, dt=dt, condim=condim, end_reasons=END_REASONS,
                     carry_settings=cm['settings'], checkpoint=str(args.checkpoint)), args.output/'context.pt')
     return dict(steps=steps, transitions=steps*n, ends=ends, chunks=chunk_id, condim=condim, envs=n, dt=dt,
