@@ -40,6 +40,10 @@ def main():
     p.add_argument('--duration-s', type=float, default=.25)
     p.add_argument('--horizon-s', type=float, default=.5)
     p.add_argument('--replicas', type=int, default=2, help='extra unperturbed copies per state (simulator noise floor)')
+    p.add_argument('--bundle', type=int, default=1,
+                   help='K copies of every (state, direction) with independent finger-command jitter; outcomes averaged '
+                        '(expected effects, as Bundled Contact Gradients average perturbed branches)')
+    p.add_argument('--jitter', type=float, default=0., help='std of the per-step finger-command jitter (command units)')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
     report = dict(completed=False, args={k: str(v) for k, v in vars(args).items()})
@@ -72,7 +76,8 @@ def run(args):
     dirs = [(0, 0., 0.)]*(1+args.replicas)+[(j+1, s, dl) for dl in args.deltas for j in range(6) for s in (1., -1.)]
     D = len(dirs)
     R = 1+args.replicas                                            # block layout per state: R baselines, then +- pairs
-    n = args.states*D
+    K = max(1, args.bundle)
+    n = args.states*D*K                                            # world = (state * D + direction) * K + copy
     override = dict(mass_scale=(1., 1.), com_offset_m=0., disturbance=0., push_probability=0., carry_jitter=0.)
     env, policy, contract, settings = build_carry_env(args.checkpoint, n, settings_override=override,
                                                       holding_state=args.holding_state, seed=args.seed)
@@ -80,12 +85,13 @@ def run(args):
     g = torch.Generator().manual_seed(args.seed)
     configs = env._sgs.configs
     chosen = torch.randperm(configs.numel(), generator=g)[:args.states].to(dev)
-    assigned = chosen.repeat_interleave(D)                 # world w -> holding config index (into configs)
+    assigned = chosen.repeat_interleave(D*K)               # world w -> holding config index (into configs)
     env._sgs.eval_mask[:] = False
     env._sgs.sampler.sample = lambda k, generator=None: assigned[:k]
-    finger = torch.tensor([d[0] for d in dirs], device=dev).repeat(args.states)       # 0 = baseline
-    sign = torch.tensor([d[1] for d in dirs], device=dev).repeat(args.states)
-    delta = torch.tensor([d[2] for d in dirs], device=dev).repeat(args.states)
+    finger = torch.tensor([d[0] for d in dirs], device=dev).repeat_interleave(K).repeat(args.states)   # 0 = baseline
+    sign = torch.tensor([d[1] for d in dirs], device=dev).repeat_interleave(K).repeat(args.states)
+    delta = torch.tensor([d[2] for d in dirs], device=dev).repeat_interleave(K).repeat(args.states)
+    jitter_g = torch.Generator(device=dev).manual_seed(args.seed+7)
     offset = torch.zeros(n, 6, device=dev)
     rows = (finger > 0).nonzero().flatten()
     offset[rows, finger[rows]-1] = sign[rows]*delta[rows]
@@ -110,9 +116,15 @@ def run(args):
             out = policy(dict(obs=torch.cat((obs['policy'], leader), -1), is_train=False, prev_actions=None, rnn_states=states))
             states = out['rnn_states']
             raw = out['mus'].clone()
-            if t0 <= step < t0+P:
+            perturb = t0 <= step < t0+P
+            if perturb or args.jitter > 0:
                 q_ref = env._q_ref
-                c = (finger_command(q_ref, raw[:, 64:70], settings.beta_fingers, close, open_)+offset).clamp(-1., 1.)
+                c = finger_command(q_ref, raw[:, 64:70], settings.beta_fingers, close, open_)
+                if perturb:
+                    c = c+offset
+                if args.jitter > 0:
+                    c = c+args.jitter*torch.randn(c.shape, device=dev, generator=jitter_g)
+                c = c.clamp(-1., 1.)
                 d = c-q_ref
                 t_ = torch.where(d >= 0, d/close, d/open_)
                 raw[:, 64:70] = torch.atanh(t_.clamp(-.999, .999))
@@ -140,7 +152,8 @@ def run(args):
     t = {k: v.to(dev) for k, v in t.items()}
     s0 = torch.full((n,), 1, dtype=torch.long, device=dev)            # row 1: the last unperturbed state
     e = torch.arange(n, device=dev)
-    base = (torch.arange(n, device=dev)//D)*D                        # first baseline world of each world's state
+    idx_w = torch.arange(n, device=dev)
+    base = (idx_w//(D*K))*(D*K)+idx_w % K                            # first baseline world of the same state and copy
     with torch.no_grad():
         w = gather(t, s0, e, H)
         w_frozen = dict(w)
@@ -174,6 +187,10 @@ def run(args):
     from dextrah_lab.neurosim.evaluate import compare_finite_differences
     S = args.states
     keep = torch.cat((torch.zeros(1, dtype=torch.long), torch.arange(R, D))).to(dev)      # first baseline + the pairs
+    # expected outcome of each (state, direction): mean over the K jittered copies
+    avg = lambda v: v.reshape(S, D, K).mean(-1)
+    sim = {k: avg(v).flatten() for k, v in sim.items()}
+    model = {proto: {k: avg(v).flatten() for k, v in d.items()} for proto, d in model.items()}
     sel = lambda v: v.reshape(S, D)[:, keep].flatten()
     summary = {}
     for name in ('force', 'rotation_deg', 'displacement_mm', 'support', 'lost'):
@@ -190,7 +207,7 @@ def run(args):
             pick = lambda v: v.reshape(S, D)[:, sub].flatten()
             summary[name][f'delta_{dl:g}'] = {proto: compare_finite_differences(pick(sim[name]), pick(model[proto][name]), S, len(idx))
                                               for proto in ('teacher',)}
-    return dict(summary=summary, worlds=n, states=S, directions=D-1, deltas=list(args.deltas), t0_s=args.t0_s,
+    return dict(summary=summary, worlds=n, states=S, directions=D-R, bundle=K, jitter=args.jitter, deltas=list(args.deltas), t0_s=args.t0_s,
                 duration_s=args.duration_s, horizon_s=args.horizon_s, ended_in_window=int(ended.sum()), lost=int(lost.sum()),
                 sim_seconds=round(sim_s, 1), wall_s=round(time.time()-t_start, 1))
 
