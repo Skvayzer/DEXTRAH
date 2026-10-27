@@ -117,7 +117,9 @@ def state_error(model, x_hat, R_hat, x, R):
     rot_std = std[3:9].mean()
     sq = lambda a, b, s: (((a-b)/s)**2).mean(-1)
     return dict(pos=sq(x_hat[:, :3], x[:, :3], std[:3]),
-                rot=(so3_log(R.transpose(-1, -2)@R_hat)**2).sum(-1)/rot_std**2,
+                # chordal distance |R_hat - R|_F^2 / 2 = 2 (1 - cos theta) ~ theta^2: smooth everywhere (the squared
+                # rotation-vector norm has an unbounded gradient near theta = pi; job 1591 iteration 15000: |g| 8130)
+                rot=((R_hat-R)**2).sum((-1, -2))/2/rot_std**2,
                 linvel=sq(x_hat[:, 9:12], x[:, 9:12], std[9:12]), angvel=sq(x_hat[:, 12:15], x[:, 12:15], std[12:15]),
                 hand_q=sq(x_hat[:, 15:15+H], x[:, 15:15+H], std[15:15+H]),
                 hand_qd=sq(x_hat[:, 15+H:], x[:, 15+H:], std[15+H:]))

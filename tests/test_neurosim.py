@@ -122,6 +122,17 @@ class NeurosimTests(unittest.TestCase):
         self.assertIn('logistic_phase', rep['phase_matched_negatives'])
         self.assertEqual(rep['random_negatives']['model_teacher']['positives'] >= 1, True)
 
+    def test_rotation_loss_gradient_bounded_near_pi(self):
+        from dextrah_lab.neurosim.model import state_error
+        model = HandObjectWorldModel(Layout(hand=4), hidden=(16,))
+        R = torch.eye(3).expand(4, 3, 3).clone()
+        v = torch.tensor([[0., 0., math.pi-1e-4], [0., 0., 3.], [0., 0., .1], [1e-6, 0., 0.]], requires_grad=True)
+        x = torch.zeros(4, 15+8)
+        err = state_error(model, x, so3_exp(v), x, R)['rot']
+        err.sum().backward()
+        self.assertTrue(torch.isfinite(v.grad).all() and float(v.grad.abs().max()) < 10.)
+        self.assertAlmostEqual(float(err[2]), 2*(1-math.cos(.1))/float(model.norm_state.std[3:9].mean())**2, places=5)
+
     def test_auc(self):
         self.assertAlmostEqual(auc(torch.tensor([.1, .4, .35, .8]), torch.tensor([0, 0, 1, 1])), .75)
         self.assertAlmostEqual(auc(torch.tensor([1., 1., 1., 1.]), torch.tensor([0, 1, 0, 1])), .5)
