@@ -444,6 +444,12 @@ def run(args):
                     finish(j, 'arrived_not_holding', t+dt)
                     continue
                 handback.append(j)
+                # Stance at table B vs the start stance at table A (robot frame of the start yaw).
+                rel_b = env.robot.data.root_pos_w[j, :2]-env.scene.env_origins[j, :2]-table_b[j, :2]
+                rel_a = start_pos[j, :2]-table_a[j, :2]
+                dyaw = float(yaw_of(env.robot.data.root_quat_w[j:j+1])[0]-start_yaw[j])
+                records[j]['stance_offset_m'] = [round(float(x), 3) for x in (rel_b-rel_a)]
+                records[j]['stance_yaw_offset_deg'] = round(math.degrees(math.atan2(math.sin(dyaw), math.cos(dyaw))), 1)
                 for s_ in m_states+(p_states if p_model is not m_model else ()):
                     s_[:, j, :] = 0
                 home_pos[j], home_yaw[j] = start_pos[j], start_yaw[j]     # table B where table A was
@@ -476,7 +482,8 @@ def run(args):
                 finish(j, 'dropped_place', t+dt)
             for j in torch.nonzero(placing & (phase_steps*dt > args.place_limit)).flatten().tolist():
                 finish(j, 'no_release', t+dt, goal_distance_m=round(float(goal_dist[j]), 3), table_support=bool(support[j] > .5),
-                       smoothed_speed_ms=round(float(velocity_ema[j].norm()), 3))
+                       smoothed_speed_ms=round(float(velocity_ema[j].norm()), 3),
+                       object_minus_goal_m=[round(float(x), 3) for x in (obj_pos[j]-goal_b[j, :3])])
             # release -> result
             for j in torch.nonzero((phase == RELEASE) & (phase_steps*dt >= args.release_s)).flatten().tolist():
                 rel_b = (obj_pos[j]-table_b[j])
