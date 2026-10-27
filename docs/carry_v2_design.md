@@ -29,6 +29,20 @@ condim 3 (no torsional friction).
 friction on robot, object and world geoms. Adopt only if held rotation and hazard drop; then all
 policies need a short fine-tune.
 
+Result (job 1581; carry v1 checkpoint 1565 unchanged, 1200 worlds x 60 s per setting, level 2):
+
+| condim / torsional | walking drop hazard | success | held rotation (median, walking) |
+| --- | --- | --- | --- |
+| 3 / 0.005 (default) | 2.00 %/s | 69.4% | 3.34 rad/s |
+| 4 / 0.005 | 1.56 %/s | 75.0% | 2.87 rad/s |
+| 4 / 0.02 | 1.77 %/s | 71.3% | 2.95 rad/s |
+| 6 / 0.02 | 1.62 %/s | 74.0% | 2.87 rad/s |
+
+Torsional friction helps (hazard -22%) but the remaining ~2.9 rad/s wobble does not respond to a 4x
+coefficient, so it is not twist about the contact normal (likely soft-contact compliance or wrist
+vibration). Carry v2 trains with condim 4 / 0.005 (CONTACT_CONDIM=4, MJ_NJMAX 400); M and M-place
+were trained under condim 3 and need a short fine-tune before they run under condim 4.
+
 **Actions.**
 * Fingers: q = clip(q_ref + d), d = 0.6 tanh(a) closing (a >= 0), 0.3 tanh(a) opening (Revo2: + closes).
 * Right arm (7 joints) through the SONIC reference: q_arm = q_ref_arm(t) + D, D <- 0.8 D + 0.2 * 0.4 tanh(a_arm),
@@ -58,6 +72,8 @@ L_max (20 -> 40 -> 80 s), speed (0.1 -> 0.3 m/s) and disturbance level k (0 -> 1
 | drop / fall | terminal: unsupported for 0.3 s or object below 0.30 m / robot fall | -20 / -50 |
 
 hold is off in the secure phase. gamma 0.995, rollout 32 (memory permitting), 100 critic-only epochs.
+Initialising from a v1 carry checkpoint resets the value normalisers (the v1 ones carry a ~1e9 sample
+count and cannot follow the new return scale: job 1583 value loss 0.2 -> 11 in 28 critic-only epochs).
 
 **Disturbances (scaled by k).** Hand/object forces via xfrc_applied (OCLO: the largest robustness
 factor), wrist pushes up to 25 N, pelvis pushes (Workhorse protocol 40 N x 1 s every 5-10 s as the
