@@ -54,12 +54,22 @@ def run_setting(args, condim, torsional):
     env._curriculum.level = args.level
     env._seq.set_level(args.level)
     model, _ = build_policy_dims(env, args.checkpoint, contract, device, env.cfg.observation_space, env.hand_surface_dim)
+    drops = {'stand': 0, 'walk': 0}
+    record = env._carry_record
+
+    def counting_record(ids):
+        # Count drops by phase BEFORE the env resets these episodes (the reset clears the drop flag).
+        ph = env._seq.phase(env._carry_t[ids].float()*env.step_dt, ids)
+        d = env._dropped[ids]
+        drops['walk'] += int((d & (ph == ClipSequencer.WALK)).sum())
+        drops['stand'] += int((d & ((ph == ClipSequencer.SETTLE) | (ph == ClipSequencer.FINAL))).sum())
+        return record(ids)
+    env._carry_record = counting_record
     obs, _ = env.reset()
     states = tuple(s.to(device) for s in model.get_default_rnn_state())
     leader = torch.zeros(env.num_envs, 1, device=device)
     stand_ang, walk_ang, stand_lin, walk_lin = [], [], [], []
     held_seconds = {'stand': 0., 'walk': 0.}
-    drops = {'stand': 0, 'walk': 0}
     episodes = successes = falls = 0
     with torch.inference_mode():
         for step in range(round(args.seconds/env.step_dt)):
@@ -79,9 +89,6 @@ def run_setting(args, condim, torsional):
                 if bool(mask.any()):
                     a_list.append(ang[mask].cpu()); l_list.append(lin[mask].cpu())
                 held_seconds[key] += float(mask.sum())*env.step_dt
-            dropped = done & env._dropped
-            drops['walk'] += int((dropped & walking).sum())
-            drops['stand'] += int((dropped & standing).sum())
             falls += int((done & env._body_fallen).sum())
             episodes += int(done.sum())
     q = lambda xs, p: float(torch.cat(xs).quantile(p)) if xs else float('nan')
@@ -109,7 +116,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--checkpoint', type=Path, required=True, help='carry expert checkpoint')
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--settings', default='3:0.005,4:0.005,4:0.02,6:0.02', help='condim:torsional list')
+    p.add_argument('--settings', default='3:0.005/4:0.005/4:0.02/6:0.02', help='condim:torsional list, "/"-separated (sbatch --export splits on commas)')
     p.add_argument('--level', type=int, default=2)
     p.add_argument('--seconds', type=float, default=60.)
     p.add_argument('--num-envs', type=int, default=1200)
@@ -122,7 +129,7 @@ def main():
     try:
         from dextrah_lab.mj.compat import install
         install()
-        for item in args.settings.split(','):
+        for item in args.settings.replace(',', '/').split('/'):
             c, tors = item.split(':')
             results.append(run_setting(args, int(c), float(tors)))
             args.output.write_text(json.dumps(results, indent=2))
