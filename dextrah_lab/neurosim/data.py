@@ -212,3 +212,17 @@ def gather(t, s, e, k):
     out['alive'] = alive
     out['has_next'] = alive & ~done[:, 1:]
     return out
+
+
+def combine(parts):
+    """Concatenate build_tensors outputs of several collections along the world axis (same row count)."""
+    T = parts[0]['done'].shape[0]
+    if any(q['done'].shape[0] != T for q in parts):
+        raise ValueError('collections must have the same number of rows')
+    out = {}
+    for k in parts[0]:
+        if any(k not in q for q in parts):
+            continue
+        dim = 0 if k in ('bps', 'asset') else 1
+        out[k] = torch.cat([q[k] for q in parts], dim)
+    return out

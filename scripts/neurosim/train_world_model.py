@@ -16,7 +16,9 @@ import traceback
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--data', type=Path, required=True, help='collector output directory (chunk_*.pt, context.pt)')
+    p.add_argument('--data', type=Path, nargs='+', required=True, help='collector output directories (combined along worlds)')
+    p.add_argument('--members', type=int, default=0, help='>0: probabilistic ensemble with this many members (ensemble.py)')
+    p.add_argument('--nll-weight', type=float, default=.1, help='ensemble: weight of the one-step Gaussian NLL')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--k', type=int, default=16, help='autoregressive window (v1: 8)')
     p.add_argument('--exo-mode', choices=('post', 'pre'), default='pre', help="'pre': only inputs known before the step (v1: post)")
@@ -65,16 +67,21 @@ def main():
 
 def train(args):
     import torch
-    from dextrah_lab.neurosim.data import FIELDS, Layout, build_tensors, gather, load_chunks, pre_event_mask, sample_windows, split_envs
+    from dextrah_lab.neurosim.data import FIELDS, Layout, build_tensors, combine, gather, load_chunks, pre_event_mask, sample_windows, split_envs
+    from dextrah_lab.neurosim.ensemble import EnsembleMean, EnsembleWorldModel, ensemble_window_loss, uncertainty_report
     from dextrah_lab.neurosim.evaluate import drop_prediction_report, loss_prediction, open_loop, open_loop_smoothed
     from dextrah_lab.neurosim.model import HandObjectWorldModel, window_loss
     torch.manual_seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
     dev = args.device
     t0 = time.time()
-    data, context = load_chunks(args.data, fields=FIELDS, max_chunks=args.max_chunks)
-    t = build_tensors(data, context, exo_mode=args.exo_mode, lowpass_tau=args.lowpass_tau or None, labels=args.labels)
-    del data
+    parts = []
+    for directory in args.data:
+        data, context = load_chunks(directory, fields=FIELDS, max_chunks=args.max_chunks)
+        parts.append(build_tensors(data, context, exo_mode=args.exo_mode, lowpass_tau=args.lowpass_tau or None, labels=args.labels))
+        del data
+    t = combine(parts) if len(parts) > 1 else parts[0]
+    del parts
     T, N = t['done'].shape
     asset = t.pop('asset')
     lowpass = 6 if args.lowpass_tau else 0
@@ -93,7 +100,12 @@ def train(args):
     t = {k: v.to(dev) for k, v in t.items()}
     g = torch.Generator().manual_seed(args.seed)
     hidden = tuple(int(x) for x in args.hidden.split(','))
-    model = HandObjectWorldModel(layout, hidden=hidden, exo_mode=args.exo_mode).to(dev)
+    if args.members > 0:
+        model = EnsembleWorldModel(layout, members=args.members, hidden=hidden, exo_mode=args.exo_mode).to(dev)
+        loss_fn = lambda w, **kw: ensemble_window_loss(model, w, args.k, nll_weight=args.nll_weight, **kw)
+    else:
+        model = HandObjectWorldModel(layout, hidden=hidden, exo_mode=args.exo_mode).to(dev)
+        loss_fn = lambda w, **kw: window_loss(model, w, args.k, **kw)
     model.dt = float(context['dt'])
     # normalisers from up to 2M training rows
     m = min(2_000_000, T*len(train_envs))
@@ -123,8 +135,8 @@ def train(args):
             weight = (1/U)/q
         else:
             weight = None
-        loss, logs = window_loss(model, gather(t, s, e, args.k), args.k, lost_pos_weight=args.lost_pos_weight,
-                                 window_weight=weight, support_in_secure=args.support_in_secure)
+        loss, logs = loss_fn(gather(t, s, e, args.k), lost_pos_weight=args.lost_pos_weight, window_weight=weight,
+                             support_in_secure=args.support_in_secure)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         grad = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.))
@@ -138,8 +150,8 @@ def train(args):
             model.eval()
             with torch.no_grad():
                 s, e = sample_windows(t, test_envs_d, args.k, args.batch, generator=g, device=dev)
-                test_loss, test_logs = window_loss(model, gather(t, s, e, args.k), args.k, lost_pos_weight=args.lost_pos_weight,
-                                                   support_in_secure=args.support_in_secure)
+                test_loss, test_logs = loss_fn(gather(t, s, e, args.k), lost_pos_weight=args.lost_pos_weight,
+                                               support_in_secure=args.support_in_secure)
             row = dict(iter=it, train_loss=round(float(loss), 5), test_loss=round(float(test_loss), 5),
                        test=dict((k, round(v, 5)) for k, v in test_logs.items()), wall_s=round(time.time()-t0, 1))
             history.append(row)
@@ -147,11 +159,15 @@ def train(args):
             if wandb.run:
                 wandb.log(dict({'test/loss': row['test_loss']}, **{f'test/{k}': v for k, v in row['test'].items()}), step=it)
     model.eval()
-    final = dict(open_loop=open_loop(model, t, test_envs_d, horizons=(1, 8, 16, 32), generator=g),
-                 open_loop_smoothed=open_loop_smoothed(model, t, test_envs_d, generator=g),
-                 loss_within_0p5s=loss_prediction(model, t, test_envs_d, generator=g),
-                 drop_prediction=drop_prediction_report(model, t, train_envs_d, test_envs_d, 30, g),
-                 open_loop_train_objects=open_loop(model, t, train_envs_d, generator=g))
+    evaluated = EnsembleMean(model) if args.members > 0 else model
+    evaluated.dt = model.dt
+    final = dict(open_loop=open_loop(evaluated, t, test_envs_d, horizons=(1, 8, 16, 32), generator=g),
+                 open_loop_smoothed=open_loop_smoothed(evaluated, t, test_envs_d, generator=g),
+                 loss_within_0p5s=loss_prediction(evaluated, t, test_envs_d, generator=g),
+                 drop_prediction=drop_prediction_report(evaluated, t, train_envs_d, test_envs_d, 30, g),
+                 open_loop_train_objects=open_loop(evaluated, t, train_envs_d, generator=g))
+    if args.members > 0:
+        final['uncertainty'] = uncertainty_report(model, t, test_envs_d, generator=g)
     print('NEUROSIM_FINAL '+json.dumps(final), flush=True)
     if wandb.run:
         flat = {}
@@ -182,6 +198,7 @@ def train(args):
         flat.update({f'loss_0p5s/{k}': lp[k] for k in ('auc', 'events', 'base_rate', 'mean_predicted', 'brier', 'brier_climatology')})
         wandb.run.summary.update(flat)
     torch.save(dict(state_dict=model.state_dict(), layout=layout.__dict__, hidden=hidden, dt=model.dt, exo_mode=args.exo_mode,
+                    members=args.members,
                     lowpass_tau=args.lowpass_tau, labels=args.labels,
                     test_assets=torch.unique(asset[test_mask]).tolist(), args=vars(args)), args.output/'world_model.pt')
     return dict(data=stats, history=history, final=final, wall_s=round(time.time()-t0, 1))

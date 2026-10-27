@@ -178,6 +178,36 @@ class NeurosimTests(unittest.TestCase):
         self.assertAlmostEqual(r2['cosine_median'], -1., places=4)
         self.assertEqual(r2['sign_agreement_clear'], 0.)
 
+    def test_probabilistic_ensemble(self):
+        from dextrah_lab.neurosim.data import combine
+        from dextrah_lab.neurosim.ensemble import EnsembleMean, EnsembleWorldModel, ensemble_window_loss, uncertainty_report
+        d1, c1 = synthetic(T=60, N=4, seed=1)
+        d2, c2 = synthetic(T=60, N=4, seed=2)
+        for d in (d1, d2):
+            d['phase'] = torch.full((60, 4, 1), 2.); d['carry_t'] = torch.arange(60.)[:, None, None].expand(60, 4, 1).clone()
+        c1['asset'], c2['asset'] = torch.arange(4), torch.arange(4, 8)
+        t = combine([build_tensors(d1, c1, exo_mode='pre', lowpass_tau=.3, labels='drop'),
+                     build_tensors(d2, c2, exo_mode='pre', lowpass_tau=.3, labels='drop')])
+        self.assertEqual(t['state'].shape[1], 8)
+        self.assertEqual(t['bps'].shape[0], 8)
+        t.pop('asset')
+        ens = EnsembleWorldModel(Layout(hand=4, lowpass=6, exo=EXO_DIM['pre']), members=3, hidden=(16, 16))
+        ens.fit_normalizers(t, (torch.randint(1, 60, (200,)), torch.randint(0, 8, (200,))))
+        w = gather(t, torch.tensor([3, 10, 20]), torch.tensor([0, 5, 7]), 6)
+        loss, logs = ensemble_window_loss(ens, w, 6)
+        self.assertTrue(math.isfinite(float(loss)))
+        loss.backward()
+        self.assertTrue(all(p.grad is None or torch.isfinite(p.grad).all() for p in ens.parameters()))
+        self.assertIn('nll', logs)
+        mean = EnsembleMean(ens)
+        xs, Rs, fs, ls = mean.rollout(w, 6)
+        self.assertEqual(xs[0].shape, w['state'][:, 0].shape)
+        self.assertTrue(torch.allclose(Rs[0]@Rs[0].transpose(-1, -2), torch.eye(3).expand(3, 3, 3), atol=1e-4))
+        res = open_loop(mean, t, torch.arange(8), horizons=(1, 8), samples=32)
+        self.assertIn(1, res)
+        rep = uncertainty_report(ens, t, torch.arange(8), horizons=(1, 4), samples=64, generator=torch.Generator().manual_seed(0))
+        self.assertIn('aleatoric_pos', rep)
+
     def test_auc(self):
         self.assertAlmostEqual(auc(torch.tensor([.1, .4, .35, .8]), torch.tensor([0, 0, 1, 1])), .75)
         self.assertAlmostEqual(auc(torch.tensor([1., 1., 1., 1.]), torch.tensor([0, 1, 0, 1])), .5)
