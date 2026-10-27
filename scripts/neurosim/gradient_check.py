@@ -6,7 +6,7 @@ gradient is used for the carry expert's fingers, check that the model moves outc
 does when a finger command changes (finite differences in both, same perturbations):
 
   * worlds: --states holding states, each restored into 1 + 6 fingers x 2 signs x len(--deltas) worlds
-    (no mass / COM / carry-target randomisation, no pushes, deterministic carry expert): identical except for
+    (no mass / COM / carry-target randomisation, no pushes, tables parked, deterministic carry expert): identical except for
     the perturbation, so simulator differences are exact (MuJoCo Warp is deterministic);
   * perturbation: finger j's command +-delta (command units) on top of the expert's, for --duration-s,
     starting --t0-s after the restore (secure phase; the warm-up ends at 0.5 s);
@@ -78,7 +78,10 @@ def run(args):
     R = 1+args.replicas                                            # block layout per state: R baselines, then +- pairs
     K = max(1, args.bundle)
     n = args.states*D*K                                            # world = (state * D + direction) * K + copy
-    override = dict(mass_scale=(1., 1.), com_offset_m=0., disturbance=0., push_probability=0., carry_jitter=0.)
+    # identical copies: no mass / COM / carry-target randomisation, no pushes, and every copy parks its table at the
+    # end of the warm-up (table_keep_probability 0; before 2026-10-28 copies kept the table with probability 0.2)
+    override = dict(mass_scale=(1., 1.), com_offset_m=0., disturbance=0., push_probability=0., carry_jitter=0.,
+                    table_keep_probability=0.)
     env, policy, contract, settings = build_carry_env(args.checkpoint, n, settings_override=override,
                                                       holding_state=args.holding_state, seed=args.seed)
     dev, dt = env.device, env.step_dt

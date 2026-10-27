@@ -4,10 +4,11 @@
 #SBATCH --gres=gpu:rtx_6000_ada:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=110G
-#SBATCH --time=01:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/neurosim/slurm-replicas-%j.out
 # Do identical carry worlds stay identical? (scripts/neurosim/replica_divergence.py): the gradient check's
 # overrides, + no kept tables, + shared expert actions. Carry expert C v2 1587 (the world model's data source).
+# Then the gradient checks again with identical copies (tables parked): noise floor + small deltas, bundled.
 set -uo pipefail
 project=/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody-neurosim
 repo=/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody
@@ -25,4 +26,11 @@ for v in as_check no_table shared; do
   echo "=== variant $v"
   python scripts/neurosim/replica_divergence.py --checkpoint $C2 --variant $v --output $out/$v.json || echo "VARIANT_${v}_FAILED"
 done
+WM=$repo/outputs/neurosim/stage15/combined_single/world_model.pt
+echo "=== gradient check v3 (tables parked): noise floor, small deltas"
+python scripts/neurosim/gradient_check.py --checkpoint $C2 --world-model $WM --output $repo/outputs/neurosim/stage15/gradient_check_v3_noise.json \
+  --states 256 --deltas 0.01 0.02 0.05 --replicas 2 || echo GRADIENT_V3_NOISE_FAILED
+echo "=== gradient check v3 (tables parked): bundled"
+python scripts/neurosim/gradient_check.py --checkpoint $C2 --world-model $WM --output $repo/outputs/neurosim/stage15/gradient_check_v3_bundled.json \
+  --states 128 --deltas 0.05 --replicas 1 --bundle 8 --jitter 0.01 || echo GRADIENT_V3_BUNDLED_FAILED
 echo REPLICAS_DONE
