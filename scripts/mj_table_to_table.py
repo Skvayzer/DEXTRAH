@@ -245,7 +245,7 @@ def run(args):
                     q = standing_q[j].cpu().numpy()
                     qd = np.zeros_like(q)
                     y = float(home_yaw[j])
-                    ref = np.tile(np.array([0., 0., 0., math.cos(y/2), 0., 0., math.sin(y/2)]), (q.shape[0], 1))
+                    ref = np.tile(np.array([0., 0., 0., math.cos(y/2), 0., 0., math.sin(y/2)], dtype=q.dtype), (q.shape[0], 1))
                 else:
                     q, qd, ref = nav[j].reference(now, command[j], np_yaw(rq[k]))
                 Q.append(q); QD.append(qd); R.append(ref[:, 3:])
