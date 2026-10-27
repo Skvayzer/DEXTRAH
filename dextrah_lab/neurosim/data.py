@@ -46,7 +46,10 @@ class Layout:
 
     forces: int = 8                # 5 pads, palm, table, floor (log1p N)
     exo: int = 3+3+3+3+3+3+1+3     # palm lin/ang vel before, after; gravity; table pos, parked; object force
-    context: int = 128+1+3
+
+    @property
+    def context(self):             # BPS shape features (the env's width), log mass, COM offset
+        return self.bps+1+3
 
 
 def load_chunks(directory, fields=None, max_chunks=None):

@@ -80,6 +80,16 @@ class NeurosimTests(unittest.TestCase):
         lp = loss_prediction(model, t, torch.tensor([0, 1, 2]), horizon=10, random_samples=64, bins=4)
         self.assertEqual(lp['events'], 1)
 
+    def test_context_width_follows_bps(self):
+        data, context = synthetic()
+        context['bps'] = torch.randn(6, 132)               # the env's BPS block is 132-D
+        t = build_tensors(data, context)
+        t.pop('asset')
+        model = HandObjectWorldModel(Layout(hand=4, bps=132), hidden=(32, 32))
+        model.fit_normalizers(t, (torch.randint(1, 80, (200,)), torch.randint(0, 6, (200,))))
+        loss, _ = window_loss(model, gather(t, torch.tensor([0, 5]), torch.tensor([2, 3]), 4), 4)
+        self.assertTrue(math.isfinite(float(loss)))
+
     def test_auc(self):
         self.assertAlmostEqual(auc(torch.tensor([.1, .4, .35, .8]), torch.tensor([0, 0, 1, 1])), .75)
         self.assertAlmostEqual(auc(torch.tensor([1., 1., 1., 1.]), torch.tensor([0, 1, 0, 1])), .5)
