@@ -3,7 +3,7 @@
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:rtx_6000_ada:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=120G
+#SBATCH --mem=110G
 #SBATCH --time=03:00:00
 #SBATCH --output=slurm-neurosim-%j.out
 # Neural simulator go / no-go (feature/g1-neurosim): log carry transitions with a carry v2 expert, then
