@@ -4,8 +4,8 @@ import unittest
 
 import torch
 
-from dextrah_lab.neurosim.data import Layout, build_tensors, gather, split_envs
-from dextrah_lab.neurosim.evaluate import auc, loss_prediction, open_loop
+from dextrah_lab.neurosim.data import Layout, build_tensors, gather, phase_bucket, split_envs
+from dextrah_lab.neurosim.evaluate import auc, auc_ci, drop_prediction_report, freeze_inputs, loss_prediction, open_loop
 from dextrah_lab.neurosim.geometry import matrix_to_rot6, quat_to_matrix, rot6_to_matrix, rotation_angle, so3_exp, so3_log
 from dextrah_lab.neurosim.model import HandObjectWorldModel, window_loss
 
@@ -34,7 +34,8 @@ class NeurosimTests(unittest.TestCase):
         R = quat_to_matrix(q)
         self.assertTrue(torch.allclose(R@R.transpose(-1, -2), torch.eye(3).expand(50, 3, 3), atol=1e-5))
         self.assertTrue(torch.allclose(rot6_to_matrix(matrix_to_rot6(R)), R, atol=1e-5))
-        v = torch.randn(50, 3)*.9
+        g = torch.Generator().manual_seed(0)
+        v = torch.nn.functional.normalize(torch.randn(50, 3, generator=g), dim=-1)*3.*torch.rand(50, 1, generator=g)   # angles < pi
         self.assertTrue(torch.allclose(so3_log(so3_exp(v)), v, atol=1e-4))
         self.assertTrue(torch.allclose(so3_exp(torch.zeros(2, 3)), torch.eye(3).expand(2, 3, 3)))
         self.assertTrue(torch.allclose(rotation_angle(so3_exp(v), torch.eye(3).expand(50, 3, 3)), v.norm(dim=-1), atol=1e-4))
@@ -89,6 +90,37 @@ class NeurosimTests(unittest.TestCase):
         model.fit_normalizers(t, (torch.randint(1, 80, (200,)), torch.randint(0, 6, (200,))))
         loss, _ = window_loss(model, gather(t, torch.tensor([0, 5]), torch.tensor([2, 3]), 4), 4)
         self.assertTrue(math.isfinite(float(loss)))
+
+    def test_phase_buckets_and_frozen_inputs(self):
+        b = phase_bucket(torch.tensor([0., 1., 2., 2., 2., 3.]), torch.tensor([.2, 1.5, 4., 10., 20., 30.]))
+        self.assertEqual(b.tolist(), [0, 0, 1, 2, 3, 4])
+        data, context = synthetic()
+        t = build_tensors(data, context)
+        w = freeze_inputs(gather(t, torch.tensor([3, 10]), torch.tensor([2, 4]), 6))
+        self.assertTrue(torch.equal(w['action'][:, 1], w['action'][:, 6]))
+        self.assertTrue(torch.equal(w['exo'][:, 3, 6:12], w['exo'][:, 1, 0:6]))   # after-step palm motion := before
+        r = auc_ci(torch.tensor([.9, .8, .2, .1, .3]), torch.tensor([1, 1, 0, 0, 0]), n_boot=50)
+        self.assertEqual(r['auc'], 1.)
+
+    def test_drop_report_with_phases(self):
+        data, context = synthetic(T=120, N=8)
+        context['asset'] = torch.arange(8)
+        T, N = 120, 8
+        data['phase'] = torch.full((T, N, 1), 2.)
+        data['carry_t'] = torch.arange(T, dtype=torch.float32)[:, None, None].expand(T, N, 1).clone()
+        for env, row in ((2, 60), (3, 70), (5, 90)):
+            data['done'][row, env] = 1; data['end'][row, env] = 2
+        t = build_tensors(data, context)
+        self.assertEqual(int(t['drop'].sum()), 4)                  # env 0 at row 30 + three
+        self.assertEqual(int(t['censor'].sum()), 0)
+        t.pop('asset')
+        model = HandObjectWorldModel(Layout(hand=4), hidden=(32, 32))
+        model.fit_normalizers(t, (torch.randint(1, T, (300,)), torch.randint(0, N, (300,))))
+        rep = drop_prediction_report(model, t, torch.tensor([0, 1, 2, 3]), torch.tensor([4, 5, 6, 7]), horizon=10,
+                                     generator=torch.Generator().manual_seed(0), n_boot=20)
+        self.assertIn('model_frozen', rep['random_negatives'])
+        self.assertIn('logistic_phase', rep['phase_matched_negatives'])
+        self.assertEqual(rep['random_negatives']['model_teacher']['positives'] >= 1, True)
 
     def test_auc(self):
         self.assertAlmostEqual(auc(torch.tensor([.1, .4, .35, .8]), torch.tensor([0, 0, 1, 1])), .75)

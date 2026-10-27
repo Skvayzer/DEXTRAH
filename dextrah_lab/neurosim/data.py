@@ -27,6 +27,13 @@ from .geometry import matrix_to_rot6, quat_to_matrix
 
 END_REASONS = ('none', 'timeout', 'drop', 'fall', 'start_fail', 'other')
 LOST = (END_REASONS.index('drop'), END_REASONS.index('start_fail'))
+DROP, START_FAIL = END_REASONS.index('drop'), END_REASONS.index('start_fail')
+# fields build_tensors reads (load_chunks(fields=FIELDS) skips the rest of the log)
+FIELDS = ('obj_pos', 'obj_quat', 'obj_linvel', 'obj_angvel', 'hand_q', 'hand_qd', 'hand_target', 'palm_linvel',
+          'palm_angvel', 'gravity', 'table_pos', 'table_parked', 'object_force', 'finger_force', 'palm_force',
+          'table_force', 'ground_force', 'supported', 'mass', 'com_offset', 'done', 'end', 'phase', 'carry_t',
+          'arm_now', 'command')
+PHASE_BUCKETS = ('secure', 'walk<5s', 'walk5-10s', 'walk>10s', 'final')
 CONTACT_N = .5
 
 
@@ -59,7 +66,7 @@ def load_chunks(directory, fields=None, max_chunks=None):
     if not files:
         raise FileNotFoundError(f'no chunks in {directory}')
     parts = [torch.load(f, map_location='cpu', weights_only=False) for f in files]
-    keys = fields or parts[0].keys()
+    keys = [k for k in fields if k in parts[0]] if fields else parts[0].keys()      # optional fields may be absent
     data = {k: torch.cat([p[k] for p in parts]).float() for k in keys}
     return data, torch.load(directory/'context.pt', map_location='cpu', weights_only=False)
 
@@ -79,11 +86,27 @@ def build_tensors(data, context):
                      data['table_pos'], data['table_parked'], data['object_force']), -1)
     masscom = torch.cat((torch.log(data['mass'].clamp_min(1e-4)), data['com_offset']), -1)
     end = data['end'][..., 0].long()
-    lost = (data['done'][..., 0] > .5) & ((end == LOST[0]) | (end == LOST[1]))
+    done = data['done'][..., 0] > .5
+    lost = done & ((end == LOST[0]) | (end == LOST[1]))
+    extra = {}
+    if 'phase' in data and 'carry_t' in data:
+        extra['bucket'] = phase_bucket(data['phase'][..., 0], data['carry_t'][..., 0].float()*context['dt'])
+    extra['drop'] = (done & (end == DROP)).float()          # physical drops only
+    extra['censor'] = done & (end == START_FAIL)             # failed grasp check: a verdict on the start state
     return dict(state=state, rot=R, forces=forces, action=data['hand_target'], exo=exo, masscom=masscom,
                 bps=context['bps'].float(),
                 contact=(forces[..., :6] > math.log1p(CONTACT_N)).float(), supported=data['supported'][..., 0],
-                done=data['done'][..., 0] > .5, lost=lost.float(), asset=context['asset'])
+                done=done, lost=lost.float(), asset=context['asset'], **extra)
+
+
+def phase_bucket(phase, episode_s, walk_start_s=2.5):
+    """Bucket index (PHASE_BUCKETS) of each row: warm-up and secure phase, walking < 5 s / 5-10 s / > 10 s
+    after the walk start (C v2: 0.5 s warm-up + 2 s secure), final stand."""
+    p = phase.round().long()
+    w = episode_s-walk_start_s
+    b = torch.where(w < 5, 1, torch.where(w < 10, 2, 3))
+    b = torch.where(p <= 1, 0, torch.where(p >= 3, 4, b))
+    return b.to(torch.uint8)
 
 
 class Normalizer(torch.nn.Module):

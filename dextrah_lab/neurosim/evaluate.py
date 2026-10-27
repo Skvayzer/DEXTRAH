@@ -120,3 +120,153 @@ def loss_prediction(model, t, envs, horizon=30, random_samples=20000, generator=
             rel.append(dict(predicted=round(float(p[m].mean()), 5), observed=round(float(y[m].mean()), 5), n=int(m.sum())))
     res['reliability'] = rel
     return res
+
+
+# ---------------------------------------------------------------- drop prediction v2 (review, 2026-10-27)
+# Labels: physical drops only; a window whose episode ends any other way inside the horizon (timeout, failed
+# grasp check, fall) is excluded. Protocols: 'teacher' = logged actions / exogenous inputs over the horizon;
+# 'frozen' = only what is known at the window start, held (the first step's action, decided at the start, and
+# its exogenous vector with the after-step palm velocity replaced by the before-step one), so no future
+# information (the arm's or the policy's reaction to a slip) can enter. Negatives: random starts, and
+# phase-matched starts (same world / object, same phase bucket) that did not drop.
+
+def freeze_inputs(w):
+    a = w['action'][:, 1:2].expand_as(w['action'][:, 1:]).clone()
+    u0 = w['exo'][:, 1].clone()
+    u0[:, 6:12] = u0[:, 0:6]
+    u = u0[:, None].expand_as(w['exo'][:, 1:]).clone()
+    w = dict(w)
+    w['action'] = torch.cat((w['action'][:, :1], a), 1)
+    w['exo'] = torch.cat((w['exo'][:, :1], u), 1)
+    return w
+
+
+def auc_ci(score, label, n_boot=1000, generator=None):
+    """AUC and a stratified bootstrap 95% interval."""
+    score, label = score.flatten().cpu(), label.bool().flatten().cpu()
+    pos, neg = score[label], score[~label]
+    if len(pos) == 0 or len(neg) == 0:
+        return dict(auc=float('nan'), ci=[float('nan')]*2, positives=int(len(pos)), negatives=int(len(neg)))
+    vals = []
+    for _ in range(n_boot):
+        p = pos[torch.randint(0, len(pos), (len(pos),), generator=generator)]
+        q = neg[torch.randint(0, len(neg), (len(neg),), generator=generator)]
+        vals.append(auc(torch.cat((p, q)), torch.cat((torch.ones(len(p)), torch.zeros(len(q))))))
+    v = torch.tensor(vals)
+    return dict(auc=round(auc(score, label), 4), ci=[round(float(v.quantile(.025)), 4), round(float(v.quantile(.975)), 4)],
+                positives=int(len(pos)), negatives=int(len(neg)))
+
+
+def drop_windows(t, envs, horizon, generator=None, random_n=20000, matched_per_positive=5, tries=64):
+    """Window starts (s, e) and their kind: 0 positive candidates (1..horizon steps before a drop), 1 random,
+    2 phase-matched candidates (same world, same phase bucket as a positive's start)."""
+    T, N = t['drop'].shape
+    dev = t['drop'].device
+    envs = envs.to(dev)
+    in_set = torch.zeros(N, dtype=torch.bool, device=dev)
+    in_set[envs] = True
+    rows, cols = torch.nonzero((t['drop'] > .5) & in_set[None], as_tuple=True)
+    back = torch.randint(1, horizon+1, (len(rows),), generator=generator).to(dev)
+    s_pos, e_pos = (rows-back).clamp(min=0), cols
+    s_rand = torch.randint(0, T-horizon-1, (random_n,), generator=generator).to(dev)
+    e_rand = envs[torch.randint(0, len(envs), (random_n,), generator=generator).to(dev)]
+    s_m, e_m = [], []
+    if 'bucket' in t and len(s_pos):
+        b = t['bucket'][s_pos, e_pos].long()
+        cand = torch.randint(0, T-horizon-1, (len(s_pos), tries), generator=generator).to(dev)
+        ok = t['bucket'][cand, e_pos[:, None]].long() == b[:, None]
+        rank = torch.cumsum(ok.long(), 1)
+        keep = ok & (rank <= matched_per_positive)
+        idx = torch.nonzero(keep, as_tuple=True)
+        s_m, e_m = cand[idx], e_pos[idx[0]]
+    s = torch.cat((s_pos, s_rand)+((s_m,) if len(s_m) else ())).clamp(max=T-horizon-1)
+    e = torch.cat((e_pos, e_rand)+((e_m,) if len(e_m) else ()))
+    kind = torch.cat((torch.zeros(len(s_pos)), torch.ones(random_n), torch.full((len(s_m),), 2.))).to(dev)
+    return s, e, kind
+
+
+@torch.no_grad()
+def window_labels_and_scores(model, t, s, e, horizon, protocol='teacher', batch=4096):
+    """Per window: drop within the horizon, clean (no other episode end inside), predicted P(drop within)."""
+    P, label, clean = [], [], []
+    for a in range(0, len(s), batch):
+        w = gather_drop(t, s[a:a+batch], e[a:a+batch], horizon)
+        if protocol == 'frozen':
+            w = freeze_inputs(w)
+        _, _, _, ls = model.rollout(w, horizon)
+        hazard = torch.stack([torch.sigmoid(l[:, 9]) for l in ls], 1)*w['alive'].float()
+        P.append(1-torch.prod(1-hazard, 1))
+        dropped = (w['drop'][:, 1:]*w['alive'].float()).amax(1) > .5
+        ended = (~w['has_next'] & w['alive']).any(1)
+        label.append(dropped)
+        clean.append(~ended | dropped)
+    return torch.cat(P), torch.cat(label), torch.cat(clean)
+
+
+def gather_drop(t, s, e, k):
+    from .data import gather
+    w = gather(t, s, e, k)
+    idx = s[:, None]+torch.arange(k+1, device=s.device)[None]
+    w['drop'] = t['drop'][idx, e[:, None]]
+    return w
+
+
+def baseline_features(t, s, e, with_phase=False):
+    """Current-state features at the window start: 6 contact flags, 8 log forces, supported, table present
+    (+ one-hot phase bucket)."""
+    feats = [t['contact'][s, e], t['forces'][s, e], t['supported'][s, e][:, None], 1-t['exo'][s, e][:, 18:19]]
+    if with_phase:
+        feats.append(torch.nn.functional.one_hot(t['bucket'][s, e].long(), 5).float())
+    return torch.cat(feats, -1)
+
+
+def fit_logistic(x, y, l2=1e-3, steps=200):
+    mean, std = x.mean(0), x.std(0).clamp_min(1e-6)
+    z = (x-mean)/std
+    w = torch.zeros(z.shape[1], requires_grad=True)
+    b = torch.zeros(1, requires_grad=True)
+    opt = torch.optim.LBFGS([w, b], max_iter=steps, line_search_fn='strong_wolfe')
+
+    def closure():
+        opt.zero_grad()
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(z@w+b, y)+l2*(w*w).sum()
+        loss.backward()
+        return loss
+    opt.step(closure)
+    return lambda q: torch.sigmoid(((q-mean)/std)@w.detach()+b.detach())
+
+
+def drop_prediction_report(model, t, train_envs, test_envs, horizon=30, generator=None, n_boot=1000):
+    """The review's drop-prediction table: model (teacher / frozen protocols) and logistic baselines
+    (without / with phase), on random and on phase-matched negatives, with bootstrap intervals."""
+    s, e, kind = drop_windows(t, test_envs, horizon, generator)
+    report = dict(horizon_steps=horizon)
+    scores = {}
+    for protocol in ('teacher', 'frozen'):
+        # labels come from the log, so they are the same for both protocols
+        scores['model_'+protocol], y, clean = window_labels_and_scores(model, t, s, e, horizon, protocol)
+    # baselines fit on training worlds with the same window sampling
+    s_tr, e_tr, _ = drop_windows(t, train_envs, horizon, generator)
+    _, y_tr, c_tr = window_labels_and_scores(model, t, s_tr, e_tr, horizon, 'teacher')
+    for name, with_phase in (('logistic', False), ('logistic_phase', True)):
+        if with_phase and 'bucket' not in t:
+            continue
+        f = fit_logistic(baseline_features(t, s_tr[c_tr], e_tr[c_tr], with_phase).cpu().float(), y_tr[c_tr].float().cpu())
+        scores[name] = f(baseline_features(t, s, e, with_phase).cpu().float()).to(s.device)
+    pos = clean & y
+    for neg_name, neg in (('random_negatives', clean & ~y & (kind == 1)), ('phase_matched_negatives', clean & ~y & (kind == 2))):
+        keep = pos | neg
+        report[neg_name] = {k: auc_ci(v[keep], y[keep], n_boot, generator) for k, v in scores.items()}
+    rand = clean & (kind == 1)
+    report['calibration_random_windows'] = {
+        k: dict(base_rate=round(float(y[rand].float().mean()), 5), mean_predicted=round(float(scores[k][rand].mean()), 5),
+                brier=round(float(((scores[k][rand]-y[rand].float())**2).mean()), 6),
+                brier_climatology=round(float(((y[rand].float().mean()-y[rand].float())**2).mean()), 6))
+        for k in scores}
+    if 'bucket' in t:
+        b = t['bucket'][s, e].long()
+        report['positives_by_phase'] = {name: int((pos & (b == i)).sum()) for i, name in enumerate(PHASE_NAMES)}
+    return report
+
+
+PHASE_NAMES = ('secure', 'walk<5s', 'walk5-10s', 'walk>10s', 'final')
