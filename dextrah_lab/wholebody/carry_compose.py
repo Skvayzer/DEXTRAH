@@ -97,6 +97,17 @@ class CarrySettings:
     walk_s: tuple = ()                  # per-episode walking time U(lo, hi) s (episode = warm-up + settle + walk + stand)
     stop_probability: float = 0.        # a new clip is a standing stop of stop_s with this probability
     stop_s: tuple = (1., 3.)
+    # Route-pattern episodes (table-to-table route, jobs 1570 / 1589): with this probability the walk is the
+    # route's legs at route_speed -- back off, sideways (left or right), approach -- then a stand; clips of the
+    # library, no random clips or stops. Needs variable episodes (walk_s).
+    route_probability: float = 0.
+    route_speed: float = .2
+    route_legs_m: tuple = (.6, 1., .6)
+    # Gentler carry move (route: C v2 lost 17% of hand-offs while the arm moved to the carry posture):
+    # posture choice weight on staying near the grasp-time arm angles (CarryPostures w_q), and no move at all
+    # for grasps with fewer than posture_min_contacts hand-object contacts at the end of the warm-up (0: off).
+    posture_w_q: float = .5
+    posture_min_contacts: int = 0
     hold_mode: str = 'offset'           # 'support': hold = object supported by the hand; drop = unsupported
     unsupported_s: float = .3
     w_support: float = 1.
@@ -140,6 +151,12 @@ class CarrySettings:
             raise ValueError('The arm channel replaces the latent residual (stage 1) and needs a posture library')
         if self.walk_s and not (0 < self.walk_s[0] <= self.walk_s[1]):
             raise ValueError('walk_s must be (lo, hi) with 0 < lo <= hi')
+        if self.route_probability > 0 and (not self.walk_s or self.route_seconds() > self.walk_s[1]):
+            raise ValueError('route episodes need variable episodes (walk_s) at least as long as the route')
+
+    def route_seconds(self):
+        """Route-pattern walk: the legs at route_speed plus 0.5 s before the stand."""
+        return sum(self.route_legs_m)/self.route_speed+.5
 
     def max_episode_s(self):
         if self.walk_s:
@@ -329,6 +346,18 @@ class ClipSequencer:
         self.variable = bool(settings.walk_s)
         self.end = torch.full((n,), float(settings.max_episode_s()), device=device)
         self.stopping = torch.zeros(n, dtype=torch.bool, device=device)
+        # route-pattern episodes: leg clips (back, left, right, forward) and leg durations
+        self.route = torch.zeros(n, dtype=torch.bool, device=device)
+        self.route_leg = torch.zeros(n, dtype=torch.long, device=device)
+        self.route_side = torch.zeros(n, dtype=torch.long, device=device)
+        if settings.route_probability > 0:
+            v = f'{settings.route_speed:g}'
+            need = [f'backward@{v}', f'left@{v}', f'right@{v}', f'forward@{v}']
+            missing = [x for x in need if x not in clips.names]
+            if missing:
+                raise ValueError(f'route clips missing from the library: {missing}')
+            self.route_clips = torch.tensor([clips.names.index(x) for x in need], device=device)
+            self.route_dur = torch.tensor([m/settings.route_speed for m in settings.route_legs_m], device=device)
         self.set_level(settings.level)
 
     def set_level(self, level):
@@ -352,7 +381,7 @@ class ClipSequencer:
         p = torch.where(t < self.s.warmup_s, torch.full_like(p, self.WARMUP), p)
         return torch.where(t >= self.walk_end(ids), torch.full_like(p, self.FINAL), p)
 
-    def reset(self, ids, heading, backoff_first, end=None):
+    def reset(self, ids, heading, backoff_first, end=None, route=None):
         self.clip[ids] = self.idle
         self.t0[ids] = 0.
         self.cut[ids] = float('inf')
@@ -361,6 +390,10 @@ class ClipSequencer:
         self.stopping[ids] = False
         if end is not None:
             self.end[ids] = end
+        if route is not None:
+            self.route[ids] = route
+            self.route_leg[ids] = 0
+            self.route_side[ids] = (self._rand(len(ids), self.clip.device) < .5).long()
 
     def _rand(self, n, device):
         return torch.rand(n, device=device, generator=self.g)
@@ -375,6 +408,19 @@ class ClipSequencer:
         over = (t-self.t0 >= torch.minimum(self.clips.duration(self.clip), self.cut))
         start = walking & ((idle_now & ~self.stopping) | over)
         stop = (t >= walk_end) & (~idle_now | self.stopping)
+        rid = torch.nonzero(start & self.route).flatten()
+        if rid.numel():
+            # route legs in order (back off, sideways, approach), then stand until the walk ends
+            leg = self.route_leg[rid]
+            done_legs = leg >= 3
+            clip_k = torch.where(leg == 0, 0, torch.where(leg == 1, 1+self.route_side[rid], 3))
+            self.clip[rid] = torch.where(done_legs, torch.full_like(leg, self.idle), self.route_clips[clip_k.clamp(max=3)])
+            self.t0[rid] = t[rid]
+            self.heading[rid] = yaw[rid]
+            self.cut[rid] = torch.where(done_legs, torch.full_like(t[rid], float('inf')), self.route_dur[leg.clamp(max=2)])
+            self.stopping[rid] = done_legs
+            self.route_leg[rid] = leg+1
+        start = start & ~self.route
         ids = torch.nonzero(start).flatten()
         if ids.numel():
             pick = self.allowed[(self._rand(ids.numel(), dev)*len(self.allowed)).long().clamp(max=len(self.allowed)-1)]
@@ -402,7 +448,7 @@ class ClipSequencer:
             self.heading[sid] = yaw[sid]
             self.cut[sid] = float('inf')
             self.stopping[sid] = False
-        return torch.cat((ids, sid))
+        return torch.cat((ids, rid, sid))
 
     def reference(self, t):
         """(q, qd, root quats, planned velocity, command) of every env's current clip at time t."""

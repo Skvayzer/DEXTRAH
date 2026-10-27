@@ -120,8 +120,10 @@ def run(args):
         args.settle_s = carry.warmup_s+carry.settle_s
     if args.hold_rule is None:
         args.hold_rule = 'support' if c_v2 else 'offset'
+    if args.settle_reference is None:
+        args.settle_reference = 'standing' if c_v2 else 'planner'
     print('ROUTE_C '+json.dumps(dict(version=carry.version, settle_s=args.settle_s, hold_rule=args.hold_rule,
-                                     contact_condim=args.contact_condim)), flush=True)
+                                     contact_condim=args.contact_condim, settle_reference=args.settle_reference)), flush=True)
     install_moving_frame_observations()
     args.no_randomization = True
     env, cfg = rwv.build_env(args, m_run, m_contract, device)
@@ -192,7 +194,7 @@ def run(args):
     postures = None
     if c_v2:
         from dextrah_lab.wholebody.carry_posture import CarryPostures
-        postures = CarryPostures(carry.postures, d, target=carry.carry_target, target_jitter=0.)
+        postures = CarryPostures(carry.postures, d, target=carry.carry_target, target_jitter=0., w_q=carry.posture_w_q)
     lateral = torch.tensor([-1., 0., 0.], device=d)        # robot's right for the -90 deg start yaw (checked below)
     shift = args.table_offset*lateral                       # table A -> table B
     table_a, table_b = z(3), z(3)                           # per world, after the reset (table height varies)
@@ -237,8 +239,17 @@ def run(args):
             Q, QD, R = [], [], []
             for k, j in enumerate(ids):
                 if nav[j].frames is None:
-                    nav[j].reset(np.r_[rp[k], rq[k]], bq[k], now)
-                q, qd, ref = nav[j].reference(now, command[j], np_yaw(rq[k]))
+                    if not (args.settle_reference == 'standing' and int(phase[j]) == SETTLE):
+                        nav[j].reset(np.r_[rp[k], rq[k]], bq[k], now)
+                if args.settle_reference == 'standing' and int(phase[j]) == SETTLE:
+                    # diagnostic: the training env's settle reference (standing pose, facing the switch-time heading)
+                    # instead of the planner; the planner starts when walking starts
+                    q = standing_q[j].cpu().numpy()
+                    qd = np.zeros_like(q)
+                    y = float(home_yaw[j])
+                    ref = np.tile(np.array([0., 0., 0., math.cos(y/2), 0., 0., math.sin(y/2)], dtype=q.dtype), (q.shape[0], 1))
+                else:
+                    q, qd, ref = nav[j].reference(now, command[j], np_yaw(rq[k]))
                 Q.append(q); QD.append(qd); R.append(ref[:, 3:])
             idx = torch.tensor(ids, device=d)
             q = torch.as_tensor(np.stack(Q), device=d)
@@ -460,7 +471,30 @@ def run(args):
             # grasp -> settle (switch M -> C)
             ing = phase == GRASP
             grasp_count = torch.where(ing & lifted & (touching >= args.grasp_min_fingers), grasp_count+1, torch.zeros_like(grasp_count))
-            for j in torch.nonzero(ing & (grasp_count >= GRASP_STEPS)).flatten().tolist():
+            switching = torch.nonzero(ing & (grasp_count >= GRASP_STEPS)).flatten()
+            if args.save_grasp_states and switching.numel():
+                # M's state at the switch, in the SGS holding-state layout (C training starts from real hand-offs)
+                ids = switching
+                origin = env.scene.env_origins[ids]
+                setpoint = getattr(env.robot, '_setpoint', None)
+                store = dict(asset=env._object_asset_index_per_env[ids].cpu(), qpos=env.sim.data.qpos[ids].cpu(),
+                             qvel=env.sim.data.qvel[ids].cpu(), targets=env._cur_targets[ids].cpu(),
+                             setpoint=(setpoint if setpoint is not None else env._cur_targets)[ids].cpu(),
+                             table_z=env._table_z_per_env[ids].cpu(), object_init_z=env._object_init_z[ids].cpu(),
+                             object_pose=torch.cat((env.object.data.root_pos_w[ids]-origin, env.object.data.root_quat_w[ids]), -1).cpu(),
+                             joint_pos=env.robot.data.joint_pos[ids].cpu(), joint_vel=env.robot.data.joint_vel[ids].cpu(),
+                             # goal: the object's own pose (C zeroes its goal observations; SGS needs a valid pose)
+                             history=task._history_now(ids).cpu(), env=ids.cpu(), touching=touching[ids].cpu(),
+                             goal_pose=torch.cat((env.object.data.root_pos_w[ids]-origin, env.object.data.root_quat_w[ids]), -1).cpu(),
+                             hand_contact_n=hand_contact[ids].cpu())
+                if task.na:
+                    store['act'] = env.sim.data.act[ids].cpu()
+                path = args.output/'grasp_states.pt'
+                old = torch.load(path, weights_only=False) if path.exists() else None
+                if old is not None:
+                    store = {k: torch.cat((old[k], v)) for k, v in store.items()}
+                torch.save(store, path)
+            for j in switching.tolist():
                 jj = torch.tensor([j], device=d)
                 q_ref[j] = finger_command_now(jj)[0]
                 arm_ref[j] = env.robot.data.joint_pos[j, env._body_ids][arm_ids]
@@ -476,13 +510,15 @@ def run(args):
                     q_now = env.robot.data.joint_pos[jj][:, env._body_ids][:, right_arm]
                     t_po, palm_torso = grasp_in_torso(body[:, torso_idx], body[:, palm_link], env.object.data.root_pos_w[jj])
                     _, q_c, p_c = postures.select(t_po, palm_torso, q_now, carry_target[jj])
-                    q_grasp[j], q_carry[j], arm_now[j] = q_now[0], q_c[0], q_now[0]
+                    q_grasp[j], q_carry[j], arm_now[j] = q_now[0], (q_now[0] if args.no_carry_move else q_c[0]), q_now[0]
                     records[j]['carry_posture'] = dict(max_joint_change_rad=round(float((q_c-q_now).abs().max()), 3),
                                                        predicted_object_minus_target_m=round(float((p_c-carry_target[jj]).norm()), 3))
                 nav[j] = NavigationReference(planner_path, session=first_nav.session, speed_limit=max(.3, args.speed))
                 phase[j], phase_steps[j] = SETTLE, 0
                 drop_count[j] = 0
                 records[j]['grasp_s'] = round(t+dt, 2)
+                if args.grasp_only:
+                    finish(j, 'grasp_saved', t+dt, touching=int(touching[j]))
             for j in torch.nonzero(ing & (phase_steps*dt > args.grasp_limit)).flatten().tolist():
                 finish(j, 'no_grasp', t+dt)
             # carrying: drops ('offset': v1's 12 cm beyond the hold for 6 steps; 'support': C v2's support rule;
@@ -490,7 +526,15 @@ def run(args):
             carrying = torch.isin(phase, torch.tensor(C_PHASES, device=d))
             far = carrying & ((offset-hold_ref).norm(dim=-1) > carry.drop_excess_m)
             drop_count = torch.where(far, drop_count+1, torch.zeros_like(drop_count))
-            _, _, supported = support_state()
+            _, n_contacts, supported = support_state()
+            if c_v2 and carry.posture_min_contacts > 0:
+                # C's weak-grasp gate at the end of its warm-up (as the training env): no carry move. The arm blend
+                # is still 0 at this step, so applying it after the step matches training.
+                at_check = carrying & (c_steps == int(round(carry.warmup_s/dt)))
+                weak = at_check & (n_contacts < carry.posture_min_contacts)
+                q_carry[weak] = q_grasp[weak]
+                for j in torch.nonzero(at_check).flatten().tolist():
+                    records[j]['posture_skipped'] = bool(weak[j])
             counting = carrying & (c_steps.float()*dt > carry.warmup_s)
             unsupported = torch.where(counting & ~supported, unsupported+1, torch.zeros_like(unsupported))
             if args.hold_rule == 'support':
@@ -770,6 +814,13 @@ def main():
     p.add_argument('--njmax', type=int, default=300)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--no-render', action='store_true')
+    p.add_argument('--save-grasp-states', action='store_true',
+                   help="save M's state at each M -> C switch (grasp_states.pt, SGS holding-state layout)")
+    p.add_argument('--grasp-only', action='store_true', help='end each world at its switch (harvest runs)')
+    p.add_argument('--settle-reference', choices=('planner', 'standing'), default=None,
+                   help="body reference during C's settle phase; default 'standing' (the training env's) for carry v2, "
+                        "'planner' for v1 (job 1602: planner vs standing for v2 = 119 vs 90 later settle drops)")
+    p.add_argument('--no-carry-move', action='store_true', help='diagnostic: carry v2 keeps the grasp-time arm angles')
     args = p.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
