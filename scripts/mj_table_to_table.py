@@ -237,8 +237,17 @@ def run(args):
             Q, QD, R = [], [], []
             for k, j in enumerate(ids):
                 if nav[j].frames is None:
-                    nav[j].reset(np.r_[rp[k], rq[k]], bq[k], now)
-                q, qd, ref = nav[j].reference(now, command[j], np_yaw(rq[k]))
+                    if not (args.settle_reference == 'standing' and int(phase[j]) == SETTLE):
+                        nav[j].reset(np.r_[rp[k], rq[k]], bq[k], now)
+                if args.settle_reference == 'standing' and int(phase[j]) == SETTLE:
+                    # diagnostic: the training env's settle reference (standing pose, facing the switch-time heading)
+                    # instead of the planner; the planner starts when walking starts
+                    q = standing_q[j].cpu().numpy()
+                    qd = np.zeros_like(q)
+                    y = float(home_yaw[j])
+                    ref = np.tile(np.array([0., 0., 0., math.cos(y/2), 0., 0., math.sin(y/2)]), (q.shape[0], 1))
+                else:
+                    q, qd, ref = nav[j].reference(now, command[j], np_yaw(rq[k]))
                 Q.append(q); QD.append(qd); R.append(ref[:, 3:])
             idx = torch.tensor(ids, device=d)
             q = torch.as_tensor(np.stack(Q), device=d)
@@ -499,7 +508,7 @@ def run(args):
                     q_now = env.robot.data.joint_pos[jj][:, env._body_ids][:, right_arm]
                     t_po, palm_torso = grasp_in_torso(body[:, torso_idx], body[:, palm_link], env.object.data.root_pos_w[jj])
                     _, q_c, p_c = postures.select(t_po, palm_torso, q_now, carry_target[jj])
-                    q_grasp[j], q_carry[j], arm_now[j] = q_now[0], q_c[0], q_now[0]
+                    q_grasp[j], q_carry[j], arm_now[j] = q_now[0], (q_now[0] if args.no_carry_move else q_c[0]), q_now[0]
                     records[j]['carry_posture'] = dict(max_joint_change_rad=round(float((q_c-q_now).abs().max()), 3),
                                                        predicted_object_minus_target_m=round(float((p_c-carry_target[jj]).norm()), 3))
                 nav[j] = NavigationReference(planner_path, session=first_nav.session, speed_limit=max(.3, args.speed))
@@ -806,6 +815,9 @@ def main():
     p.add_argument('--save-grasp-states', action='store_true',
                    help="save M's state at each M -> C switch (grasp_states.pt, SGS holding-state layout)")
     p.add_argument('--grasp-only', action='store_true', help='end each world at its switch (harvest runs)')
+    p.add_argument('--settle-reference', choices=('planner', 'standing'), default='planner',
+                   help="diagnostic: body reference during C's settle phase ('standing' = the training env's)")
+    p.add_argument('--no-carry-move', action='store_true', help='diagnostic: carry v2 keeps the grasp-time arm angles')
     args = p.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
