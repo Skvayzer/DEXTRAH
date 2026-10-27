@@ -797,6 +797,10 @@ def main():
                     # Carry v2 arm channel from a v1 carry checkpoint: the first 7 latent outputs now
                     # change the right-arm reference; the head starts at zero (no change), log-std -1.5.
                     report['init_weights']['carry_heads'] = init_carry_heads(algo, fingers=False, latent=True)
+                if parent['carry_mjlab']['settings'].get('version', 1) != env.s.version:
+                    # New reward (v1 -> v2): the inherited value normalisers (count ~1e9) cannot adapt to the
+                    # new return scale (job 1583: value loss 1.2 -> 9.6 in 16 critic-only epochs).
+                    report['init_weights']['value_normalizers_reset'] = reset_all_value_normalizers(algo)
                 print('CARRY_INIT '+json.dumps(report['init_weights'].get('carry_heads')), flush=True)
             if args.critic_warmup_epochs:
                 install_critic_warmup(algo, args.critic_warmup_epochs)
