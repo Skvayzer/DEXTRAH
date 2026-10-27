@@ -39,6 +39,7 @@ def main():
     p.add_argument('--t0-s', type=float, default=.6)
     p.add_argument('--duration-s', type=float, default=.25)
     p.add_argument('--horizon-s', type=float, default=.5)
+    p.add_argument('--replicas', type=int, default=2, help='extra unperturbed copies per state (simulator noise floor)')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
     report = dict(completed=False, args={k: str(v) for k, v in vars(args).items()})
@@ -68,8 +69,9 @@ def run(args):
     from dextrah_lab.neurosim.model import HandObjectWorldModel
     from dextrah_lab.wholebody.carry_compose import finger_command
     t_start = time.time()
-    dirs = [(0, 0., 0.)]+[(j+1, s, dl) for dl in args.deltas for j in range(6) for s in (1., -1.)]
+    dirs = [(0, 0., 0.)]*(1+args.replicas)+[(j+1, s, dl) for dl in args.deltas for j in range(6) for s in (1., -1.)]
     D = len(dirs)
+    R = 1+args.replicas                                            # block layout per state: R baselines, then +- pairs
     n = args.states*D
     override = dict(mass_scale=(1., 1.), com_offset_m=0., disturbance=0., push_probability=0., carry_jitter=0.)
     env, policy, contract, settings = build_carry_env(args.checkpoint, n, settings_override=override,
@@ -138,7 +140,7 @@ def run(args):
     t = {k: v.to(dev) for k, v in t.items()}
     s0 = torch.full((n,), 1, dtype=torch.long, device=dev)            # row 1: the last unperturbed state
     e = torch.arange(n, device=dev)
-    base = (torch.arange(n, device=dev)//D)*D                        # baseline world of each world's state
+    base = (torch.arange(n, device=dev)//D)*D                        # first baseline world of each world's state
     with torch.no_grad():
         w = gather(t, s0, e, H)
         w_frozen = dict(w)
@@ -171,9 +173,23 @@ def run(args):
     # ---- compare finite differences
     from dextrah_lab.neurosim.evaluate import compare_finite_differences
     S = args.states
+    keep = torch.cat((torch.zeros(1, dtype=torch.long), torch.arange(R, D))).to(dev)      # first baseline + the pairs
+    sel = lambda v: v.reshape(S, D)[:, keep].flatten()
     summary = {}
     for name in ('force', 'rotation_deg', 'displacement_mm', 'support', 'lost'):
-        summary[name] = {proto: compare_finite_differences(sim[name], model[proto][name], S, D) for proto in ('teacher', 'frozen')}
+        summary[name] = {proto: compare_finite_differences(sel(sim[name]), sel(model[proto][name]), S, len(keep)) for proto in ('teacher', 'frozen')}
+        if R > 1:
+            # simulator noise floor: identical unperturbed worlds (MuJoCo Warp atomics can reorder sums)
+            b = sim[name].reshape(S, D)[:, :R]
+            summary[name]['sim_noise_abs_median'] = round(float((b[:, 1:]-b[:, :1]).abs().median()), 5)
+            summary[name]['sim_noise_identical_share'] = round(float((b[:, 1:] == b[:, :1]).float().mean()), 4)
+        for dl in args.deltas:
+            # per perturbation size: simulator antisymmetry and model agreement
+            idx = [0]+[R+i for i, d in enumerate(dirs[R:]) if d[2] == dl]
+            sub = torch.tensor(idx, device=dev)
+            pick = lambda v: v.reshape(S, D)[:, sub].flatten()
+            summary[name][f'delta_{dl:g}'] = {proto: compare_finite_differences(pick(sim[name]), pick(model[proto][name]), S, len(idx))
+                                              for proto in ('teacher',)}
     return dict(summary=summary, worlds=n, states=S, directions=D-1, deltas=list(args.deltas), t0_s=args.t0_s,
                 duration_s=args.duration_s, horizon_s=args.horizon_s, ended_in_window=int(ended.sum()), lost=int(lost.sum()),
                 sim_seconds=round(sim_s, 1), wall_s=round(time.time()-t_start, 1))
