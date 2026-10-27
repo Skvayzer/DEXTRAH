@@ -2,7 +2,7 @@
 #SBATCH --job-name=nsim_drops
 #SBATCH --partition=cpu
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=20G
+#SBATCH --mem=19G
 #SBATCH --time=02:00:00
 #SBATCH --output=slurm-nsim-drops-%j.out
 # Drop-prediction report of a trained hand-object world model on CPU (feature/g1-neurosim):
