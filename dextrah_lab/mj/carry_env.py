@@ -33,7 +33,8 @@ from dextrah_lab.wholebody.carry import MovingFrame, field_slice, quat_from_yaw,
 from dextrah_lab.wholebody.carry_compose import (LEVELS, RIGHT_ARM_JOINTS, CarrySettings, ClipSequencer, Curriculum,
                                                  WalkingClips, arm_delta_step, body_joint_masks, carry_arm_reference,
                                                  carry_context_v2, carry_reward_v2, carry_reward_v3, compose_body,
-                                                 finger_command, hand_command, hand_support, region_distance)
+                                                 finger_command, hand_command, hand_support, region_distance,
+                                                 NetRotation)
 from dextrah_lab.wholebody.contract import BODY_JOINTS  # noqa: E402
 from .env import G1SonicTouchMjEnv  # noqa: E402
 
@@ -289,6 +290,9 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._pelvis_next, self._pelvis_steps, self._pelvis_force = z(), z(dtype=torch.long), z(3)
         self._object_steps, self._object_force = z(dtype=torch.long), z(3)
         self._hazard = torch.zeros(4, device=d)      # decaying sums: early drops, early held s, late drops, late held s
+        # net palm-relative rotation rate over slip_window_s (the 'net' angular slip signal; logged in both modes)
+        self._net_rot = NetRotation(self.num_envs, max(1, round(s.slip_window_s/self.step_dt)), self.step_dt, d)
+        self._net_rate = z()
 
     def _init_contacts(self):
         super()._init_contacts()
@@ -436,6 +440,8 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             self._unsupported[ids] = 0
             self._supported[ids] = True
             self._rel_smooth[ids] = 0.
+            self._net_rot.reset(ids)
+            self._net_rate[ids] = 0.
             self._prev_raw[ids] = 0.
             lo, hi = s.pelvis_push_interval_s
             self._pelvis_next[ids] = s.warmup_s+s.settle_s+lo+(hi-lo)*torch.rand(len(ids), device=self.device, generator=g)
@@ -639,6 +645,8 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
                 self._dropped = (self._unsupported >= int(round(s.unsupported_s/self.step_dt))) | (height < s.drop_floor_m)
             a = min(1., self.step_dt/s.slip_smooth_s)
             self._rel_smooth = self._rel_smooth+a*(self._rel_vel_palm-self._rel_smooth)
+            _, palm = self._palm()
+            self._net_rate = self._net_rot.step(quat_mul(quat_conjugate(palm[:, 3:7]), self.object.data.root_quat_w))
         # Grasp check at the end of the warm-up; then park the table (unless kept): v1 right after the check,
         # v2 after the secure phase (the arm moves to the carry posture over the table).
         warm = int(round(s.warmup_s/self.step_dt))
@@ -676,8 +684,10 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             logs = getattr(self, '_grasp_logs', None) or {}
             self._opposition = logs.get('C_opp', torch.zeros_like(self._region_d))
             secure = self._seq.phase(self._episode_time()) == ClipSequencer.SETTLE
+            # angular slip: smoothed |w_rel| ('ema') or the net rotation rate over the window ('net', a 1-vector)
+            angular = self._rel_smooth[:, 3:] if s.slip_angular == 'ema' else self._net_rate[:, None]
             reward, terms = carry_reward_v3(s, supported=self._supported, rel_linear=self._rel_smooth[:, :3],
-                rel_angular=self._rel_smooth[:, 3:], grasp_opposition=self._opposition, contacts=self._n_contacts,
+                rel_angular=angular, grasp_opposition=self._opposition, contacts=self._n_contacts,
                 region_d=self._region_d, secure=secure, body_velocity=body_velocity,
                 planned_velocity=self._planned_velocity, normal_n=self.touch_raw[..., 0],
                 action_delta=self._action_delta, arm_delta=self._arm_D, table_contact=table_contact,
@@ -743,6 +753,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             self.extras['carry/opposition'] = self._opposition[active].mean()
             self.extras['carry/region_distance_cm'] = 100*self._region_d[active].mean()
             self.extras['carry/slip_smoothed_angular_rads'] = self._rel_smooth[active, 3:].norm(dim=-1).mean()
+            self.extras['carry/slip_net_rotation_rads'] = self._net_rate[active].mean()
         self.extras['carry/arm_delta_abs'] = self._arm_D.abs().mean()
 
     # ------------------------------------------------------ observations

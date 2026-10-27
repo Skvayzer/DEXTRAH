@@ -7,7 +7,8 @@ from dextrah_lab.wholebody.carry import WalkingClips
 from dextrah_lab.wholebody.carry_compose import (LEVELS, RIGHT_ARM_JOINTS, CarrySettings, ClipSequencer, Curriculum,
                                                  StartWindowRate, arm_delta_step, body_joint_masks, carry_arm_reference,
                                                  carry_context_v2, carry_reward_v2, carry_reward_v3, clips_up_to, compose_body,
-                                                 finger_command, hand_command, hand_support, region_distance)
+                                                 finger_command, hand_command, hand_support, region_distance,
+                                                 NetRotation, rotation_angle)
 from dextrah_lab.wholebody.contract import BODY_JOINTS
 
 
@@ -197,6 +198,28 @@ class CarryComposeTests(unittest.TestCase):
         self.assertEqual(ctx.shape[-1], 25)
         self.assertEqual(len(RIGHT_ARM_JOINTS), 7)
         self.assertTrue(all(j in BODY_JOINTS for j in RIGHT_ARM_JOINTS))
+
+    def test_net_rotation_ignores_vibration(self):
+        def about_z(angle):
+            a = torch.as_tensor(angle, dtype=torch.float32)/2
+            return torch.stack((a.cos(), torch.zeros_like(a), torch.zeros_like(a), a.sin()), -1)
+        dt, W = 1/60, 30
+        net = NetRotation(2, W, dt, 'cpu')
+        rates = []
+        for k in range(90):
+            # env 0: steady 0.3 rad/s; env 1: +-0.05 rad vibration at 30 Hz (path ~6 rad/s, no net rotation)
+            q = torch.stack((about_z(.3*k*dt), about_z(.05*(-1)**k)))
+            rates.append(net.step(q))
+        self.assertEqual(rates[0].tolist(), [0., 0.])
+        self.assertAlmostEqual(float(rates[-1][0]), .3, places=3)
+        self.assertLess(float(rates[-1][1]), .2)         # 0.1 rad / 0.5 s at most, vs a 6 rad/s path
+        self.assertAlmostEqual(float(rates[5][0]), .3, places=3)   # before the window fills: time since the start
+        net.reset(torch.tensor([0]))
+        r = net.step(torch.stack((about_z(1.), about_z(0.))))
+        self.assertEqual(float(r[0]), 0.)                 # fresh history after a reset
+        self.assertAlmostEqual(float(rotation_angle(about_z(.4), about_z(-.2))), .6, places=5)
+        with self.assertRaises(ValueError):
+            CarrySettings(slip_angular='raw')
 
 
 if __name__ == '__main__':

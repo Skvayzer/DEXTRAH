@@ -105,6 +105,11 @@ class CarrySettings:
     w_slip_w: float = .3
     slip_w_scale: float = .5
     slip_smooth_s: float = .1
+    # Angular slip signal: 'ema' = |w_rel| smoothed over slip_smooth_s (dominated by contact vibration:
+    # job 1588, net rotation is 5-7% of the path); 'net' = net palm-relative rotation over slip_window_s
+    # divided by the window (rad/s; zero-mean vibration cancels; median 0.18, p90 0.65 for C v2 1587).
+    slip_angular: str = 'ema'
+    slip_window_s: float = .5
     w_grasp: float = .3
     w_region: float = .2
     region_lo: tuple = (.20, -.25, -.10)    # carry region (torso frame, m)
@@ -129,6 +134,8 @@ class CarrySettings:
             raise ValueError('Curriculum level out of range')
         if self.version not in (1, 2) or self.hold_mode not in ('offset', 'support'):
             raise ValueError('Unknown carry version / hold mode')
+        if self.slip_angular not in ('ema', 'net') or self.slip_window_s <= 0:
+            raise ValueError("slip_angular must be 'ema' or 'net', with slip_window_s > 0")
         if self.arm_channel and (self.stage != 1 or not self.postures):
             raise ValueError('The arm channel replaces the latent residual (stage 1) and needs a posture library')
         if self.walk_s and not (0 < self.walk_s[0] <= self.walk_s[1]):
@@ -231,6 +238,38 @@ def hand_support(finger_force, palm_force, table_force, ground_force, distance, 
 def carry_context_v2(obj_torso, carry_target, arm_now, arm_delta, contact_flags, privileged):
     """The carry v2 context block appended after v1's (privileged = supported, opposition; zeros for the actor)."""
     return torch.cat((obj_torso-carry_target, arm_now, arm_delta, contact_flags, privileged), -1)
+
+
+def rotation_angle(q1, q2):
+    """Angle (rad) between unit quaternions q1, q2 (..., 4), sign-invariant."""
+    return 2*torch.acos((q1*q2).sum(-1).abs().clamp(max=1.))
+
+
+class NetRotation:
+    """Net rotation rate over a sliding window: angle between the relative orientation now and
+    ``window`` steps ago, divided by the elapsed time. After a reset an env fills its history with its
+    first orientation (body poses are only valid after the next physics step), so the rate covers the
+    time since the reset until the window is full (0 on the first step)."""
+
+    def __init__(self, n, window, dt, device):
+        self.hist = torch.zeros(window, n, 4, device=device)
+        self.hist[..., 0] = 1.
+        self.count = torch.zeros(n, dtype=torch.long, device=device)
+        self.window, self.dt, self.i = int(window), float(dt), 0
+
+    def reset(self, ids):
+        self.count[ids] = 0
+
+    def step(self, q):
+        fresh = self.count == 0
+        if bool(fresh.any()):
+            self.hist[:, fresh] = q[fresh][None]
+        old = self.hist[self.i].clone()
+        self.hist[self.i] = q
+        self.i = (self.i+1) % self.window
+        span = self.count.clamp(max=self.window).float()*self.dt
+        self.count += 1
+        return torch.where(span > 0, rotation_angle(q, old)/span.clamp_min(self.dt), torch.zeros_like(span))
 
 
 def region_distance(p, lo, hi):
