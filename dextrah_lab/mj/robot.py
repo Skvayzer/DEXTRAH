@@ -41,6 +41,10 @@ class ContactParams:
     # PhysX averages the 1.5 fingertip-marker material with partners' 0.5; MuJoCo
     # takes the max, so 1.0 reproduces the effective coefficient.
     marker_friction: float = 1.0
+    # MuJoCo friction[1:]: torsional (m) and rolling coefficients; they act only with condim >= 4 / 6.
+    # condim 3 (default, every robot / object / world geom) = sliding friction only.
+    torsional: float = 0.005
+    rolling: float = 0.0001
     maxhullvert: int = 64
     # Revo2 finger joints (PhysX armature 0). MuJoCo solves contacts with the
     # explicit actuator force on the 9 g finger links; with zero armature an
@@ -176,7 +180,7 @@ def build_robot_spec(contact=ContactParams(), path=ROBOT_URDF, implicit_drive_dt
         geom.solimp = contact.solimp
         geom.margin = geom.gap = 0.
         marker = geom.parent.name.endswith('_tip') and geom.parent.name.startswith('right_')
-        geom.friction = (contact.marker_friction if marker else contact.friction, 0.005, 0.0001)
+        geom.friction = (contact.marker_friction if marker else contact.friction, contact.torsional, contact.rolling)
     motors = body_motors()
     for joint in spec.joints:
         if joint.type == mujoco.mjtJoint.mjJNT_FREE:
@@ -227,7 +231,7 @@ def build_fixed_robot_spec(reference, contact=ContactParams(), path=ROBOT_URDF, 
         geom.solimp = contact.solimp
         geom.margin = geom.gap = 0.
         marker = geom.parent.name.endswith('_tip') and geom.parent.name.startswith('right_')
-        geom.friction = (contact.marker_friction if marker else contact.friction, 0.005, 0.0001)
+        geom.friction = (contact.marker_friction if marker else contact.friction, contact.torsional, contact.rolling)
     index = {n: i for i, n in enumerate(reference['joint_names'])}
     hand = set(su.G1_BRAINCO_HAND_TARGET_JOINT_NAMES)
     for joint in spec.joints:

@@ -23,7 +23,7 @@ def _world_geom(geom, contact):
     geom.solref = contact.solref
     geom.solimp = contact.solimp
     geom.margin = geom.gap = 0.
-    geom.friction = (contact.friction, 0.005, 0.0001)
+    geom.friction = (contact.friction, contact.torsional, contact.rolling)
 
 
 def object_spec(contact):
