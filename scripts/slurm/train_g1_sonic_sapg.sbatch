@@ -79,6 +79,8 @@ fi
 if [[ "${CONTINUOUS:-0}" == 1 ]]; then extra_args+=(--continuous); fi
 if [[ "${KL_DIAGNOSTICS:-0}" == 1 ]]; then extra_args+=(--kl-diagnostics); fi
 if [[ -n "${GAMMA:-}" ]]; then extra_args+=(--gamma "$GAMMA"); fi
+if [[ -n "${CONTACT_CONDIM:-}" ]]; then extra_args+=(--contact-condim "$CONTACT_CONDIM"); fi
+if [[ -n "${CONTACT_TORSIONAL:-}" ]]; then extra_args+=(--contact-torsional "$CONTACT_TORSIONAL"); fi
 if [[ -n "${HORIZON_LENGTH:-}" ]]; then extra_args+=(--horizon-length "$HORIZON_LENGTH"); fi
 if [[ -n "${ADAPTER_INPUT_CLIP:-}" ]]; then extra_args+=(--adapter-input-clip "$ADAPTER_INPUT_CLIP"); fi
 if [[ -n "${PLACE_GOALS:-}" ]]; then extra_args+=(--place-goals "$PLACE_GOALS" --place-library "${PLACE_LIBRARY:?Set PLACE_LIBRARY}" --place-orientation "${PLACE_ORIENTATION:-random}"); fi

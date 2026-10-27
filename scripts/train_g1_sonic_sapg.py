@@ -138,6 +138,10 @@ def main():
     p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (scripts/mj_rest_poses.py)')
     p.add_argument('--place-orientation', choices=('random', 'nearest'), default='random',
                    help='placement goal orientation: library pose with uniform yaw, or the one nearest to the held orientation')
+    p.add_argument('--contact-condim', type=int, default=None,
+                   help='mjlab: MuJoCo condim of every robot / object / world geom (default 3 = sliding friction only; '
+                        '4 adds torsional friction: job 1581, carry drop hazard -22%%)')
+    p.add_argument('--contact-torsional', type=float, default=None, help='mjlab: torsional friction coefficient (m), default 0.005')
     p.add_argument('--gamma', type=float, default=None, help='override the parent run\'s PPO discount (recorded)')
     p.add_argument('--horizon-length', type=int, default=None, help='override the parent run\'s rollout length (recorded)')
     p.add_argument('--kl-diagnostics', action='store_true',
@@ -558,6 +562,18 @@ def main():
                 wandb.config.update(dict(carry=contract['carry'], intentional_changes=contract['intentional_changes']),
                                     allow_val_change=True)
         elif backend == 'mjlab':
+            # Opt-in contact model (recorded): condim / torsional friction on every geom (mj/robot.ContactParams).
+            scene_params = None
+            if args.contact_condim is not None or args.contact_torsional is not None:
+                from dextrah_lab.mj.robot import ContactParams
+                from dextrah_lab.mj.scene import SceneParams
+                base = ContactParams()
+                params = ContactParams(condim=args.contact_condim or base.condim,
+                                       torsional=base.torsional if args.contact_torsional is None else args.contact_torsional)
+                scene_params = SceneParams(contact=params)
+                contract['contact_model'] = dict(condim=params.condim, torsional=params.torsional, rolling=params.rolling,
+                                                 default=dict(condim=base.condim, torsional=base.torsional))
+                contract['intentional_changes'] = contract['intentional_changes'] + ['contact_condim_torsional_friction']
             if args.mj_carry:
                 from dataclasses import fields as _fields
                 from dextrah_lab.mj.carry_env import G1CarryMjEnv
@@ -575,7 +591,7 @@ def main():
                 env = G1CarryMjEnv(cfg, sonic=sonic, carry=carry_settings, holding_state=args.carry_holding_state,
                                    held_settings=held_settings, clips_path=args.carry_clips, num_envs=args.num_envs,
                                    device=args.device, nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
-                                   mujoco_cfg=mj_settings['mujoco_options'])
+                                   mujoco_cfg=mj_settings['mujoco_options'], scene_params=scene_params)
                 if args.carry_state is not None and args.resume:
                     raise ValueError('--carry-state is for --init-weights starts; a resume loads its own X.carry.pt')
                 if args.carry_state is not None and not args.carry_state.exists():
@@ -609,7 +625,7 @@ def main():
                 from dextrah_lab.mj.env import G1SonicTouchMjEnv
                 env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device,
                                         nconmax=mj_settings['nconmax'], njmax=mj_settings['njmax'],
-                                        mujoco_cfg=mj_settings['mujoco_options'])
+                                        mujoco_cfg=mj_settings['mujoco_options'], scene_params=scene_params)
             if args.grasp_reward_scale is not None or args.object_energy_scale:
                 env.enable_grasp_reward(args.grasp_reward_scale or 0., args.object_energy_scale)
             if args.sonic_action_penalty_scale or args.fall_penalty:
