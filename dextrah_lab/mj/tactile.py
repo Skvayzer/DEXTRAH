@@ -63,6 +63,7 @@ class ContactReader:
 
     active_only = False   # opt-in (env.enable_fast_step): process the first nacon contacts only
     object_table = False  # opt-in (evaluation): per-env object-table normal force, out['object_table_force']
+    object_ground = False  # opt-in (carry v2): per-env object-floor normal force, out['object_ground_force']
 
     def read(self):
         """Return per-env fingertip and body-table force tensors for the last step."""
@@ -149,5 +150,10 @@ class ContactReader:
                            | ((self.partner[g0] == TABLE) & (self.partner[g1] == OBJECT)))
             out['object_table_force'] = torch.zeros(self.n, device=self.device).index_add_(
                 0, world, fn.norm(dim=-1)*ot.float())
+        if self.object_ground:
+            og = active & (((self.partner[g0] == OBJECT) & (self.partner[g1] == GROUND))
+                           | ((self.partner[g0] == GROUND) & (self.partner[g1] == OBJECT)))
+            out['object_ground_force'] = torch.zeros(self.n, device=self.device).index_add_(
+                0, world, fn.norm(dim=-1)*og.float())
         out['active_contacts'] = nacon
         return out

@@ -28,11 +28,12 @@ import torch
 
 from .compat import install, p2p
 install()                                   # isaaclab.utils.math etc. without Isaac Sim (as mj/env.py)
-from isaaclab.utils.math import matrix_from_quat, quat_conjugate, quat_mul, yaw_quat  # noqa: E402
+from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_conjugate, quat_mul, yaw_quat  # noqa: E402
 from dextrah_lab.wholebody.carry import MovingFrame, field_slice, quat_from_yaw, transform_clean_observation, yaw_of
 from dextrah_lab.wholebody.carry_compose import (LEVELS, CarrySettings, ClipSequencer, Curriculum, WalkingClips,
-                                                 body_joint_masks, carry_reward_v2, compose_body, finger_command,
-                                                 hand_command)
+                                                 body_joint_masks, carry_reward_v2, carry_reward_v3, compose_body,
+                                                 finger_command, hand_command, region_distance)
+from dextrah_lab.wholebody.carry_posture import min_jerk
 from dextrah_lab.wholebody.contract import BODY_JOINTS  # noqa: E402
 from .env import G1SonicTouchMjEnv  # noqa: E402
 
@@ -41,6 +42,13 @@ TABLE_PARKING_Z = -2.
 GOAL_PARKING_Z = 50.
 CONTEXT = (('goal_active', 1), ('command', 3), ('phase', 3), ('object_velocity_palm', 6), ('finger_torque', 6))
 CONTEXT_DIM = sum(n for _, n in CONTEXT)
+# carry v2 (docs/carry_v2_design.md): appended after the v1 context, so a v1 network expands with zero columns.
+CONTEXT_V2 = (('object_minus_carry_target', 3), ('right_arm_reference', 7), ('right_arm_delta', 7),
+              ('hand_object_contacts', 6), ('supported', 1), ('opposition', 1))   # last two: critic only
+
+
+def context_dim(version=1):
+    return CONTEXT_DIM+(sum(n for _, n in CONTEXT_V2) if int(version) == 2 else 0)
 OUTCOMES = ('success', 'retain_fail', 'start_fail', 'drop_warmup', 'drop_settle', 'drop_walk', 'drop_final',
             'robot_fall', 'other')
 
@@ -125,7 +133,7 @@ class CarryStarts:
         self.eval_stats['carry_score'] = _ExactScore(env)
         self.carry_seconds = _Rolling(window, d)
         from dextrah_lab.wholebody.carry_compose import StartWindowRate
-        steps = int(round(env.s.episode_s/env.step_dt))
+        steps = int(round(env.s.max_episode_s()/env.step_dt))
         self.train_exact, self.eval_exact = StartWindowRate(steps, d), StartWindowRate(steps, d)
         self.assets = c['asset'][self.configs]
         self.objects_covered = int(torch.unique(self.assets).numel())
@@ -173,7 +181,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         # Success counting cannot trigger (the goal is parked 50 m up) and the carry timer ends
         # episodes; the task timeout is moved beyond it on the env, not in the config.
         super().__init__(cfg, sonic=sonic, seed=seed, **kwargs)
-        self.max_episode_length = math.ceil((carry.episode_s+5.)/self.step_dt)
+        self.max_episode_length = math.ceil((carry.max_episode_s()+5.)/self.step_dt)
         from dextrah_lab.sgs.mj_task import MjSgsTask
         self.s = carry
         n, d = self.num_envs, self.device
@@ -186,7 +194,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         if carry.promote_on not in ('uniform', 'train'):
             raise ValueError(f'promote_on must be uniform or train, not {carry.promote_on!r}')
         gate_envs = int(self._sgs.eval_mask.sum()) if carry.promote_on == 'uniform' else n
-        self._curriculum = Curriculum(carry, d, num_envs=n, episode_steps=int(round(carry.episode_s/self.step_dt)),
+        self._curriculum = Curriculum(carry, d, num_envs=n, episode_steps=int(round(carry.max_episode_s()/self.step_dt)),
                                       min_starts=gate_envs)
         self._standing_q = self._reference_q.clone()
         self._arm_ids = torch.tensor([i for i, name in enumerate(BODY_JOINTS)
@@ -205,9 +213,11 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._goal_surface_policy = slice(TASK_ACTOR_DIM+BODY_EXTRA_DIM+h-HAND_SURFACE_DIM, TASK_ACTOR_DIM+BODY_EXTRA_DIM+h)
         self._goal_surface_critic = slice(TASK_CRITIC_DIM+BODY_EXTRA_DIM+h-HAND_SURFACE_DIM, TASK_CRITIC_DIM+BODY_EXTRA_DIM+h)
         # Context block after the hand block (the network treats it as more hand inputs).
-        self.hand_surface_dim += CONTEXT_DIM
-        cfg.observation_space += CONTEXT_DIM
-        cfg.state_space += CONTEXT_DIM
+        self._v2 = carry.version == 2
+        self._context_dim = context_dim(carry.version)
+        self.hand_surface_dim += self._context_dim
+        cfg.observation_space += self._context_dim
+        cfg.state_space += self._context_dim
         import gymnasium as gym
         import numpy as np
         for key, size in (('policy', cfg.observation_space), ('critic', cfg.state_space)):
@@ -227,7 +237,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._start_level = z(dtype=torch.long)                  # curriculum level the episode started at
         self._start_step = z(dtype=torch.long)                   # env step the episode started at
         self._env_steps = 0
-        self._curriculum.burn_in_until = int(round(carry.episode_s/self.step_dt))
+        self._curriculum.burn_in_until = int(round(carry.max_episode_s()/self.step_dt))
         self._offset_error = z()
         self._finger_residual, self._latent_residual = z(6), z(64)
         self._ref_quat = z(10, 4); self._ref_quat[..., 0] = 1.
@@ -236,10 +246,46 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._push_steps, self._push_force = z(dtype=torch.long), z(3)
         self._rel_vel_palm = z(6)
         self._body_compose = self._compose_body if carry.stage == 2 else None
+        if self._v2:
+            self._init_v2(z)
         self._carry_ready = True
         print('CARRY_ENV_READY '+json.dumps(dict(envs=n, holding_states=int(self._sgs.configs.numel()),
               objects=self._sgs.objects_covered, clips=len(self.clips.names), level=self._curriculum.level,
-              stage=carry.stage, context_dim=CONTEXT_DIM, actor=cfg.observation_space, critic=cfg.state_space)), flush=True)
+              stage=carry.stage, version=carry.version, context_dim=self._context_dim, actor=cfg.observation_space,
+              critic=cfg.state_space)), flush=True)
+
+    def _init_v2(self, z):
+        """Carry v2 buffers (docs/carry_v2_design.md)."""
+        s, d = self.s, self.device
+        self.enable_grasp_reward(0.)          # object-only finger / palm contact forces + opposition (logs only)
+        self._postures = None
+        if s.arm_channel:
+            from dextrah_lab.wholebody.carry_posture import CarryPostures
+            self._postures = CarryPostures(s.postures, d, target=s.carry_target, target_jitter=s.carry_jitter)
+        right = ('right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint', 'right_elbow_joint',
+                 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint')
+        self._right_arm = torch.tensor([BODY_JOINTS.index(j) for j in right], device=d)
+        names = self.robot.body_names
+        self._torso_body, self._palm_link = names.index('torso_link'), names.index('right_base_link')
+        self._pelvis_mj = int(self.sim.mj_model.body('robot/pelvis').id)
+        self._object_mj = int(self._held.body)
+        self._q_grasp, self._q_carry, self._arm_D, self._arm_now = z(7), z(7), z(7), z(7)
+        self._carry_target = z(3)
+        self._unsupported = z(dtype=torch.long)
+        self._supported = torch.ones(self.num_envs, dtype=torch.bool, device=d)
+        self._rel_smooth = z(6)
+        self._prev_raw, self._action_delta = z(13), z(13)
+        self._n_contacts, self._opposition, self._contact_flags = z(dtype=torch.long), z(), z(6)
+        self._region_d, self._obj_torso = z(), z(3)
+        self._pelvis_next, self._pelvis_steps, self._pelvis_force = z(), z(dtype=torch.long), z(3)
+        self._object_steps, self._object_force = z(dtype=torch.long), z(3)
+        self._hazard = torch.zeros(4, device=d)      # decaying sums: early drops, early held s, late drops, late held s
+
+    def _init_contacts(self):
+        super()._init_contacts()
+        if getattr(self, '_v2', False):
+            self.contacts.object_table = True
+            self.contacts.object_ground = True
 
     # ------------------------------------------------------------------ frames
     def _palm(self):
@@ -282,6 +328,16 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         data = self.robot.data
         self._home_pos[ids] = (data.root_pos_w-self.scene.env_origins)[ids]
         self._home_yaw[ids] = yaw_of(data.root_quat_w[ids])
+        if getattr(self, '_v2', False) and self._postures is not None:
+            # Carry posture for THIS grasp: object (own palm offset) nearest the carry target, palm kept.
+            torso = data.body_state_w[ids, self._torso_body]
+            palm = data.body_state_w[ids, self._palm_link]
+            t_po = quat_apply_inverse(palm[:, 3:7], self.object.data.root_pos_w[ids]-palm[:, :3])
+            palm_torso = quat_mul(quat_conjugate(torso[:, 3:7]), palm[:, 3:7])
+            q_now = data.joint_pos[ids][:, self._body_ids][:, self._right_arm]
+            target = self._postures.sample_targets(len(ids), self._carry_generator)
+            _, q_c, _ = self._postures.select(t_po, palm_torso, q_now, target)
+            self._q_grasp[ids], self._q_carry[ids], self._carry_target[ids] = q_now, q_c, target
         self._capture[ids] = False
 
     # ------------------------------------------------------------------ resets
@@ -360,7 +416,23 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._push_steps[ids] = 0
         self._push_force[ids] = 0.
         root_yaw = yaw_of(c['qpos'][k][:, 3:7])
-        self._seq.reset(ids, root_yaw, self._keep_table[ids])
+        end = None
+        if s.walk_s:
+            lo, hi = s.walk_s
+            end = s.warmup_s+s.settle_s+lo+(hi-lo)*torch.rand(len(ids), device=self.device, generator=g)+s.final_stand_s
+        self._seq.reset(ids, root_yaw, self._keep_table[ids], end=end)
+        if getattr(self, '_v2', False):
+            self._arm_D[ids] = 0.
+            self._q_grasp[ids] = c['joint_pos'][k][:, self._body_ids][:, self._right_arm]
+            self._q_carry[ids] = self._q_grasp[ids]              # until the posture is chosen at capture
+            self._unsupported[ids] = 0
+            self._supported[ids] = True
+            self._rel_smooth[ids] = 0.
+            self._prev_raw[ids] = 0.
+            lo, hi = s.pelvis_push_interval_s
+            self._pelvis_next[ids] = s.warmup_s+s.settle_s+lo+(hi-lo)*torch.rand(len(ids), device=self.device, generator=g)
+            self._pelvis_steps[ids] = 0
+            self._object_steps[ids] = 0
         reference = self._standing_q[ids].clone()
         if self.s.arm_reference == 'grasp':
             reference[:, :, self._arm_ids] = self._arm_ref[ids][:, None]
@@ -403,6 +475,12 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             q[:, :, self._arm_ids] = self._arm_ref[:, None]
         else:
             q[:, :, self._arm_ids] = self._standing_q[:, :, self._arm_ids]
+        if getattr(self, '_v2', False) and self.s.arm_channel:
+            # Carry v2: right arm from the grasp-time angles to the carry posture (minimum jerk over the
+            # secure phase), plus the policy's low-pass-filtered bounded change.
+            blend = min_jerk((t-self.s.warmup_s)/self.s.settle_s)[:, None]
+            self._arm_now = self._q_grasp+blend*(self._q_carry-self._q_grasp)+self._arm_D
+            q[:, :, self._right_arm] = self._arm_now[:, None]
         qd[:, :, self._arm_ids] = 0.
         self._reference_q, self._reference_qd, self._ref_quat = q, qd, root
         self._planned_velocity = torch.where(clip[:, None], velocity, torch.zeros_like(velocity))
@@ -448,6 +526,18 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         if not getattr(self, '_carry_ready', False):
             return super()._pre_physics_step(actions)
         s = self.s
+        if getattr(self, '_v2', False):
+            fingers = finger_command(self._q_ref, actions[:, 64:70], s.beta_fingers, s.finger_close, s.finger_open)
+            self._finger_residual = fingers-self._q_ref
+            raw = torch.cat((torch.tanh(actions[:, :7]), torch.tanh(actions[:, 64:70])), -1)
+            self._action_delta = raw-self._prev_raw
+            self._prev_raw = raw
+            if s.arm_channel:
+                self._arm_D = (1-s.arm_filter)*self._arm_D+s.arm_filter*s.arm_delta_rad*raw[:, :7]
+            self._latent_residual = torch.zeros_like(actions[:, :64])
+            super()._pre_physics_step(torch.cat((self._latent_residual, fingers), -1))
+            self._v2_disturbances()
+            return
         self._finger_residual = s.beta_fingers*torch.tanh(actions[:, 64:70])
         fingers = (self._q_ref+self._finger_residual).clamp(-1, 1)
         if s.stage == 2:
@@ -468,6 +558,50 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self.sim.data.xfrc_applied[:, self._wrist_body, :3] = self._push_force*active
         self._push_steps = (self._push_steps-1).clamp(min=0)
 
+    def _v2_disturbances(self):
+        """Carry v2 pushes, scaled by the disturbance level k: right wrist (as v1), pelvis (Workhorse
+        protocol as the ceiling) and object (RobustDexGrasp's evaluation force), after the secure phase."""
+        s, g, d, dt = self.s, self._carry_generator, self.device, self.step_dt
+        k = s.disturbance
+        t = self._episode_time()
+        walking_on = t >= s.warmup_s+s.settle_s
+        n = self.num_envs
+        rand = lambda *shape: torch.rand(*shape, device=d, generator=g)
+
+        def horizontal(m):
+            a = rand(m)*2*math.pi
+            return torch.stack((a.cos(), a.sin(), torch.zeros_like(a)), -1)
+        # wrist (v1 mechanism), magnitude x k
+        start = (self._push_steps == 0) & (rand(n) < s.push_probability) & walking_on
+        ids = torch.nonzero(start).flatten()
+        if ids.numel() and k > 0:
+            lo, hi = s.push_s
+            self._push_steps[ids] = torch.round((lo+(hi-lo)*rand(len(ids)))/dt).long().clamp(min=1)
+            self._push_force[ids] = torch.randn(len(ids), 3, device=d, generator=g)*s.push_force_n*k
+        # pelvis: every push_interval, horizontal, U(0, F k) for U(push_s)
+        start = (self._pelvis_steps == 0) & (t >= self._pelvis_next) & walking_on
+        ids = torch.nonzero(start).flatten()
+        if ids.numel():
+            lo, hi = s.pelvis_push_s
+            self._pelvis_steps[ids] = torch.round((lo+(hi-lo)*rand(len(ids)))/dt).long().clamp(min=1)
+            self._pelvis_force[ids] = horizontal(len(ids))*(rand(len(ids))*s.pelvis_push_n*k)[:, None]
+            lo, hi = s.pelvis_push_interval_s
+            self._pelvis_next[ids] = t[ids]+lo+(hi-lo)*rand(len(ids))
+        # object: random direction, U(0, F k) for 0.1-0.3 s
+        start = (self._object_steps == 0) & (rand(n) < s.object_push_probability) & walking_on
+        ids = torch.nonzero(start).flatten()
+        if ids.numel() and k > 0:
+            v = torch.randn(len(ids), 3, device=d, generator=g)
+            self._object_steps[ids] = torch.round((.1+.2*rand(len(ids)))/dt).long().clamp(min=1)
+            self._object_force[ids] = v/v.norm(dim=-1, keepdim=True).clamp_min(1e-6)*(rand(len(ids))*s.object_push_n*k)[:, None]
+        x = self.sim.data.xfrc_applied
+        x[:, self._wrist_body, :3] = self._push_force*(self._push_steps > 0).float()[:, None]
+        x[:, self._pelvis_mj, :3] = self._pelvis_force*(self._pelvis_steps > 0).float()[:, None]
+        x[:, self._object_mj, :3] = self._object_force*(self._object_steps > 0).float()[:, None]
+        self._push_steps = (self._push_steps-1).clamp(min=0)
+        self._pelvis_steps = (self._pelvis_steps-1).clamp(min=0)
+        self._object_steps = (self._object_steps-1).clamp(min=0)
+
     # ------------------------------------------------------------ dones
     def _get_dones(self):
         terminated, truncated = super()._get_dones()
@@ -483,16 +617,38 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._drop_count = torch.where(far, self._drop_count+1, torch.zeros_like(self._drop_count))
         height = self.object.data.root_pos_w[:, 2]-self.scene.env_origins[:, 2]
         self._dropped = (self._drop_count >= s.drop_steps) | (height < s.drop_floor_m)
-        # Grasp check at the end of the warm-up; then park the table (unless kept).
+        if self._v2:
+            # Supported by the hand: >= 1 hand-object contact (pad or palm > 0.5 N), within 15 cm of the
+            # palm centre, no object-table / object-floor contact. Drop = unsupported for unsupported_s.
+            c = self._last_contacts
+            zero = torch.zeros_like(height)
+            flags = torch.cat((c['finger_object_force_l1'] > .5, (c['palm_object_force_l1'] > .5)[:, None]), -1)
+            self._contact_flags, self._n_contacts = flags.float(), flags.sum(-1)
+            centre, _ = self._palm()
+            near = (self.object.data.root_pos_w-centre).norm(dim=-1) < .15
+            free = (c.get('object_table_force', zero) < .05) & (c.get('object_ground_force', zero) < .05)
+            self._supported = (self._n_contacts >= 1) & near & free
+            counting = t > s.warmup_s
+            self._unsupported = torch.where(counting & ~self._supported, self._unsupported+1, torch.zeros_like(self._unsupported))
+            if s.hold_mode == 'support':
+                self._dropped = (self._unsupported >= int(round(s.unsupported_s/self.step_dt))) | (height < s.drop_floor_m)
+            a = min(1., self.step_dt/s.slip_smooth_s)
+            self._rel_smooth = self._rel_smooth+a*(self._rel_vel_palm-self._rel_smooth)
+        # Grasp check at the end of the warm-up; then park the table (unless kept): v1 right after the check,
+        # v2 after the secure phase (the arm moves to the carry posture over the table).
         warm = int(round(s.warmup_s/self.step_dt))
         at_check = self._carry_t == warm
         lifted = height > self._table_z_per_env+.15+s.confirm_lift_m      # table top = centre + 0.15
         confirmed = lifted & (self._offset_error < s.confirm_distance_m)
         self._start_fail = at_check & ~confirmed
-        park = at_check & confirmed & ~self._keep_table
+        if self._v2:
+            park = (self._carry_t == int(round((s.warmup_s+s.settle_s)/self.step_dt))) & ~self._keep_table & ~self._dropped
+        else:
+            park = at_check & confirmed & ~self._keep_table
         self._park_tables(torch.nonzero(park).flatten())
         terminated = terminated | self._dropped | self._start_fail
-        truncated = (self._carry_t >= int(round(s.episode_s/self.step_dt))) & ~terminated
+        end = torch.round(self._seq.end/self.step_dt).long() if self._seq.variable else int(round(s.episode_s/self.step_dt))
+        truncated = (self._carry_t >= end) & ~terminated
         return terminated, truncated
 
     # ---------------------------------------------------------- rewards
@@ -508,11 +664,26 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         body_velocity = torch.stack((c*v[:, 0]+sn*v[:, 1], -sn*v[:, 0]+c*v[:, 1], data.root_ang_vel_w[:, 2]), -1)
         table_contact = getattr(self, '_body_table_contact', torch.zeros_like(self._dropped)) & ~self._table_parked
         active = self._episode_time() > s.warmup_s
-        reward, terms = carry_reward_v2(s, offset_error=self._offset_error, rel_linear=self._rel_vel_palm[:, :3],
-            rel_angular=self._rel_vel_palm[:, 3:], body_velocity=body_velocity, planned_velocity=self._planned_velocity,
-            finger_residual=self._finger_residual, latent_residual=self._latent_residual,
-            normal_n=self.touch_raw[..., 0], dropped=self._dropped, fell=self._body_fallen,
-            table_contact=table_contact, active=active)
+        if self._v2:
+            torso = data.body_state_w[:, self._torso_body]
+            self._obj_torso = quat_apply_inverse(torso[:, 3:7], self.object.data.root_pos_w-torso[:, :3])
+            self._region_d = region_distance(self._obj_torso, s.region_lo, s.region_hi)
+            logs = getattr(self, '_grasp_logs', None) or {}
+            self._opposition = logs.get('C_opp', torch.zeros_like(self._region_d))
+            secure = self._seq.phase(self._episode_time()) == ClipSequencer.SETTLE
+            reward, terms = carry_reward_v3(s, supported=self._supported, rel_linear=self._rel_smooth[:, :3],
+                rel_angular=self._rel_smooth[:, 3:], grasp_opposition=self._opposition, contacts=self._n_contacts,
+                region_d=self._region_d, secure=secure, body_velocity=body_velocity,
+                planned_velocity=self._planned_velocity, normal_n=self.touch_raw[..., 0],
+                action_delta=self._action_delta, arm_delta=self._arm_D, table_contact=table_contact,
+                dropped=self._dropped, fell=self._body_fallen, active=active)
+            self._v2_metrics(active)
+        else:
+            reward, terms = carry_reward_v2(s, offset_error=self._offset_error, rel_linear=self._rel_vel_palm[:, :3],
+                rel_angular=self._rel_vel_palm[:, 3:], body_velocity=body_velocity, planned_velocity=self._planned_velocity,
+                finger_residual=self._finger_residual, latent_residual=self._latent_residual,
+                normal_n=self.touch_raw[..., 0], dropped=self._dropped, fell=self._body_fallen,
+                table_contact=table_contact, active=active)
         if self._body_penalty is not None:
             # Opt-in SONIC action / fall penalties (enable_body_penalty), on the composed body action.
             extra, more, _ = self._body_penalty()
@@ -546,6 +717,29 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self.extras['carry/table_parked'] = self._table_parked.float().mean()
         return reward
 
+    def _v2_metrics(self, active):
+        """Carry v2 logs: drop hazard per held second in early (< 5 s) and late (> 10 s) walking (decaying
+        sums, time constant ~17 s), support, contacts, opposition, carry-region distance, arm change."""
+        s, dt = self.s, self.step_dt
+        t = self._episode_time()
+        walking = self._seq.phase(t) == ClipSequencer.WALK
+        walk_t = t-self._seq.walk_start()
+        early, late = walking & (walk_t < 5.), walking & (walk_t > 10.)
+        drop = self._dropped.float()
+        held = self._supported.float()
+        now = torch.stack(((drop*early).sum(), (held*early).sum()*dt, (drop*late).sum(), (held*late).sum()*dt))
+        self._hazard = .999*self._hazard+now
+        h = self._hazard
+        self.extras['carry/hazard_early_per_s'] = h[0]/h[1].clamp_min(1e-6)
+        self.extras['carry/hazard_late_per_s'] = h[2]/h[3].clamp_min(1e-6)
+        if bool(active.any()):
+            self.extras['carry/supported'] = self._supported[active].float().mean()
+            self.extras['carry/hand_object_contacts'] = self._n_contacts[active].float().mean()
+            self.extras['carry/opposition'] = self._opposition[active].mean()
+            self.extras['carry/region_distance_cm'] = 100*self._region_d[active].mean()
+            self.extras['carry/slip_smoothed_angular_rads'] = self._rel_smooth[active, 3:].norm(dim=-1).mean()
+        self.extras['carry/arm_delta_abs'] = self._arm_D.abs().mean()
+
     # ------------------------------------------------------ observations
     def _context(self, critic):
         phase = self._seq.phase(self._episode_time())
@@ -553,7 +747,13 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         velocity = self._rel_vel_palm if critic else torch.zeros_like(self._rel_vel_palm)
         torque = self.robot.data.applied_torque[:, self._hand_joint_ids].clamp(-5, 5)
         goal_active = torch.zeros(self.num_envs, 1, device=self.device)
-        return torch.cat((goal_active, self._clip_command, one_hot, velocity, torque), -1)
+        ctx = torch.cat((goal_active, self._clip_command, one_hot, velocity, torque), -1)
+        if not getattr(self, '_v2', False):
+            return ctx
+        # v2 (appended): object - carry target (torso frame), right-arm reference, filtered arm change,
+        # hand-object contacts (5 pads + palm); critic only: supported, opposition.
+        priv = torch.stack((self._supported.float(), self._opposition), -1) if critic else torch.zeros(self.num_envs, 2, device=self.device)
+        return torch.cat((ctx, self._obj_torso-self._carry_target, self._arm_now, self._arm_D, self._contact_flags, priv), -1)
 
     def _carry_critic(self, critic):
         critic = critic.clone()
@@ -577,10 +777,16 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         s, starts = self.s, self._sgs
         t = self._carry_t[ids].float()*self.step_dt
         dropped, fell, start_fail = self._dropped[ids], self._body_fallen[ids], self._start_fail[ids]
-        timeout = self._carry_t[ids] >= int(round(s.episode_s/self.step_dt))
-        retained = self._offset_error[ids] < s.retain_m
+        if self._seq.variable:
+            timeout = self._carry_t[ids] >= torch.round(self._seq.end[ids]/self.step_dt).long()
+        else:
+            timeout = self._carry_t[ids] >= int(round(s.episode_s/self.step_dt))
+        if getattr(self, '_v2', False) and s.hold_mode == 'support':
+            retained = self._supported[ids]          # v2: still supported by the hand (any re-grip / posture)
+        else:
+            retained = self._offset_error[ids] < s.retain_m
         success = timeout & retained & ~fell & ~dropped
-        phase = self._seq.phase(t)
+        phase = self._seq.phase(t, ids)
         out = {
             'success': success, 'retain_fail': timeout & ~retained & ~fell & ~dropped,
             'start_fail': start_fail & ~dropped,

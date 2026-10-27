@@ -629,6 +629,7 @@ class G1SonicTouchMjEnv:
         if self._grasp_reward is not None:
             # Opt-in InterMimicGen grasp score / object energy (enable_grasp_reward).
             extra, terms, logs = self._grasp_reward()
+            self._grasp_logs = logs                     # per-env grasp score parts (carry v2 reads C_opp)
             reward = reward+extra
             self._reward_terms.update(terms)
             self._reward_terms['total_reward'] = reward

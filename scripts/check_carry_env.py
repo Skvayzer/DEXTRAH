@@ -20,11 +20,12 @@ def main():
     p.add_argument('--mass-scale', type=float, nargs=2, default=(.7, 2.))
     p.add_argument('--com', type=float, default=.02)
     p.add_argument('--base-env', action='store_true', help='control: the plain manipulation env, same steps')
+    p.add_argument('--settings', default='{}', help='JSON overrides of CarrySettings (e.g. carry v2)')
     args = p.parse_args()
     import torch
     from dextrah_lab.mj.compat import install
     install()
-    from dextrah_lab.mj.carry_env import G1CarryMjEnv, CONTEXT_DIM
+    from dextrah_lab.mj.carry_env import G1CarryMjEnv, context_dim
     from dextrah_lab.mj.env import load_run_cfg
     from dextrah_lab.mj.factory import DEFAULT_MUJOCO, WORKSPACE
     from dextrah_lab.sgs.mj_task import SgsSettings
@@ -35,8 +36,9 @@ def main():
     cfg = load_run_cfg(args.run)
     cfg.sonic_body.spawn_on_table = contract['body_termination']['spawn_on_table']
     sonic = FrozenSonic(WORKSPACE/'GRAIL', WORKSPACE/'G1-SONIC-models/checkpoint/SONIC/models/sonic_manipulation_base', args.device)
-    settings = CarrySettings(stage=args.stage, level=args.level, table_keep_probability=.25,
-                             mass_scale=tuple(args.mass_scale), com_offset_m=args.com)
+    extra = {k: tuple(v) if isinstance(v, list) else v for k, v in json.loads(args.settings).items()}
+    settings = CarrySettings(**dict(dict(stage=args.stage, level=args.level, table_keep_probability=.25,
+                                         mass_scale=tuple(args.mass_scale), com_offset_m=args.com), **extra))
     if args.base_env:
         from dextrah_lab.mj.env import G1SonicTouchMjEnv
         env = G1SonicTouchMjEnv(cfg, sonic=sonic, num_envs=args.num_envs, device=args.device, nconmax=64, njmax=300,
@@ -57,7 +59,7 @@ def main():
     assert obs['policy'].shape == (env.num_envs, cfg.observation_space), obs['policy'].shape
     assert obs['critic'].shape == (env.num_envs, cfg.state_space), obs['critic'].shape
     assert torch.isfinite(obs['policy']).all() and torch.isfinite(obs['critic']).all()
-    ctx = obs['policy'][:, -CONTEXT_DIM:]
+    ctx = obs['policy'][:, -context_dim(settings.version):]
     print('OBS', tuple(obs['policy'].shape), tuple(obs['critic'].shape), 'context', ctx[0].tolist(), flush=True)
     print('GOAL_MASKED', float(obs['policy'][:, env._goal_policy].abs().max()), float(obs['policy'][:, env._goal_surface_policy].abs().max()))
     actions = torch.zeros(env.num_envs, 70, device=args.device)

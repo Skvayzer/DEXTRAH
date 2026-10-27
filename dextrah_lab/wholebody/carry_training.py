@@ -103,6 +103,23 @@ def init_carry_heads(algo, *, fingers=True, latent=True, logstd=-1.5):
     return report
 
 
+def freeze_latent_dims(algo, keep=7):
+    """Carry v2 arm channel: only the first ``keep`` latent outputs act (right-arm reference changes);
+    the adapter head rows and log-std columns keep..63 get no gradient, so those action dimensions
+    keep a fixed mean (zero) and std and add nothing to the PPO ratio or entropy. The adapter's hidden
+    layers stay trainable (they feed the acting rows)."""
+    net = algo.model.a2c_network
+    head = net.latent_adapter[-1]
+    row = torch.zeros(head.weight.shape[0], 1, device=head.weight.device)
+    row[:keep] = 1.
+    hooks = [head.weight.register_hook(lambda g: g*row), head.bias.register_hook(lambda g: g*row[:, 0])]
+    mask = torch.ones_like(net.logstd)
+    mask[:, keep:64] = 0.
+    hooks.append(net.logstd.register_hook(lambda g: g*mask))
+    algo._carry_latent_freeze = hooks
+    return dict(latent_head_rows_trainable=f'0..{keep-1}', latent_logstd_trainable=f'0..{keep-1}', fingers='trainable')
+
+
 def freeze_latent_residual(algo):
     """Carry stage 1: the latent residual is not executed (the env zeroes it); keep its head and
     log-std fixed so the unused dimensions add nothing to the PPO ratio or entropy."""

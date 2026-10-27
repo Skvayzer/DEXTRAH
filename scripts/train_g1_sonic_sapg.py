@@ -138,6 +138,8 @@ def main():
     p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (scripts/mj_rest_poses.py)')
     p.add_argument('--place-orientation', choices=('random', 'nearest'), default='random',
                    help='placement goal orientation: library pose with uniform yaw, or the one nearest to the held orientation')
+    p.add_argument('--gamma', type=float, default=None, help='override the parent run\'s PPO discount (recorded)')
+    p.add_argument('--horizon-length', type=int, default=None, help='override the parent run\'s rollout length (recorded)')
     p.add_argument('--kl-diagnostics', action='store_true',
                    help='Log a per-epoch KL breakdown (latent vs fingers, per-sample peaks) and latent adapter input peaks')
     p.add_argument('--carry-state', type=Path, default=None,
@@ -251,8 +253,9 @@ def main():
         parent_dim = int(parent_contract.get('hand_surface', {}).get('dim', HAND_SURFACE_DIM if parent_hand else 0))
         new_dim = hand_surface_dim(args.hand_surface_arm_links, args.hand_surface_goal) if args.hand_surface_obs else 0
         if args.mj_carry:
-            from dextrah_lab.mj.carry_env import CONTEXT_DIM
-            new_dim += CONTEXT_DIM          # carry context block, appended after the hand block
+            from dextrah_lab.mj.carry_env import context_dim
+            carry_version = int(json.loads(args.carry_settings or '{}').get('version', 1))
+            new_dim += context_dim(carry_version)   # carry context block (v1 19, v2 +25), appended after the hand block
         if args.resume is not None and parent_dim != new_dim:
             raise ValueError(f'Hand-surface block {new_dim} but the resumed run used {parent_dim} (use --init-weights)')
         if new_dim < parent_dim:
@@ -372,6 +375,14 @@ def main():
             contract.update(source_run=str(args.teacher_checkpoint.parent.parent), source_checkpoint=str(args.teacher_checkpoint),
                             source_sha256=teacher_sha, teacher_replaces_run383=True)
         ac_cfg = agent['params']['config']
+        if args.gamma is not None or args.horizon_length is not None:
+            # Opt-in overrides of the parent run's PPO discount / rollout length (recorded below).
+            contract['ppo_overrides'] = dict(gamma=[ac_cfg['gamma'], args.gamma], horizon_length=[ac_cfg['horizon_length'], args.horizon_length])
+            if args.gamma is not None:
+                ac_cfg['gamma'] = float(args.gamma)
+            if args.horizon_length is not None:
+                ac_cfg['horizon_length'] = int(args.horizon_length)
+            contract['intentional_changes'] = contract['intentional_changes'] + ['ppo_gamma_or_horizon_override']
         minibatch_size = args.minibatch_size or 4*args.num_envs
         if (ac_cfg['horizon_length']*args.num_envs) % minibatch_size:
             raise ValueError(f'--minibatch-size {minibatch_size} must divide the rollout '
@@ -766,10 +777,17 @@ def main():
                 elif args.carry_stage == 2 and parent['carry_mjlab']['settings']['stage'] == 1:
                     # Stage 2 from a stage-1 carry checkpoint: the arm residual starts at zero.
                     report['init_weights']['carry_heads'] = init_carry_heads(algo, fingers=False, latent=True)
+                elif env.s.arm_channel and not parent['carry_mjlab']['settings'].get('arm_channel', False):
+                    # Carry v2 arm channel from a v1 carry checkpoint: the first 7 latent outputs now
+                    # change the right-arm reference; the head starts at zero (no change), log-std -1.5.
+                    report['init_weights']['carry_heads'] = init_carry_heads(algo, fingers=False, latent=True)
                 print('CARRY_INIT '+json.dumps(report['init_weights'].get('carry_heads')), flush=True)
             if args.critic_warmup_epochs:
                 install_critic_warmup(algo, args.critic_warmup_epochs)
-        if args.mj_carry and args.carry_stage == 1:
+        if args.mj_carry and args.carry_stage == 1 and getattr(env, 's', None) is not None and env.s.arm_channel:
+            from dextrah_lab.wholebody.carry_training import freeze_latent_dims
+            report['carry_latent_freeze'] = freeze_latent_dims(algo, keep=7)
+        elif args.mj_carry and args.carry_stage == 1:
             from dextrah_lab.wholebody.carry_training import freeze_latent_residual
             report['carry_latent_freeze'] = freeze_latent_residual(algo)
         if args.kl_diagnostics:
