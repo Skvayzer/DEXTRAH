@@ -460,7 +460,30 @@ def run(args):
             # grasp -> settle (switch M -> C)
             ing = phase == GRASP
             grasp_count = torch.where(ing & lifted & (touching >= args.grasp_min_fingers), grasp_count+1, torch.zeros_like(grasp_count))
-            for j in torch.nonzero(ing & (grasp_count >= GRASP_STEPS)).flatten().tolist():
+            switching = torch.nonzero(ing & (grasp_count >= GRASP_STEPS)).flatten()
+            if args.save_grasp_states and switching.numel():
+                # M's state at the switch, in the SGS holding-state layout (C training starts from real hand-offs)
+                ids = switching
+                origin = env.scene.env_origins[ids]
+                setpoint = getattr(env.robot, '_setpoint', None)
+                store = dict(asset=env._object_asset_index_per_env[ids].cpu(), qpos=env.sim.data.qpos[ids].cpu(),
+                             qvel=env.sim.data.qvel[ids].cpu(), targets=env._cur_targets[ids].cpu(),
+                             setpoint=(setpoint if setpoint is not None else env._cur_targets)[ids].cpu(),
+                             table_z=env._table_z_per_env[ids].cpu(), object_init_z=env._object_init_z[ids].cpu(),
+                             object_pose=torch.cat((env.object.data.root_pos_w[ids]-origin, env.object.data.root_quat_w[ids]), -1).cpu(),
+                             joint_pos=env.robot.data.joint_pos[ids].cpu(), joint_vel=env.robot.data.joint_vel[ids].cpu(),
+                             # goal: the object's own pose (C zeroes its goal observations; SGS needs a valid pose)
+                             history=task._history_now(ids).cpu(), env=ids.cpu(), touching=touching[ids].cpu(),
+                             goal_pose=torch.cat((env.object.data.root_pos_w[ids]-origin, env.object.data.root_quat_w[ids]), -1).cpu(),
+                             hand_contact_n=hand_contact[ids].cpu())
+                if task.na:
+                    store['act'] = env.sim.data.act[ids].cpu()
+                path = args.output/'grasp_states.pt'
+                old = torch.load(path, weights_only=False) if path.exists() else None
+                if old is not None:
+                    store = {k: torch.cat((old[k], v)) for k, v in store.items()}
+                torch.save(store, path)
+            for j in switching.tolist():
                 jj = torch.tensor([j], device=d)
                 q_ref[j] = finger_command_now(jj)[0]
                 arm_ref[j] = env.robot.data.joint_pos[j, env._body_ids][arm_ids]
@@ -483,6 +506,8 @@ def run(args):
                 phase[j], phase_steps[j] = SETTLE, 0
                 drop_count[j] = 0
                 records[j]['grasp_s'] = round(t+dt, 2)
+                if args.grasp_only:
+                    finish(j, 'grasp_saved', t+dt, touching=int(touching[j]))
             for j in torch.nonzero(ing & (phase_steps*dt > args.grasp_limit)).flatten().tolist():
                 finish(j, 'no_grasp', t+dt)
             # carrying: drops ('offset': v1's 12 cm beyond the hold for 6 steps; 'support': C v2's support rule;
@@ -770,6 +795,9 @@ def main():
     p.add_argument('--njmax', type=int, default=300)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--no-render', action='store_true')
+    p.add_argument('--save-grasp-states', action='store_true',
+                   help="save M's state at each M -> C switch (grasp_states.pt, SGS holding-state layout)")
+    p.add_argument('--grasp-only', action='store_true', help='end each world at its switch (harvest runs)')
     args = p.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)

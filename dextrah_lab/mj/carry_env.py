@@ -273,7 +273,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._postures = None
         if s.arm_channel:
             from dextrah_lab.wholebody.carry_posture import CarryPostures
-            self._postures = CarryPostures(s.postures, d, target=s.carry_target, target_jitter=s.carry_jitter)
+            self._postures = CarryPostures(s.postures, d, target=s.carry_target, target_jitter=s.carry_jitter, w_q=s.posture_w_q)
         self._right_arm = torch.tensor([BODY_JOINTS.index(j) for j in RIGHT_ARM_JOINTS], device=d)
         names = self.robot.body_names
         self._torso_body, self._palm_link = names.index('torso_link'), names.index('right_base_link')
@@ -428,11 +428,14 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._push_steps[ids] = 0
         self._push_force[ids] = 0.
         root_yaw = yaw_of(c['qpos'][k][:, 3:7])
-        end = None
+        end, route = None, None
         if s.walk_s:
             lo, hi = s.walk_s
             end = s.warmup_s+s.settle_s+lo+(hi-lo)*torch.rand(len(ids), device=self.device, generator=g)+s.final_stand_s
-        self._seq.reset(ids, root_yaw, self._keep_table[ids], end=end)
+            if s.route_probability > 0:
+                route = torch.rand(len(ids), device=self.device, generator=g) < s.route_probability
+                end = torch.where(route, torch.full_like(end, s.warmup_s+s.settle_s+s.route_seconds()+s.final_stand_s), end)
+        self._seq.reset(ids, root_yaw, self._keep_table[ids], end=end, route=route)
         if getattr(self, '_v2', False):
             self._arm_D[ids] = 0.
             self._q_grasp[ids] = c['joint_pos'][k][:, self._body_ids][:, self._right_arm]
@@ -654,6 +657,11 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         lifted = height > self._table_z_per_env+.15+s.confirm_lift_m      # table top = centre + 0.15
         confirmed = lifted & (self._offset_error < s.confirm_distance_m)
         self._start_fail = at_check & ~confirmed
+        if self._v2 and s.arm_channel and s.posture_min_contacts > 0 and bool(at_check.any()):
+            # weak grasps keep the grasp-time arm angles (no carry move, which starts after the warm-up)
+            weak = at_check & (self._n_contacts < s.posture_min_contacts)
+            self._q_carry[weak] = self._q_grasp[weak]
+            self.extras['carry/posture_skipped'] = weak.sum().float()/at_check.sum().clamp_min(1)
         if self._v2:
             park = (self._carry_t == int(round((s.warmup_s+s.settle_s)/self.step_dt))) & ~self._keep_table & ~self._dropped
         else:
@@ -755,6 +763,8 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
             self.extras['carry/slip_smoothed_angular_rads'] = self._rel_smooth[active, 3:].norm(dim=-1).mean()
             self.extras['carry/slip_net_rotation_rads'] = self._net_rate[active].mean()
         self.extras['carry/arm_delta_abs'] = self._arm_D.abs().mean()
+        if s.route_probability > 0:
+            self.extras['carry/route_share'] = self._seq.route.float().mean()
 
     # ------------------------------------------------------ observations
     def _context(self, critic):

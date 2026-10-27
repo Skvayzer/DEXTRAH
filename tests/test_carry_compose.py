@@ -221,6 +221,40 @@ class CarryComposeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             CarrySettings(slip_angular='raw')
 
+    def test_route_pattern_episodes(self):
+        names = ['idle', 'forward@0.2', 'backward@0.2', 'left@0.2', 'right@0.2', 'forward@0.1']
+        C, T = len(names), 501
+        q = torch.zeros(C, T, 29); quat = torch.zeros(C, T, 4); quat[..., 0] = 1.
+        vel = torch.zeros(C, T, 3)
+        clips = WalkingClips(q, quat, vel, vel.clone(), torch.full((C,), T), names)
+        with self.assertRaises(ValueError):
+            CarrySettings(version=2, route_probability=.3)            # needs variable episodes
+        s = CarrySettings(version=2, walk_s=(12., 20.), route_probability=1., stop_probability=.5)
+        self.assertAlmostEqual(s.route_seconds(), 11.5)
+        seq = ClipSequencer(clips, s, 2, 'cpu', generator=torch.Generator().manual_seed(0))
+        seq.set_level(2)
+        end = torch.tensor([s.warmup_s+s.settle_s+s.route_seconds()+s.final_stand_s, 30.])
+        seq.reset(torch.tensor([0, 1]), torch.zeros(2), torch.zeros(2, dtype=torch.bool), end=end,
+                  route=torch.tensor([True, False]))
+        dt, w0 = 1/60, s.warmup_s+s.settle_s
+        seen = []
+        for k in range(int(round((float(end[0])+.5)/dt))):
+            t = torch.full((2,), k*dt)
+            seq.update(t, torch.zeros(2))
+            name = names[int(seq.clip[0])]
+            if not seen or seen[-1][0] != name:
+                seen.append((name, round(float(t[0])-w0, 2)))
+        legs = [x[0] for x in seen]
+        self.assertEqual(legs[0], 'idle')
+        self.assertEqual(legs[1], 'backward@0.2')
+        self.assertIn(legs[2], ('left@0.2', 'right@0.2'))
+        self.assertEqual(legs[3], 'forward@0.2')
+        self.assertEqual(legs[4], 'idle')
+        self.assertAlmostEqual(seen[2][1]-seen[1][1], 3., delta=.05)    # 0.6 m at 0.2 m/s
+        self.assertAlmostEqual(seen[3][1]-seen[2][1], 5., delta=.05)    # 1.0 m sideways
+        self.assertAlmostEqual(seen[4][1]-seen[3][1], 3., delta=.05)
+        self.assertEqual(len(seen), 5)                                  # no further clips or stops
+
 
 if __name__ == '__main__':
     unittest.main()
