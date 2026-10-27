@@ -99,6 +99,11 @@ def record(args):
     if 'mujoco_warp_cone_fix' not in Path(mujoco_warp.__file__).parts:
         raise RuntimeError('Training used the vendored mujoco_warp cone Hessian fix; put it on PYTHONPATH')
     env, cfg = build_env(args, run, contract, device)
+    if args.place_goals:
+        # Opt-in: show placement goals (dextrah_lab/mj/placement_goals.py) as the fine-tune trains them.
+        from dextrah_lab.mj.placement_goals import PlacementGoals, install_placement_goals
+        install_placement_goals(env, PlacementGoals(env, args.place_library, args.place_goals, seed=args.seed,
+                                                    orientation=args.place_orientation))
     model, payload = build_policy(env, args.checkpoint, contract, device)
     paths = env._object_urdf_paths
     asset = env._object_asset_index_per_env.cpu().numpy()
@@ -190,6 +195,9 @@ def main():
     p.add_argument('--njmax', type=int, default=300)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--no-randomization', action='store_true')
+    p.add_argument('--place-goals', type=float, default=0., help='share of goals that are placement goals (opt-in)')
+    p.add_argument('--place-library', type=Path, default=None)
+    p.add_argument('--place-orientation', choices=('random', 'nearest'), default='nearest')
     args = p.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
