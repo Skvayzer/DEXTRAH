@@ -323,3 +323,22 @@ def open_loop_smoothed(model, t, envs, horizons=(8, 16, 32), samples=8192, avg=5
             row['drifting_rot_deg'] = dict(model=stats(rot_m[drift]), persistence=stats(rot_p[drift]))
         out[h] = row
     return out
+
+
+def compare_finite_differences(sim, model, S, D):
+    """Finite-difference agreement (gradient check). sim / model: (S * D,) outcomes, world order = state-major,
+    direction 0 = the unperturbed baseline, then (+delta, -delta) pairs. Returns cosine similarity per state over
+    the D - 1 differences (median / mean / positive share), sign agreement and median magnitude ratio where the
+    simulator effect is above its median, and the simulator's antisymmetry (+delta vs -delta; 1 = linear)."""
+    d_sim = (sim.reshape(S, D)-sim.reshape(S, D)[:, :1])[:, 1:]
+    d_mod = (model.reshape(S, D)-model.reshape(S, D)[:, :1])[:, 1:]
+    cos = (d_sim*d_mod).sum(1)/(d_sim.norm(dim=1)*d_mod.norm(dim=1)).clamp_min(1e-12)
+    clear = d_sim.abs() > d_sim.abs().quantile(.5)
+    agree = (torch.sign(d_sim) == torch.sign(d_mod))[clear].float().mean() if bool(clear.any()) else torch.tensor(float('nan'))
+    ratio = (d_mod.abs()/d_sim.abs().clamp_min(1e-9))[clear].median() if bool(clear.any()) else torch.tensor(float('nan'))
+    plus, minus = d_sim[:, 0::2], d_sim[:, 1::2]
+    anti = -(plus*minus).sum()/((plus*plus).sum().sqrt()*(minus*minus).sum().sqrt()).clamp_min(1e-12)
+    return dict(sim_effect_abs_median=round(float(d_sim.abs().median()), 5), sim_antisymmetry=round(float(anti), 4),
+                cosine_median=round(float(cos.median()), 4), cosine_mean=round(float(cos.mean()), 4),
+                cosine_positive_share=round(float((cos > 0).float().mean()), 4),
+                sign_agreement_clear=round(float(agree), 4), magnitude_ratio_median=round(float(ratio), 4))

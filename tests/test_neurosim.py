@@ -5,8 +5,8 @@ import unittest
 import torch
 
 from dextrah_lab.neurosim.data import EXO_DIM, Layout, build_tensors, gather, phase_bucket, pre_event_mask, split_envs
-from dextrah_lab.neurosim.evaluate import (auc, auc_ci, drop_prediction_report, freeze_inputs, loss_prediction, open_loop,
-                                           open_loop_smoothed)
+from dextrah_lab.neurosim.evaluate import (auc, auc_ci, compare_finite_differences, drop_prediction_report, freeze_inputs,
+                                           loss_prediction, open_loop, open_loop_smoothed)
 from dextrah_lab.neurosim.geometry import matrix_to_rot6, quat_to_matrix, rot6_to_matrix, rotation_angle, so3_exp, so3_log
 from dextrah_lab.neurosim.model import HandObjectWorldModel, window_loss
 
@@ -162,6 +162,21 @@ class NeurosimTests(unittest.TestCase):
         model.dt = 1/60
         sm = open_loop_smoothed(model, t, torch.arange(6), horizons=(8,), samples=64, generator=torch.Generator().manual_seed(0))
         self.assertIn(8, sm)
+
+    def test_finite_difference_comparison(self):
+        S, D = 5, 13
+        g = torch.Generator().manual_seed(0)
+        base = torch.randn(S, 1, generator=g)
+        eff = torch.randn(S, 6, generator=g)
+        sim = torch.cat((base, (base+torch.stack((eff, -eff), -1).reshape(S, 12))), 1).flatten()   # linear: +d, -d pairs
+        r = compare_finite_differences(sim, 2*sim, S, D)                   # model: same direction, twice the size
+        self.assertAlmostEqual(r['cosine_median'], 1., places=4)
+        self.assertEqual(r['sign_agreement_clear'], 1.)
+        self.assertAlmostEqual(r['magnitude_ratio_median'], 2., places=3)
+        self.assertAlmostEqual(r['sim_antisymmetry'], 1., places=4)
+        r2 = compare_finite_differences(sim, -sim, S, D)
+        self.assertAlmostEqual(r2['cosine_median'], -1., places=4)
+        self.assertEqual(r2['sign_agreement_clear'], 0.)
 
     def test_auc(self):
         self.assertAlmostEqual(auc(torch.tensor([.1, .4, .35, .8]), torch.tensor([0, 0, 1, 1])), .75)
