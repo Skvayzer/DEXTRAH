@@ -35,6 +35,30 @@ class CarryTrainingTests(unittest.TestCase):
             opt.step()
             self.assertEqual(float(p), expected)
 
+    def test_critic_warmup_trains_policy_value_head_only(self):
+        class Net(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.trunk, self.mu, self.value = nn.Linear(2, 2), nn.Linear(2, 1), nn.Linear(2, 1)
+        model = nn.Module(); model.a2c_network = Net()
+        opt = torch.optim.SGD(model.parameters(), lr=1.)
+        algo = SimpleNamespace(optimizer=opt, epoch_num=1, model=model)
+        self.assertEqual(install_critic_warmup(algo, 2)['warmup_value_head_tensors'], 2)
+        net = model.a2c_network
+        before = {n: p.detach().clone() for n, p in model.named_parameters()}
+        for p in model.parameters():
+            p.grad = torch.ones_like(p)
+        opt.step()
+        for n, p in model.named_parameters():
+            changed = not torch.equal(p, before[n])
+            self.assertEqual(changed, '.value.' in n, n)
+        algo.epoch_num = 3
+        for p in model.parameters():
+            p.grad = torch.ones_like(p)
+        opt.step()
+        self.assertFalse(torch.equal(net.trunk.weight, before['a2c_network.trunk.weight']))
+        self.assertFalse(torch.equal(net.mu.bias, before['a2c_network.mu.bias']))
+
     def test_delayed_best_blocks_then_resets(self):
         class Algo:
             epoch_num = 100

@@ -45,21 +45,32 @@ def reset_all_value_normalizers(algo):
 
 
 def install_critic_warmup(algo, epochs):
-    """Skip actor optimizer steps for the first ``epochs`` epochs.
+    """Freeze the policy for the first ``epochs`` epochs.
 
     The asymmetric critic has its own optimizer and keeps learning, so the new
-    reward's value function settles before the copied policy is changed.
+    reward's value function settles before the copied policy is changed. The
+    policy network's own value head (``*.value`` parameters, e.g. a2c_network.source.value)
+    also keeps learning, alone: it is trained by the actor optimizer through the shared
+    trunk, and when frozen its stale loss hits the trunk on the first policy update
+    (job 1587: actor value loss 1.5 through the warm-up, KL 0.48 on the first actor epoch).
     """
     optimizer = algo.optimizer
     original = optimizer.step
+    model = getattr(algo, 'model', None)
+    head = {id(p) for n, p in (model.named_parameters() if model is not None else ()) if n.split('.')[-2:-1] == ['value']}
 
     def step(self, *args, **kwargs):
         if algo.epoch_num <= epochs:
-            return None
+            if not head:
+                return None
+            for group in self.param_groups:
+                for p in group['params']:
+                    if id(p) not in head:
+                        p.grad = None          # skipped by the optimizer (no moment updates)
         return original(*args, **kwargs)
 
     optimizer.step = MethodType(step, optimizer)
-    return dict(critic_warmup_epochs=epochs)
+    return dict(critic_warmup_epochs=epochs, warmup_value_head_tensors=len(head))
 
 
 def install_delayed_best(algo, epochs):
