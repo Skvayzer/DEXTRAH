@@ -22,7 +22,8 @@ def fake_env(n=8):
     return types.SimpleNamespace(device='cpu', num_envs=n, extras={},
                                  _object_asset_index_per_env=torch.arange(n) % 3,
                                  _table_z_per_env=torch.full((n,), .65),
-                                 scene=types.SimpleNamespace(env_origins=torch.zeros(n, 3)), goal_viz=FakeGoal(n))
+                                 scene=types.SimpleNamespace(env_origins=torch.zeros(n, 3)), goal_viz=FakeGoal(n),
+                                 object=types.SimpleNamespace(data=types.SimpleNamespace(root_quat_w=torch.tensor([[1., 0, 0, 0]]).repeat(n, 1))))
 
 
 class PlacementGoalTests(unittest.TestCase):
@@ -51,6 +52,22 @@ class PlacementGoalTests(unittest.TestCase):
             self.assertEqual(pg.successes, int(pg.active.sum()))
             pg.apply(torch.tensor([0]))
             self.assertTrue(bool(pg.active[0]))          # p = 1: again a placement goal
+
+    def test_nearest_orientation(self):
+        with tempfile.NamedTemporaryFile(suffix='.npz') as f:
+            # asset 0: lying flat (identity) and on its side (90 deg about x); object currently yawed 50 deg.
+            side = [math.cos(math.pi/4), math.sin(math.pi/4), 0, 0]
+            np.savez(f.name, asset=np.array([0, 0]), height=np.array([.02, .04]), quat=np.array([[1., 0, 0, 0], side]))
+            env = fake_env(2)
+            env._object_asset_index_per_env = torch.zeros(2, dtype=torch.long)
+            a = math.radians(50)
+            env.object.data.root_quat_w = torch.tensor([[math.cos(a/2), 0, 0, math.sin(a/2)]]*2)
+            pg = PlacementGoals(env, f.name, 1., orientation='nearest', yaw_candidates=72)
+            pg.apply(torch.arange(2))
+            q = env.goal_viz.pose[:, 3:]
+            angle = 2*torch.acos((q*env.object.data.root_quat_w).sum(-1).abs().clamp(max=1))
+            self.assertTrue(bool((angle < math.radians(3)).all()))                    # flat pose, yaw 50 deg
+            self.assertTrue(torch.allclose(env.goal_viz.pose[:, 2], torch.full((2,), .65+TABLE_TOP+.02)))
 
     def test_probability_zero_share(self):
         with tempfile.NamedTemporaryFile(suffix='.npz') as f:

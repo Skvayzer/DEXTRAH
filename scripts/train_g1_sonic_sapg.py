@@ -136,6 +136,8 @@ def main():
                    help='mjlab manipulation: share of new goals replaced by a stable resting pose of the object on '
                         'the table (dextrah_lab/mj/placement_goals.py; Phase 2 set-down)')
     p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (scripts/mj_rest_poses.py)')
+    p.add_argument('--place-orientation', choices=('random', 'nearest'), default='random',
+                   help='placement goal orientation: library pose with uniform yaw, or the one nearest to the held orientation')
     p.add_argument('--kl-diagnostics', action='store_true',
                    help='Log a per-epoch KL breakdown (latent vs fingers, per-sample peaks) and latent adapter input peaks')
     p.add_argument('--carry-state', type=Path, default=None,
@@ -616,7 +618,8 @@ def main():
                 print('SGS_ENABLED '+json.dumps(report['sgs']), flush=True)
             if args.place_goals:
                 from dextrah_lab.mj.placement_goals import PlacementGoals, install_placement_goals
-                placement = PlacementGoals(env, args.place_library, args.place_goals, seed=cfg.seed)
+                placement = PlacementGoals(env, args.place_library, args.place_goals, seed=cfg.seed,
+                                           orientation=args.place_orientation)
                 install_placement_goals(env, placement)
                 contract['placement_goals'] = placement.contract(args.place_library)
                 contract['intentional_changes'] = contract['intentional_changes'] + ['placement_goals_on_table']

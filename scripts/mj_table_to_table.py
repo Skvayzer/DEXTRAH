@@ -19,7 +19,9 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
             frame anchored at the episode start pose (table B is where table A was relative to the
             robot); goal = the object's resting pose on table A (the last still, untouched pose in
             the first 3 s: validated reaching starts drop the object from ~10 cm), moved to table B
-            ('rest'), or the same raised to the lowest goal height M was trained on ('hover').
+            ('rest'), or the same raised to the lowest goal height M was trained on ('hover'), or at the
+            same table-B spot the library resting pose nearest to the held orientation ('nearest',
+            --place-library; least in-hand rotation, as the 'nearest' placement-goal training).
   release   only once table B supports the object or it is at the goal, and it is still: object-table
             normal force > 0.5 N or within 3 cm of the goal, object velocity averaged over 0.2 s
             < 5 cm/s (held objects chatter in the hand at ~10 cm/s instantaneous), for 0.25 s; then
@@ -120,8 +122,16 @@ def run(args):
     asset = env._object_asset_index_per_env.cpu().numpy()
     kind = np.array([Path(paths[a]).stem.split('_')[1] for a in asset])
     worlds = np.arange(min(n, args.worlds or n))
-    variant = np.array(['rest' if (args.place_goal == 'rest' or (args.place_goal == 'both' and j % 2 == 0)) else 'hover'
-                        for j in range(n)])
+    if args.place_goal == 'both':
+        variant = np.array(['rest' if j % 2 == 0 else 'hover' for j in range(n)])
+    else:
+        variant = np.array([args.place_goal]*n)
+    nearest_goals = None
+    if args.place_goal == 'nearest':
+        from dextrah_lab.mj.placement_goals import PlacementGoals, TABLE_TOP
+        if args.place_library is None:
+            raise ValueError('--place-goal nearest needs --place-library')
+        nearest_goals = PlacementGoals(env, args.place_library, 1., orientation='nearest')
     video = []
     for t in TYPES:
         video += [int(j) for j in worlds if kind[j] == t][:args.video_per_type]
@@ -439,6 +449,13 @@ def run(args):
                 home_pos[j], home_yaw[j] = start_pos[j], start_yaw[j]     # table B where table A was
                 env._reference_q[j] = standing_q[j]
                 env._reference_qd[j] = 0.
+                if nearest_goals is not None:
+                    a_j = env._object_asset_index_per_env[j:j+1]
+                    if int(nearest_goals.count[a_j]) > 0:
+                        k, q = nearest_goals.nearest(a_j, env.object.data.root_quat_w[j:j+1])
+                        goal_b[j, 2] = table_b[j, 2]+TABLE_TOP+nearest_goals.height[k[0]]
+                        goal_b[j, 3:] = q[0]
+                        records[j]['nearest_goal'] = True
                 pose = goal_b[j:j+1].clone()
                 pose[:, :3] += env.scene.env_origins[j]
                 env.goal_viz.write_root_pose_to_sim(pose, env_ids=torch.tensor([j], device=d))
@@ -541,7 +558,7 @@ def summarize(records):
                     placed_error_xy_median_m=round(float(np.median(errs)), 3) if errs else None,
                     outcomes={o: sum(1 for r in rs if r.get('outcome') == o) for o in sorted({r.get('outcome') for r in rs})})
     s = dict(all=stats(rows))
-    for v in ('rest', 'hover'):
+    for v in ('rest', 'hover', 'nearest'):
         s['goal_'+v] = stats([r for r in rows if r['place_goal'] == v])
     for t in TYPES:
         s[t] = stats([r for r in rows if r['type'] == t])
@@ -656,7 +673,8 @@ def main():
     p.add_argument('--final-s', type=float, default=2.)
     p.add_argument('--place-limit', type=float, default=15.)
     p.add_argument('--release-s', type=float, default=2.)
-    p.add_argument('--place-goal', choices=('rest', 'hover', 'both'), default='both')
+    p.add_argument('--place-goal', choices=('rest', 'hover', 'both', 'nearest'), default='both')
+    p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (for --place-goal nearest)')
     p.add_argument('--grasp-min-fingers', type=int, default=1)
     p.add_argument('--video-per-type', type=int, default=2)
     p.add_argument('--fps', type=int, default=30)
