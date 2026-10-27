@@ -48,6 +48,9 @@ class FrozenSonicSapgNetwork(nn.Module):
         # Opt-in (train --adapter-input-clip, recorded in the contract; eval builders read it there):
         # the adapter's 994 SONIC body inputs are raw (no normalizer); rare samples reach |x| 30-50 and
         # last-hidden norms 6k-14k (typical ~15), per-sample KL up to 3e8 (job 1572 kl_diag). 0 = off.
+        # NEGATIVE RESULT: clip 10 did not bound them (hidden max still ~1.2k) and destabilised the
+        # fine-tune: falls/epoch 0.6 -> 47 and hidden max 141 -> 1544 within 220 epochs (job 1573),
+        # vs flat 0.5-1.0 falls/epoch without it (job 1572, same placement goals). Do not use.
         self.adapter_input_clip = 0.
         old = self.source.sigma.detach()
         leader = int(torch.nonzero(self.source.param_ids == 0, as_tuple=True)[0].item())

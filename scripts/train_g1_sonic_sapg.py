@@ -130,7 +130,8 @@ def main():
     p.add_argument('--carry-level', type=int, default=None, help='Initial speed-curriculum level (default 0, or the resumed state)')
     p.add_argument('--carry-settings', default='{}', help='JSON overrides of CarrySettings fields')
     p.add_argument('--adapter-input-clip', type=float, default=0.,
-                   help='frozen SONIC: clip the latent adapter\'s raw SONIC body inputs to +-value (0 = off)')
+                   help='frozen SONIC: clip the latent adapter\'s raw SONIC body inputs to +-value (0 = off; '
+                        '10 destabilised job 1573, see frozen_sapg.py)')
     p.add_argument('--place-goals', type=float, default=0.,
                    help='mjlab manipulation: share of new goals replaced by a stable resting pose of the object on '
                         'the table (dextrah_lab/mj/placement_goals.py; Phase 2 set-down)')
