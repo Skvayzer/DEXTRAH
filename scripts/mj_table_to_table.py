@@ -120,8 +120,10 @@ def run(args):
         args.settle_s = carry.warmup_s+carry.settle_s
     if args.hold_rule is None:
         args.hold_rule = 'support' if c_v2 else 'offset'
+    if args.settle_reference is None:
+        args.settle_reference = 'standing' if c_v2 else 'planner'
     print('ROUTE_C '+json.dumps(dict(version=carry.version, settle_s=args.settle_s, hold_rule=args.hold_rule,
-                                     contact_condim=args.contact_condim)), flush=True)
+                                     contact_condim=args.contact_condim, settle_reference=args.settle_reference)), flush=True)
     install_moving_frame_observations()
     args.no_randomization = True
     env, cfg = rwv.build_env(args, m_run, m_contract, device)
@@ -815,8 +817,9 @@ def main():
     p.add_argument('--save-grasp-states', action='store_true',
                    help="save M's state at each M -> C switch (grasp_states.pt, SGS holding-state layout)")
     p.add_argument('--grasp-only', action='store_true', help='end each world at its switch (harvest runs)')
-    p.add_argument('--settle-reference', choices=('planner', 'standing'), default='planner',
-                   help="diagnostic: body reference during C's settle phase ('standing' = the training env's)")
+    p.add_argument('--settle-reference', choices=('planner', 'standing'), default=None,
+                   help="body reference during C's settle phase; default 'standing' (the training env's) for carry v2, "
+                        "'planner' for v1 (job 1602: planner vs standing for v2 = 119 vs 90 later settle drops)")
     p.add_argument('--no-carry-move', action='store_true', help='diagnostic: carry v2 keeps the grasp-time arm angles')
     args = p.parse_args()
     if args.output.exists():
