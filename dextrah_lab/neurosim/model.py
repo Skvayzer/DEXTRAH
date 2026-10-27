@@ -32,9 +32,10 @@ def mlp(sizes, act=nn.SiLU, last_act=False):
 
 
 class HandObjectWorldModel(nn.Module):
-    def __init__(self, layout: Layout, hidden=(1024, 1024, 1024), context_embed=64):
+    def __init__(self, layout: Layout, hidden=(1024, 1024, 1024), context_embed=64, exo_mode='post'):
         super().__init__()
         self.L = L = layout
+        self.exo_mode = exo_mode
         self.norm_state = Normalizer(L.state)
         self.norm_forces = Normalizer(L.forces)
         self.norm_action = Normalizer(L.actuated)
@@ -65,7 +66,7 @@ class HandObjectWorldModel(nn.Module):
         H = self.L.hand
         R_next = R@so3_exp(d[:, 3:6])
         x_next = torch.cat((x[:, :3]+d[:, :3], matrix_to_rot6(R_next), x[:, 9:15]+d[:, 6:12],
-                            x[:, 15:15+H]+d[:, 12:12+H], x[:, 15+H:]+d[:, 12+H:]), -1)
+                            x[:, 15:15+H]+d[:, 12:12+H], x[:, 15+H:]+d[:, 12+H:]), -1)   # incl. the low-pass tail
         f_next = (f+self.head_forces(h)*self.norm_forces.std).clamp_min(0.)
         return x_next, R_next, f_next, self.head_logits(h)
 
@@ -104,10 +105,10 @@ def one_step_deltas(t, rows, L):
     R0, R1 = t['rot'][tr-1, er], t['rot'][tr, er]
     H = L.hand
     return torch.cat((x1[:, :3]-x0[:, :3], so3_log(R0.transpose(-1, -2)@R1), x1[:, 9:15]-x0[:, 9:15],
-                      x1[:, 15:15+H]-x0[:, 15:15+H], x1[:, 15+H:]-x0[:, 15+H:]), -1)
+                      x1[:, 15:15+H]-x0[:, 15:15+H], x1[:, 15+H:]-x0[:, 15+H:]), -1)        # incl. the low-pass tail
 
 
-STATE_WEIGHTS = dict(pos=1., rot=1., linvel=.25, angvel=.25, hand_q=1., hand_qd=.25)
+STATE_WEIGHTS = dict(pos=1., rot=1., linvel=.25, angvel=.25, hand_q=1., hand_qd=.25, lowpass=1.)
 
 
 def state_error(model, x_hat, R_hat, x, R):
@@ -116,23 +117,34 @@ def state_error(model, x_hat, R_hat, x, R):
     H = L.hand
     rot_std = std[3:9].mean()
     sq = lambda a, b, s: (((a-b)/s)**2).mean(-1)
-    return dict(pos=sq(x_hat[:, :3], x[:, :3], std[:3]),
+    out = dict(pos=sq(x_hat[:, :3], x[:, :3], std[:3]),
                 # chordal distance |R_hat - R|_F^2 / 2 = 2 (1 - cos theta) ~ theta^2: smooth everywhere (the squared
                 # rotation-vector norm has an unbounded gradient near theta = pi; job 1591 iteration 15000: |g| 8130)
                 rot=((R_hat-R)**2).sum((-1, -2))/2/rot_std**2,
                 linvel=sq(x_hat[:, 9:12], x[:, 9:12], std[9:12]), angvel=sq(x_hat[:, 12:15], x[:, 12:15], std[12:15]),
                 hand_q=sq(x_hat[:, 15:15+H], x[:, 15:15+H], std[15:15+H]),
-                hand_qd=sq(x_hat[:, 15+H:], x[:, 15+H:], std[15+H:]))
+                hand_qd=sq(x_hat[:, 15+H:15+2*H], x[:, 15+H:15+2*H], std[15+H:15+2*H]))
+    if L.lowpass:
+        # the slow relative twist (slip that precedes drops), full weight (review Q1)
+        out['lowpass'] = sq(x_hat[:, 15+2*H:], x[:, 15+2*H:], std[15+2*H:])
+    return out
 
 
-def window_loss(model, w, k, lost_pos_weight=1., weights=STATE_WEIGHTS):
-    """k-step autoregressive loss on window tensors w; returns (loss, logs)."""
+def window_loss(model, w, k, lost_pos_weight=1., weights=STATE_WEIGHTS, window_weight=None, support_in_secure=True):
+    """k-step autoregressive loss on window tensors w; returns (loss, logs). window_weight (B,): importance
+    weights of oversampled windows (1 / sampling ratio, keeps the loss an unbiased uniform-sampling estimate).
+    Failed grasp checks ('censor') carry no lost label; support_in_secure=False drops the support label in the
+    secure phase (an object touching the table while still held counts as unsupported there)."""
     xs, Rs, fs, ls = model.rollout(w, k)
+    B = w['state'].shape[0]
+    wt = torch.ones(B, device=w['state'].device) if window_weight is None else window_weight
     bce = nn.functional.binary_cross_entropy_with_logits
     total, logs = 0., {}
     n_state = n_alive = torch.zeros((), device=w['state'].device)
     for j in range(1, k+1):
-        has_next, alive = w['has_next'][:, j-1].float(), w['alive'][:, j-1].float()
+        has_next, alive = w['has_next'][:, j-1].float()*wt, w['alive'][:, j-1].float()*wt
+        lost_mask = alive*(~w['censor'][:, j]).float() if 'censor' in w else alive
+        support_mask = has_next if support_in_secure or 'bucket' not in w else has_next*(w['bucket'][:, j] != 0).float()
         err = state_error(model, xs[j-1], Rs[j-1], w['state'][:, j], w['rot'][:, j])
         state = sum(weights[name]*e for name, e in err.items())
         forces = (((fs[j-1]-w['forces'][:, j])/model.norm_forces.std)**2).mean(-1)
@@ -141,14 +153,14 @@ def window_loss(model, w, k, lost_pos_weight=1., weights=STATE_WEIGHTS):
                       reduction='none').mean(-1)
         support = bce(logit[:, 8], w['supported'][:, j], reduction='none')
         lost = bce(logit[:, 9], w['lost'][:, j], pos_weight=torch.tensor(lost_pos_weight, device=logit.device), reduction='none')
-        total = total+((state+forces+contact+support)*has_next).sum()+(lost*alive).sum()
+        total = total+((state+forces+contact)*has_next).sum()+(support*support_mask).sum()+(lost*lost_mask).sum()
         n_state, n_alive = n_state+has_next.sum(), n_alive+alive.sum()
         with torch.no_grad():                         # accumulate on the device; one sync per call
             for name, e in err.items():
                 logs[name] = logs.get(name, 0.)+(e*has_next).sum()
             logs['forces'] = logs.get('forces', 0.)+(forces*has_next).sum()
             logs['contact_bce'] = logs.get('contact_bce', 0.)+(contact*has_next).sum()
-            logs['lost_bce'] = logs.get('lost_bce', 0.)+(lost*alive).sum()
+            logs['lost_bce'] = logs.get('lost_bce', 0.)+(lost*lost_mask).sum()
     n_state, n_alive = n_state.clamp_min(1.), n_alive.clamp_min(1.)
     logs = {name: float(v/(n_alive if name == 'lost_bce' else n_state)) for name, v in logs.items()}
     return total/n_state, logs

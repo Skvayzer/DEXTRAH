@@ -4,8 +4,9 @@ import unittest
 
 import torch
 
-from dextrah_lab.neurosim.data import Layout, build_tensors, gather, phase_bucket, split_envs
-from dextrah_lab.neurosim.evaluate import auc, auc_ci, drop_prediction_report, freeze_inputs, loss_prediction, open_loop
+from dextrah_lab.neurosim.data import EXO_DIM, Layout, build_tensors, gather, phase_bucket, pre_event_mask, split_envs
+from dextrah_lab.neurosim.evaluate import (auc, auc_ci, drop_prediction_report, freeze_inputs, loss_prediction, open_loop,
+                                           open_loop_smoothed)
 from dextrah_lab.neurosim.geometry import matrix_to_rot6, quat_to_matrix, rot6_to_matrix, rotation_angle, so3_exp, so3_log
 from dextrah_lab.neurosim.model import HandObjectWorldModel, window_loss
 
@@ -23,7 +24,7 @@ def synthetic(T=80, N=6, H=4, seed=0):
                 gravity=torch.nn.functional.normalize(r(T, N, 3), dim=-1), table_pos=r(T, N, 3), table_parked=torch.zeros(T, N, 1),
                 object_force=r(T, N, 3), finger_force=r(T, N, 5).abs(), palm_force=r(T, N, 1).abs(), table_force=torch.zeros(T, N, 1),
                 ground_force=torch.zeros(T, N, 1), supported=torch.ones(T, N, 1), mass=torch.full((T, N, 1), .2),
-                com_offset=torch.zeros(T, N, 3), done=done, end=end)
+                com_offset=torch.zeros(T, N, 3), done=done, end=end, arm_now=r(T, N, 7), command=r(T, N, 3))
     context = dict(bps=r(N, 128), asset=torch.tensor([0, 1, 2, 3, 4, 5]), dt=1/60)
     return data, context
 
@@ -132,6 +133,35 @@ class NeurosimTests(unittest.TestCase):
         err.sum().backward()
         self.assertTrue(torch.isfinite(v.grad).all() and float(v.grad.abs().max()) < 10.)
         self.assertAlmostEqual(float(err[2]), 2*(1-math.cos(.1))/float(model.norm_state.std[3:9].mean())**2, places=5)
+
+    def test_review_fixes(self):
+        data, context = synthetic(T=100, N=6)
+        data['end'][30, 0] = 4                                         # make env 0's end a failed grasp check
+        data['done'][70, 2] = 1; data['end'][70, 2] = 2               # and add a drop at env 2
+        t = build_tensors(data, context, exo_mode='pre', lowpass_tau=.3, labels='drop')
+        self.assertEqual(t['exo'].shape[-1], EXO_DIM['pre'])
+        self.assertEqual(t['state'].shape[-1], 15+2*4+6)
+        self.assertEqual(float(t['lost'][30, 0]), 0.)                  # censored, not a loss
+        self.assertTrue(bool(t['censor'][30, 0]))
+        self.assertEqual(float(t['lost'][70, 2]), 1.)
+        lp = t['state'][..., -6:]
+        self.assertTrue(torch.allclose(lp[30, 0], t['state'][30, 0, 9:15]))   # restarts at an episode start
+        m = pre_event_mask(t, 8)
+        self.assertEqual(torch.nonzero(m[:, 2]).flatten().tolist(), list(range(62, 70)))
+        t.pop('asset')
+        L = Layout(hand=4, lowpass=6, exo=EXO_DIM['pre'])
+        model = HandObjectWorldModel(L, hidden=(32, 32), exo_mode='pre')
+        model.fit_normalizers(t, (torch.randint(1, 100, (300,)), torch.randint(0, 6, (300,))))
+        w = gather(t, torch.tensor([25, 65, 10]), torch.tensor([0, 2, 4]), 8)
+        l1, logs1 = window_loss(model, w, 8)
+        l2, _ = window_loss(model, w, 8, window_weight=torch.tensor([1., 1., 0.]))
+        self.assertTrue(math.isfinite(float(l1)) and math.isfinite(float(l2)) and float(l1) != float(l2))
+        self.assertIn('lowpass', logs1)
+        fw = freeze_inputs(w, 'pre')
+        self.assertTrue(torch.equal(fw['exo'][:, 5], fw['exo'][:, 1]))
+        model.dt = 1/60
+        sm = open_loop_smoothed(model, t, torch.arange(6), horizons=(8,), samples=64, generator=torch.Generator().manual_seed(0))
+        self.assertIn(8, sm)
 
     def test_auc(self):
         self.assertAlmostEqual(auc(torch.tensor([.1, .4, .35, .8]), torch.tensor([0, 0, 1, 1])), .75)

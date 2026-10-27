@@ -13,7 +13,7 @@ import math
 
 import torch
 
-from .data import gather
+from .data import EXO_INDEX, gather
 from .geometry import rotation_angle
 
 
@@ -130,10 +130,12 @@ def loss_prediction(model, t, envs, horizon=30, random_samples=20000, generator=
 # information (the arm's or the policy's reaction to a slip) can enter. Negatives: random starts, and
 # phase-matched starts (same world / object, same phase bucket) that did not drop.
 
-def freeze_inputs(w):
+def freeze_inputs(w, exo_mode='post'):
     a = w['action'][:, 1:2].expand_as(w['action'][:, 1:]).clone()
     u0 = w['exo'][:, 1].clone()
-    u0[:, 6:12] = u0[:, 0:6]
+    idx = EXO_INDEX[exo_mode]
+    if idx['after'] is not None:                       # 'post': the after-step palm velocity is not known in advance
+        u0[:, idx['after']] = u0[:, idx['before']]
     u = u0[:, None].expand_as(w['exo'][:, 1:]).clone()
     w = dict(w)
     w['action'] = torch.cat((w['action'][:, :1], a), 1)
@@ -186,13 +188,13 @@ def drop_windows(t, envs, horizon, generator=None, random_n=20000, matched_per_p
 
 
 @torch.no_grad()
-def window_labels_and_scores(model, t, s, e, horizon, protocol='teacher', batch=4096):
+def window_labels_and_scores(model, t, s, e, horizon, protocol='teacher', batch=4096, label='drop'):
     """Per window: drop within the horizon, clean (no other episode end inside), predicted P(drop within)."""
     P, label, clean = [], [], []
     for a in range(0, len(s), batch):
         w = gather_drop(t, s[a:a+batch], e[a:a+batch], horizon)
         if protocol == 'frozen':
-            w = freeze_inputs(w)
+            w = freeze_inputs(w, getattr(model, 'exo_mode', 'post'))
         _, _, _, ls = model.rollout(w, horizon)
         hazard = torch.stack([torch.sigmoid(l[:, 9]) for l in ls], 1)*w['alive'].float()
         P.append(1-torch.prod(1-hazard, 1))
@@ -211,10 +213,11 @@ def gather_drop(t, s, e, k):
     return w
 
 
-def baseline_features(t, s, e, with_phase=False):
+def baseline_features(t, s, e, with_phase=False, exo_mode='post'):
     """Current-state features at the window start: 6 contact flags, 8 log forces, supported, table present
     (+ one-hot phase bucket)."""
-    feats = [t['contact'][s, e], t['forces'][s, e], t['supported'][s, e][:, None], 1-t['exo'][s, e][:, 18:19]]
+    k = EXO_INDEX[exo_mode]['parked']
+    feats = [t['contact'][s, e], t['forces'][s, e], t['supported'][s, e][:, None], 1-t['exo'][s, e][:, k:k+1]]
     if with_phase:
         feats.append(torch.nn.functional.one_hot(t['bucket'][s, e].long(), 5).float())
     return torch.cat(feats, -1)
@@ -251,8 +254,9 @@ def drop_prediction_report(model, t, train_envs, test_envs, horizon=30, generato
     for name, with_phase in (('logistic', False), ('logistic_phase', True)):
         if with_phase and 'bucket' not in t:
             continue
-        f = fit_logistic(baseline_features(t, s_tr[c_tr], e_tr[c_tr], with_phase).cpu().float(), y_tr[c_tr].float().cpu())
-        scores[name] = f(baseline_features(t, s, e, with_phase).cpu().float()).to(s.device)
+        mode = getattr(model, 'exo_mode', 'post')
+        f = fit_logistic(baseline_features(t, s_tr[c_tr], e_tr[c_tr], with_phase, mode).cpu().float(), y_tr[c_tr].float().cpu())
+        scores[name] = f(baseline_features(t, s, e, with_phase, mode).cpu().float()).to(s.device)
     pos = clean & y
     for neg_name, neg in (('random_negatives', clean & ~y & (kind == 1)), ('phase_matched_negatives', clean & ~y & (kind == 2))):
         keep = pos | neg
@@ -270,3 +274,52 @@ def drop_prediction_report(model, t, train_envs, test_envs, horizon=30, generato
 
 
 PHASE_NAMES = ('secure', 'walk<5s', 'walk5-10s', 'walk>10s', 'final')
+
+
+def project_so3(M):
+    """Nearest rotation (SVD) of each 3x3 matrix in M (..., 3, 3)."""
+    U, _, Vh = torch.linalg.svd(M)
+    d = torch.det(U@Vh)
+    D = torch.diag_embed(torch.stack((torch.ones_like(d), torch.ones_like(d), d), -1))
+    return U@D@Vh
+
+
+@torch.no_grad()
+def open_loop_smoothed(model, t, envs, horizons=(8, 16, 32), samples=8192, avg=5, generator=None):
+    """Criterion 1 on smoothed pose (review, after the v1 result): positions and orientations averaged over
+    `avg` rows at both ends (start rows s-avg+1..s, end rows s+h-avg+1..s+h; orientation = projected mean
+    rotation), which cancels the ~30 Hz contact vibration. Model = the same average over its own predictions.
+    Errors overall and on 'drifting' windows (smoothed change >= 5 mm or >= 5 deg)."""
+    K = max(horizons)
+    dev = t['state'].device
+    T = t['state'].shape[0]
+    s = torch.randint(avg-1, T-K-1, (samples,), generator=generator).to(dev)
+    e = envs.to(dev)[torch.randint(0, len(envs), (samples,), generator=generator).to(dev)]
+    back = s[:, None]-torch.arange(avg-1, -1, -1, device=dev)[None]            # rows s-avg+1 .. s
+    same_start = ~t['done'][back[:, 1:], e[:, None]].any(1)                    # no episode start inside
+    w = gather(t, s, e, K)
+    xs, Rs, _, _ = model.rollout(w, K)
+    p0 = t['state'][back, e[:, None]][..., :3].mean(1)
+    R0 = project_so3(t['rot'][back, e[:, None]].mean(1))
+    out = {}
+    stats = lambda v: dict(median=round(float(v.median()), 4), mean=round(float(v.mean()), 4), p90=round(float(v.quantile(.9)), 4))
+    for h in horizons:
+        m = w['has_next'][:, h-1] & same_start
+        if int(m.sum()) < 10:
+            continue
+        rows = slice(h-avg+1, h+1)
+        p1 = w['state'][:, rows, :3].mean(1)
+        R1 = project_so3(w['rot'][:, rows].mean(1))
+        ph = torch.stack(xs[h-avg:h], 1)[..., :3].mean(1)
+        Rh = project_so3(torch.stack(Rs[h-avg:h], 1).mean(1))
+        pos_m, pos_p = 1e3*(ph-p1).norm(dim=-1), 1e3*(p0-p1).norm(dim=-1)
+        rot_m, rot_p = torch.rad2deg(rotation_angle(Rh, R1)), torch.rad2deg(rotation_angle(R0, R1))
+        drift = m & ((pos_p >= 5.) | (rot_p >= 5.))
+        row = dict(n=int(m.sum()), drifting=int(drift.sum()), drifting_fraction=round(float(drift.sum())/max(int(m.sum()), 1), 4),
+                   pos_mm=dict(model=stats(pos_m[m]), persistence=stats(pos_p[m])),
+                   rot_deg=dict(model=stats(rot_m[m]), persistence=stats(rot_p[m])))
+        if int(drift.sum()) >= 10:
+            row['drifting_pos_mm'] = dict(model=stats(pos_m[drift]), persistence=stats(pos_p[drift]))
+            row['drifting_rot_deg'] = dict(model=stats(rot_m[drift]), persistence=stats(rot_p[drift]))
+        out[h] = row
+    return out

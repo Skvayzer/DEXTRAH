@@ -35,6 +35,11 @@ FIELDS = ('obj_pos', 'obj_quat', 'obj_linvel', 'obj_angvel', 'hand_q', 'hand_qd'
           'arm_now', 'command')
 PHASE_BUCKETS = ('secure', 'walk<5s', 'walk5-10s', 'walk>10s', 'final')
 CONTACT_N = .5
+# exogenous input layouts: 'post' (v1) palm velocity before and after the step, gravity, table, parked, object force;
+# 'pre' (review issue 1) only what is known before the step: palm velocity before, gravity, table before, parked
+# before, the push force (sampled before the physics), the commanded right-arm reference and the walking command
+EXO_DIM = dict(post=22, pre=26)
+EXO_INDEX = dict(post=dict(after=slice(6, 12), before=slice(0, 6), parked=18), pre=dict(after=None, before=slice(0, 6), parked=12))
 
 
 @dataclass
@@ -42,17 +47,18 @@ class Layout:
     hand: int                      # hand joints (actuated + passive)
     actuated: int = 6
     bps: int = 128
+    lowpass: int = 0               # 6: low-pass relative twist (lin 3, ang 3) appended to the state (review Q1)
 
     @property
-    def state(self):               # continuous state x: pos 3, rot6 6, linvel 3, angvel 3, hand q, hand qd
-        return 15+2*self.hand
+    def state(self):               # pos 3, rot6 6, linvel 3, angvel 3, hand q, hand qd [, low-pass lin 3, ang 3]
+        return 15+2*self.hand+self.lowpass
 
     @property
-    def delta(self):               # predicted change: pos 3, rotvec 3, linvel 3, angvel 3, hand q, hand qd
-        return 12+2*self.hand
+    def delta(self):               # pos 3, rotvec 3, linvel 3, angvel 3, hand q, hand qd [, low-pass 6]
+        return 12+2*self.hand+self.lowpass
 
     forces: int = 8                # 5 pads, palm, table, floor (log1p N)
-    exo: int = 3+3+3+3+3+3+1+3     # palm lin/ang vel before, after; gravity; table pos, parked; object force
+    exo: int = 22                  # EXO_DIM[exo_mode]
 
     @property
     def context(self):             # BPS shape features (the env's width), log mass, COM offset
@@ -71,19 +77,44 @@ def load_chunks(directory, fields=None, max_chunks=None):
     return data, torch.load(directory/'context.pt', map_location='cpu', weights_only=False)
 
 
-def build_tensors(data, context):
-    """Model tensors (T, N, d) from the logged fields."""
+def lowpass_twist(data, dt, tau):
+    """Causal exponential average (time constant tau) of the relative twist, restarted at each episode's
+    first row (rows where 'done' is set already belong to the new episode)."""
+    v = torch.cat((data['obj_linvel'], data['obj_angvel']), -1)
+    done = data['done'][..., 0] > .5
+    a = min(1., dt/tau)
+    out = torch.empty_like(v)
+    lp = v[0].clone()
+    for i in range(v.shape[0]):
+        lp = torch.where(done[i][:, None], v[i], lp+a*(v[i]-lp)) if i else lp
+        out[i] = lp
+    return out
+
+
+def build_tensors(data, context, exo_mode='post', lowpass_tau=None, labels='lost'):
+    """Model tensors (T, N, d) from the logged fields. exo_mode 'post' (v1) / 'pre' (EXO_INDEX); lowpass_tau
+    appends the low-pass relative twist to the state; labels 'lost' (v1: drop or failed grasp check) / 'drop'
+    (drops only; failed grasp checks are censored)."""
     T, N = data['done'].shape[:2]
     R = quat_to_matrix(torch.nn.functional.normalize(data['obj_quat'], dim=-1))
-    state = torch.cat((data['obj_pos'], matrix_to_rot6(R), data['obj_linvel'], data['obj_angvel'],
-                       data['hand_q'], data['hand_qd']), -1)
+    parts = [data['obj_pos'], matrix_to_rot6(R), data['obj_linvel'], data['obj_angvel'], data['hand_q'], data['hand_qd']]
+    if lowpass_tau:
+        parts.append(lowpass_twist(data, context['dt'], lowpass_tau))
+    state = torch.cat(parts, -1)
     forces = torch.log1p(torch.cat((data['finger_force'], data['palm_force'], data['table_force'],
                                     data['ground_force']), -1).clamp_min(0))
     palm_prev = torch.cat((data['palm_linvel'][:1], data['palm_linvel'][:-1]))
     ang_prev = torch.cat((data['palm_angvel'][:1], data['palm_angvel'][:-1]))
     grav_prev = torch.cat((data['gravity'][:1], data['gravity'][:-1]))
-    exo = torch.cat((palm_prev, ang_prev, data['palm_linvel'], data['palm_angvel'], grav_prev,
-                     data['table_pos'], data['table_parked'], data['object_force']), -1)
+    prev = lambda x: torch.cat((x[:1], x[:-1]))
+    if exo_mode == 'post':
+        exo = torch.cat((palm_prev, ang_prev, data['palm_linvel'], data['palm_angvel'], grav_prev,
+                         data['table_pos'], data['table_parked'], data['object_force']), -1)
+    elif exo_mode == 'pre':
+        exo = torch.cat((palm_prev, ang_prev, grav_prev, prev(data['table_pos']), prev(data['table_parked']),
+                         data['object_force'], prev(data['arm_now']), prev(data['command'])), -1)
+    else:
+        raise ValueError(exo_mode)
     masscom = torch.cat((torch.log(data['mass'].clamp_min(1e-4)), data['com_offset']), -1)
     end = data['end'][..., 0].long()
     done = data['done'][..., 0] > .5
@@ -93,10 +124,28 @@ def build_tensors(data, context):
         extra['bucket'] = phase_bucket(data['phase'][..., 0], data['carry_t'][..., 0].float()*context['dt'])
     extra['drop'] = (done & (end == DROP)).float()          # physical drops only
     extra['censor'] = done & (end == START_FAIL)             # failed grasp check: a verdict on the start state
+    if labels == 'drop':
+        lost = extra['drop'] > .5
+    elif labels != 'lost':
+        raise ValueError(labels)
     return dict(state=state, rot=R, forces=forces, action=data['hand_target'], exo=exo, masscom=masscom,
                 bps=context['bps'].float(),
                 contact=(forces[..., :6] > math.log1p(CONTACT_N)).float(), supported=data['supported'][..., 0],
                 done=done, lost=lost.float(), asset=context['asset'], **extra)
+
+
+def pre_event_mask(t, k, event='lost'):
+    """(T, N) rows s from which a window of k steps reaches an event (lost label) in the same episode."""
+    T, N = t['done'].shape
+    mask = torch.zeros(T, N, dtype=torch.bool, device=t['done'].device)
+    rows, cols = torch.nonzero(t[event] > .5, as_tuple=True)
+    for r, e in zip(rows.tolist(), cols.tolist()):
+        lo = max(0, r-k)
+        starts = torch.nonzero(t['done'][lo:r, e]).flatten()     # an episode start inside: windows must begin there or later
+        if len(starts):
+            lo = lo+int(starts[-1])
+        mask[lo:r, e] = True
+    return mask
 
 
 def phase_bucket(phase, episode_s, walk_start_s=2.5):
@@ -153,6 +202,9 @@ def gather(t, s, e, k):
     idx = s[:, None]+torch.arange(k+1, device=s.device)[None]
     pick = lambda x: x[idx, e[:, None]]
     out = {name: pick(t[name]) for name in ('state', 'rot', 'forces', 'action', 'exo', 'contact', 'supported', 'lost')}
+    for name in ('bucket', 'censor'):
+        if name in t:
+            out[name] = pick(t[name])
     out['context'] = torch.cat((t['bps'][e][:, None].expand(-1, k+1, -1), pick(t['masscom'])), -1)
     done = pick(t['done'])
     ended_before = torch.cumsum(done[:, 1:].float(), 1)-done[:, 1:].float()     # ends strictly before step j

@@ -28,13 +28,14 @@ def main():
     from dextrah_lab.neurosim.evaluate import drop_prediction_report
     from dextrah_lab.neurosim.model import HandObjectWorldModel
     t0 = time.time()
+    ck = torch.load(args.model, map_location='cpu', weights_only=False)
     data, context = load_chunks(args.data, fields=FIELDS)
-    t = build_tensors(data, context)
+    t = build_tensors(data, context, exo_mode=ck.get('exo_mode', 'post'), lowpass_tau=ck.get('lowpass_tau') or None,
+                      labels=ck.get('labels', 'lost'))
     del data
     asset = t.pop('asset')
-    ck = torch.load(args.model, map_location='cpu', weights_only=False)
     layout = Layout(**{k: v for k, v in ck['layout'].items() if k in Layout.__dataclass_fields__})
-    model = HandObjectWorldModel(layout, hidden=tuple(ck['hidden']))
+    model = HandObjectWorldModel(layout, hidden=tuple(ck['hidden']), exo_mode=ck.get('exo_mode', 'post'))
     model.load_state_dict(ck['state_dict'])
     model.dt = ck['dt']
     model.eval().to(args.device)
