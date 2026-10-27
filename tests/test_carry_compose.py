@@ -5,7 +5,8 @@ import torch
 
 from dextrah_lab.wholebody.carry import WalkingClips
 from dextrah_lab.wholebody.carry_compose import (LEVELS, CarrySettings, ClipSequencer, Curriculum, StartWindowRate, body_joint_masks,
-                                                 carry_reward_v2, clips_up_to, compose_body, finger_command, hand_command)
+                                                 carry_reward_v2, carry_reward_v3, clips_up_to, compose_body, finger_command,
+                                                 hand_command, region_distance)
 from dextrah_lab.wholebody.contract import BODY_JOINTS
 
 
@@ -122,6 +123,44 @@ class CarryComposeTests(unittest.TestCase):
         self.assertTrue(c.record_exact(start, torch.ones(8, dtype=torch.bool), 210))
         c2 = Curriculum(s, 'cpu', num_envs=64, episode_steps=100)
         self.assertFalse(c2.record_exact(start, torch.ones(8, dtype=torch.bool), 210))
+
+    def test_v2_asymmetric_fingers(self):
+        q_ref = torch.zeros(1, 2)
+        out = finger_command(q_ref, torch.tensor([[50., -50.]]), .3, close=.6, open_=.3)
+        self.assertTrue(torch.allclose(out, torch.tensor([[.6, -.3]]), atol=1e-4))
+        self.assertTrue(torch.equal(finger_command(q_ref, torch.zeros(1, 2), .3, close=.6, open_=.3), q_ref))
+
+    def test_v2_variable_episodes_and_stops(self):
+        s = CarrySettings(level=2, walk_s=(4., 10.), stop_probability=1., stop_s=(1., 1.), cut_probability=0.)
+        seq = ClipSequencer(toy_clips(), s, 2, 'cpu', torch.Generator().manual_seed(0))
+        end = torch.tensor([s.warmup_s+s.settle_s+4.+s.final_stand_s, s.max_episode_s()])
+        seq.reset(torch.arange(2), torch.zeros(2), torch.zeros(2, dtype=torch.bool), end=end)
+        yaw = torch.zeros(2)
+        t0 = s.warmup_s+s.settle_s
+        seq.update(torch.full((2,), t0), yaw)                     # p_stop = 1: both start with a stop
+        self.assertTrue(bool((seq.clip == seq.idle).all()) and bool(seq.stopping.all()))
+        seq.update(torch.full((2,), t0+.5), yaw)                  # still stopping
+        self.assertTrue(bool(seq.stopping.all()))
+        seq.update(torch.full((2,), t0+1.01), yaw)                # stop over -> a new clip (here a stop again)
+        p = seq.phase(torch.full((2,), t0+5.))
+        self.assertEqual(p.tolist(), [ClipSequencer.FINAL, ClipSequencer.WALK])   # env 0 walks 4 s, env 1 10 s
+        self.assertEqual(seq.phase(torch.tensor([t0+5.]), ids=torch.tensor([1])).tolist(), [ClipSequencer.WALK])
+
+    def test_v2_reward(self):
+        s = CarrySettings(version=2, hold_mode='support')
+        n = 3
+        z3 = torch.zeros(n, 3)
+        r, terms = carry_reward_v3(s, supported=torch.tensor([True, False, True]), rel_linear=z3, rel_angular=z3,
+            grasp_opposition=torch.tensor([1., 0., 0.]), contacts=torch.tensor([3, 0, 1]),
+            region_d=region_distance(torch.tensor([[.3, -.15, 0.], [1., 0., 0.], [.3, -.15, 0.]]), s.region_lo, s.region_hi),
+            secure=torch.tensor([False, False, True]), body_velocity=z3, planned_velocity=z3, normal_n=torch.zeros(n, 5),
+            action_delta=torch.zeros(n, 13), arm_delta=torch.zeros(n, 7), table_contact=torch.zeros(n, dtype=torch.bool),
+            dropped=torch.tensor([False, True, False]), fell=torch.zeros(n, dtype=torch.bool), active=torch.ones(n, dtype=torch.bool))
+        track = s.w_track_lin+s.w_track_yaw
+        self.assertAlmostEqual(float(r[0]), s.w_support+s.w_grasp+s.w_region+track, places=5)      # held, inside the region
+        self.assertAlmostEqual(float(terms['hold'][2]), 0.)                                          # secure phase: no hold
+        self.assertAlmostEqual(float(terms['region'][2]), 2*s.w_region, places=5)
+        self.assertAlmostEqual(float(terms['drop'][1]), -s.drop_penalty)
 
     def test_reward_warmup_and_hold(self):
         s = CarrySettings()

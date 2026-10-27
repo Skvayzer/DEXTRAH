@@ -84,6 +84,41 @@ class CarrySettings:
     drop_penalty: float = 10.
     fall_penalty: float = 10.
     table_contact_penalty: float = .5
+    # ---------------- carry v2 (docs/carry_v2_design.md); defaults keep v1 unchanged ----------------
+    version: int = 1
+    finger_close: float = 0.            # asymmetric finger bound: + (closing) / - (opening); 0 = beta_fingers
+    finger_open: float = 0.
+    arm_channel: bool = False           # right arm via the SONIC reference (first 7 latent outputs); latent off
+    arm_delta_rad: float = .4
+    arm_filter: float = .2              # D <- (1 - f) D + f * arm_delta_rad * tanh(a)
+    postures: str = ''                  # right-arm posture library (scripts/build_carry_postures.py)
+    carry_target: tuple = (.30, -.15, .05)
+    carry_jitter: float = .05
+    walk_s: tuple = ()                  # per-episode walking time U(lo, hi) s (episode = warm-up + settle + walk + stand)
+    stop_probability: float = 0.        # a new clip is a standing stop of stop_s with this probability
+    stop_s: tuple = (1., 3.)
+    hold_mode: str = 'offset'           # 'support': hold = object supported by the hand; drop = unsupported
+    unsupported_s: float = .3
+    w_support: float = 1.
+    w_slip_v: float = .4
+    slip_v_scale: float = .05
+    w_slip_w: float = .3
+    slip_w_scale: float = .5
+    slip_smooth_s: float = .1
+    w_grasp: float = .3
+    w_region: float = .2
+    region_lo: tuple = (.20, -.25, -.10)    # carry region (torso frame, m)
+    region_hi: tuple = (.40, -.05, .15)
+    region_sigma: float = .10
+    w_force_sq: float = .002
+    w_smooth: float = .01
+    w_dev: float = .05
+    disturbance: float = 0.             # curriculum level k in [0, 1]
+    pelvis_push_n: float = 40.          # x k; Workhorse protocol 40 N x 1 s every 5-10 s as the ceiling
+    pelvis_push_s: tuple = (.2, 1.)
+    pelvis_push_interval_s: tuple = (5., 10.)
+    object_push_n: float = 2.5          # x k; RobustDexGrasp's evaluation force
+    object_push_probability: float = 1/120.
 
     def __post_init__(self):
         if self.stage not in (1, 2):
@@ -92,6 +127,17 @@ class CarrySettings:
             raise ValueError('Unknown carry arm reference / residual joints')
         if not 0 <= self.level < len(LEVELS):
             raise ValueError('Curriculum level out of range')
+        if self.version not in (1, 2) or self.hold_mode not in ('offset', 'support'):
+            raise ValueError('Unknown carry version / hold mode')
+        if self.arm_channel and (self.stage != 1 or not self.postures):
+            raise ValueError('The arm channel replaces the latent residual (stage 1) and needs a posture library')
+        if self.walk_s and not (0 < self.walk_s[0] <= self.walk_s[1]):
+            raise ValueError('walk_s must be (lo, hi) with 0 < lo <= hi')
+
+    def max_episode_s(self):
+        if self.walk_s:
+            return self.warmup_s+self.settle_s+self.walk_s[1]+self.final_stand_s
+        return self.episode_s
 
     def as_dict(self):
         return asdict(self)
@@ -103,9 +149,13 @@ def hand_command(targets, lower, upper):
     return (2*(targets-lower)/(upper-lower)-1).clamp(-1, 1)
 
 
-def finger_command(q_ref, raw, beta):
-    """DexCompose Task-A stabilizer: the stored hold plus a bounded correction."""
-    return (q_ref+beta*torch.tanh(raw)).clamp(-1, 1)
+def finger_command(q_ref, raw, beta, close=0., open_=0.):
+    """DexCompose Task-A stabilizer: the stored hold plus a bounded correction. With close / open_
+    (carry v2) the bound is asymmetric: + close tanh(a) for a >= 0 (Revo2: + closes), open_ tanh(a) below."""
+    t = torch.tanh(raw)
+    if close or open_:
+        return (q_ref+torch.where(t >= 0, close*t, open_*t)).clamp(-1, 1)
+    return (q_ref+beta*t).clamp(-1, 1)
 
 
 def body_joint_masks(names, residual_joints='arms'):
@@ -151,6 +201,42 @@ def carry_reward_v2(s, *, offset_error, rel_linear, rel_angular, body_velocity, 
     return sum(terms.values()), terms
 
 
+def region_distance(p, lo, hi):
+    """Distance (n,) of points p (n, 3) to the axis-aligned box [lo, hi] (0 inside)."""
+    lo = torch.as_tensor(lo, dtype=p.dtype, device=p.device)
+    hi = torch.as_tensor(hi, dtype=p.dtype, device=p.device)
+    return (torch.clamp(lo-p, min=0)+torch.clamp(p-hi, min=0)).norm(dim=-1)
+
+
+def carry_reward_v3(s, *, supported, rel_linear, rel_angular, grasp_opposition, contacts, region_d, secure,
+                    body_velocity, planned_velocity, normal_n, action_delta, arm_delta, table_contact, dropped, fell,
+                    active):
+    """Carry v2 per-step reward (docs/carry_v2_design.md) and named terms; ``active`` False -> 0.
+
+    hold = s_t (object supported by the hand; off in the secure phase), bounded slip on the smoothed
+    object-vs-palm velocity, grasp quality 0.5 C_opp + 0.5 min(n_c, 3)/3, soft carry region (x2 in
+    the secure phase), velocity tracking as v1, quadratic grip force above force_max_n, action
+    smoothness, arm-reference deviation, table contact, terminal drop / fall."""
+    a = active.float()
+    sec = secure.float()
+    terms = dict(
+        hold=s.w_support*supported.float()*(1-sec),
+        slip=-s.w_slip_v*torch.tanh(rel_linear.norm(dim=-1)/s.slip_v_scale)
+             - s.w_slip_w*torch.tanh(rel_angular.norm(dim=-1)/s.slip_w_scale),
+        grasp=s.w_grasp*(.5*grasp_opposition+.5*contacts.clamp(max=3).float()/3),
+        region=s.w_region*(1+sec)*torch.exp(-(region_d/s.region_sigma)**2),
+        track=s.w_track_lin*torch.exp(-((body_velocity[:, :2]-planned_velocity[:, :2])**2).sum(-1)/s.track_sigma)
+              + s.w_track_yaw*torch.exp(-(body_velocity[:, 2]-planned_velocity[:, 2])**2/s.track_sigma),
+        force=-s.w_force_sq*((normal_n-s.force_max_n).clamp(min=0)**2).sum(-1),
+        smooth=-s.w_smooth*(action_delta**2).sum(-1),
+        deviation=-s.w_dev*(arm_delta**2).sum(-1),
+        table=-s.table_contact_penalty*table_contact.float(),
+        drop=-s.drop_penalty*dropped.float(),
+        fall=-s.fall_penalty*fell.float())
+    terms = {k: v*a for k, v in terms.items()}
+    return sum(terms.values()), terms
+
+
 class ClipSequencer:
     """Per-env sequence of walking clips: settle, random clips at the curriculum level (each cut at a
     random time with ``cut_probability``), standing for the last ``final_stand_s``.
@@ -168,6 +254,10 @@ class ClipSequencer:
         self.cut = torch.full((n,), float('inf'), device=device)
         self.heading = torch.zeros(n, device=device)
         self.backoff_first = torch.zeros(n, dtype=torch.bool, device=device)
+        # carry v2: per-env episode end (variable walking time) and standing stops between clips.
+        self.variable = bool(settings.walk_s)
+        self.end = torch.full((n,), float(settings.max_episode_s()), device=device)
+        self.stopping = torch.zeros(n, dtype=torch.bool, device=device)
         self.set_level(settings.level)
 
     def set_level(self, level):
@@ -179,21 +269,27 @@ class ClipSequencer:
     def walk_start(self):
         return self.s.warmup_s+self.s.settle_s
 
-    def walk_end(self):
-        return self.s.episode_s-self.s.final_stand_s
+    def walk_end(self, ids=None):
+        if not self.variable:
+            return self.s.episode_s-self.s.final_stand_s
+        return (self.end if ids is None else self.end[ids])-self.s.final_stand_s
 
-    def phase(self, t):
+    def phase(self, t, ids=None):
+        """Phase codes at episode times t: every env (ids None) or the envs ids (t[k] for ids[k])."""
         p = torch.full_like(t, self.WALK, dtype=torch.long)
         p = torch.where(t < self.walk_start(), torch.full_like(p, self.SETTLE), p)
         p = torch.where(t < self.s.warmup_s, torch.full_like(p, self.WARMUP), p)
-        return torch.where(t >= self.walk_end(), torch.full_like(p, self.FINAL), p)
+        return torch.where(t >= self.walk_end(ids), torch.full_like(p, self.FINAL), p)
 
-    def reset(self, ids, heading, backoff_first):
+    def reset(self, ids, heading, backoff_first, end=None):
         self.clip[ids] = self.idle
         self.t0[ids] = 0.
         self.cut[ids] = float('inf')
         self.heading[ids] = heading
         self.backoff_first[ids] = backoff_first
+        self.stopping[ids] = False
+        if end is not None:
+            self.end[ids] = end
 
     def _rand(self, n, device):
         return torch.rand(n, device=device, generator=self.g)
@@ -202,16 +298,22 @@ class ClipSequencer:
         """Advance clips at episode times t (N,); yaw: measured robot yaw (anchors new clips).
         Returns the ids that started a new clip (their reference blends from the previous one)."""
         dev = t.device
-        walking = (t >= self.walk_start()) & (t < self.walk_end())
+        walk_end = self.walk_end()
+        walking = (t >= self.walk_start()) & (t < walk_end)
         idle_now = self.clip == self.idle
         over = (t-self.t0 >= torch.minimum(self.clips.duration(self.clip), self.cut))
-        start = walking & (idle_now | over)
-        stop = (t >= self.walk_end()) & ~idle_now
+        start = walking & ((idle_now & ~self.stopping) | over)
+        stop = (t >= walk_end) & (~idle_now | self.stopping)
         ids = torch.nonzero(start).flatten()
         if ids.numel():
             pick = self.allowed[(self._rand(ids.numel(), dev)*len(self.allowed)).long().clamp(max=len(self.allowed)-1)]
-            first = self.backoff_first[ids] & idle_now[ids]
+            first = self.backoff_first[ids] & idle_now[ids] & ~self.stopping[ids]
             back = self.backward[(self._rand(ids.numel(), dev)*len(self.backward)).long().clamp(max=len(self.backward)-1)]
+            pause = torch.zeros_like(first)
+            if self.s.stop_probability > 0:
+                # carry v2: a standing stop (then a new walking clip: another walk onset).
+                pause = (self._rand(ids.numel(), dev) < self.s.stop_probability) & ~first & ~self.stopping[ids]
+                pick = torch.where(pause, torch.full_like(pick, self.idle), pick)
             self.clip[ids] = torch.where(first, back, pick)
             self.t0[ids] = t[ids]
             self.heading[ids] = yaw[ids]
@@ -219,12 +321,16 @@ class ClipSequencer:
             cut = self._rand(ids.numel(), dev) < self.s.cut_probability
             self.cut[ids] = torch.where(cut & ~first, 1.5+self._rand(ids.numel(), dev)*(dur-1.5).clamp(min=0),
                                         torch.full_like(dur, float('inf')))
+            lo, hi = self.s.stop_s
+            self.cut[ids] = torch.where(pause, lo+(hi-lo)*self._rand(ids.numel(), dev), self.cut[ids])
+            self.stopping[ids] = pause
         sid = torch.nonzero(stop).flatten()
         if sid.numel():
             self.clip[sid] = self.idle
             self.t0[sid] = t[sid]
             self.heading[sid] = yaw[sid]
             self.cut[sid] = float('inf')
+            self.stopping[sid] = False
         return torch.cat((ids, sid))
 
     def reference(self, t):
