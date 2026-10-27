@@ -324,7 +324,9 @@ def run(args):
         return torch.cat((obs, context), -1)
 
     def support_state():
-        c = env._last_contacts
+        c = getattr(env, '_last_contacts', None)
+        if c is None:                                    # before the first step (no contact readings yet)
+            return z(6), z(dtype=torch.long), torch.zeros(n, dtype=torch.bool, device=d)
         centre, _ = palm()
         return hand_support(c['finger_object_force_l1'], c['palm_object_force_l1'], c.get('object_table_force', z()),
                             c.get('object_ground_force', z()), (env.object.data.root_pos_w-centre).norm(dim=-1))
