@@ -83,3 +83,11 @@ control steps after the restore, 256 states, each finger +-0.05 / +-0.1.
   counterfactual data (identical restored copies, different finger commands) supervising the predicted
   difference over <= 0.1 s, re-tested at +-0.01-0.02; any gradient objective limited to ~0.1 s horizons with a
   critic beyond, or smoothed (expected) gradients.
+
+Why action-blind (scripts/neurosim/action_sensitivity.py, stage15/action_sensitivity.json, 117k held-out
+transitions of go_nogo_v2): the model's one-step contact-force Jacobian w.r.t. the finger targets has the data's
+pattern and size (median Frobenius 15.8 vs 7.8 for ridge on the same inputs), but the targets are predictable from
+the model inputs with R^2 0.94-1.00 for 5 of 6 joints, add 0.003 to the force R^2, and change by <= 0.012 per
+step in 90% of steps. The model learned action effects only along the expert's closed-loop variations; the
+check's sustained +-0.05-0.1 offsets lie far outside them. Learning the response needs independent finger-command
+variation (paired counterfactuals).
