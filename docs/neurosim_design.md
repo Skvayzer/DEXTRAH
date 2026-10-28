@@ -47,3 +47,39 @@ pass on 1 and 3 alone still makes the model useful as a fast simulator for analy
 * Hybrid fine-tune of C at equal GPU-hours: SAPG alone vs SAPG + lambda * world-model gradient (first-order,
   H = 16-32, critic bootstrap, survival weight from the lost head), lambda gated by recent model error.
   Pushes enter as known inputs (the logged object force here; pelvis / wrist pushes through palm motion).
+
+## Gradient check, corrected (2026-10-28): the model is action-blind; no-go for stage 2 as planned
+
+The first checks (stage15/gradient_check_v2 / _noise / _bundled, perturbation 0.6 s after the restore) measured
+a "simulator noise floor" as large as the perturbation effect. They do not test the model:
+
+* the run config's per-step domain randomisation was on (each world draws a 0-2-step-old action every step,
+  source_actions.delayed_actions with the global RNG; delayed / noised object state in the actor observation;
+  observation delays; joint-velocity noise) and 20% of worlds kept the table;
+* with all of that off (build_carry_env(no_randomization=True), table_keep_probability 0), restored copies are
+  bit-identical, differ at the float level after one control step (MuJoCo Warp is not bitwise reproducible
+  across worlds), and the hand-object system amplifies that ~x200 per 0.1 s, also with shared expert actions
+  (scripts/neurosim/replica_divergence.py; object spread median 0.004 mm at 0.1 s, 0.7 mm at 0.2 s, 5 mm /
+  11 deg at 0.6 s; outputs/neurosim/stage15/replicas/*_norand.json). At 0.6 s copies already differ by mm.
+
+v5 (outputs/neurosim/stage15/gradient_check_v5_h0p1 / h0p2 / h0p5.json): randomisation off, perturbation 2
+control steps after the restore, 256 states, each finger +-0.05 / +-0.1.
+
+| Horizon | Outcome | Sim effect | Noise floor | Antisymmetry | Model / sim magnitude | Cosine | Sign agreement |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.1 s | grip force (log) | 0.11 | 0.0008 | -0.28 | 0.06 | 0.10 | 51% |
+| 0.1 s | rotation | 0.15 deg | 0.004 deg | -0.25 | 0.04 | 0.02 | 51% |
+| 0.1 s | displacement | 0.068 mm | 0.002 mm | -0.15 | 0.05 | -0.01 | 50% |
+| 0.2 s | grip force (log) | 0.48 | 0.22 | -0.44 | 0.05 | 0.04 | 50% |
+| 0.5 s | grip force (log) | 0.66 | 0.66 | -0.47 | 0.06 | -0.03 | 50% |
+
+* Finite differences in the simulator are clean only up to ~0.1 s; at 0.2 s the noise is half the effect and
+  the effect no longer grows with the perturbation; at 0.5 s it is all noise.
+* At 0.1 s the response to +-0.05-0.1 is not linear (antisymmetry -0.15 to -0.28; 2x the perturbation, 1.6x
+  the effect). Smaller perturbations at 0.1 s: not yet run.
+* The world model's action effects are 4-6% of the simulator's and uncorrelated with them at every horizon: it
+  predicts from state and body motion, not from the finger targets.
+* Stage 2 as planned (first-order gradients through this model, H = 16-32) is a no-go. If continued: paired
+  counterfactual data (identical restored copies, different finger commands) supervising the predicted
+  difference over <= 0.1 s, re-tested at +-0.01-0.02; any gradient objective limited to ~0.1 s horizons with a
+  critic beyond, or smoothed (expected) gradients.
