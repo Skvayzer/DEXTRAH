@@ -29,6 +29,16 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
             Support at the release (the strict rule) is reported per world.
   result    placed = resting on table B (contact, speed < 5 cm/s), no hand contact, robot upright.
 
+--place-mode scripted (baseline, carry v2 only): no switch back to M at table B. C keeps the body and the grip;
+  lower    the right-arm reference blends (minimum jerk, --lower-s) to the carry-posture library posture that puts
+           the held object straight below its current position, at the table-B top minus --lower-overshoot (palm
+           orientation kept, small arm change: the library cost); once the table carries the object (object-table
+           force > 0.5 N for 3 steps), or --lower-hold-s after the blend without it, the arm reference freezes at
+           the measured angles;
+  open     the fingers go to their pre-grasp commands for --release-s, C's body control and the frozen arm kept;
+  result   as above (placed = resting on table B, hand free, robot upright). The set-down target (straight below,
+           current orientation) is the goal for the placement errors and the green ghost in the videos.
+
 C's end states at the hand-back (arrived holding) are saved in the SGS holding-state field layout
 (handback_states.pt) as starts for a later placement fine-tune of M.
 
@@ -52,9 +62,10 @@ import traceback
 import numpy as np
 
 TYPES = ('hammer', 'screwdriver', 'marker', 'spatula', 'eraser', 'brush')
-PHASES = ('grasp', 'settle', 'walk', 'final', 'place', 'release', 'done')
-GRASP, SETTLE, WALK, FINAL, PLACE, RELEASE, DONE = range(len(PHASES))
-C_PHASES = (SETTLE, WALK, FINAL)
+PHASES = ('grasp', 'settle', 'walk', 'final', 'place', 'release', 'done', 'lower', 'open')
+GRASP, SETTLE, WALK, FINAL, PLACE, RELEASE, DONE, LOWER, OPEN = range(len(PHASES))
+C_PHASES = (SETTLE, WALK, FINAL)                    # C carries: its drop rules apply
+C_CONTROL = (SETTLE, WALK, FINAL, LOWER, OPEN)      # C drives the body (scripted set-down: lower, open)
 GRASP_STEPS = 60                    # 1 s at 60 Hz
 FORCE_N = .1
 
@@ -146,7 +157,12 @@ def run(args):
     asset = env._object_asset_index_per_env.cpu().numpy()
     kind = np.array([Path(paths[a]).stem.split('_')[1] for a in asset])
     worlds = np.arange(min(n, args.worlds or n))
-    if args.place_goal == 'both':
+    scripted = args.place_mode == 'scripted'
+    if scripted and not c_v2:
+        raise ValueError('--place-mode scripted needs a carry v2 expert (carry-posture library)')
+    if scripted:
+        variant = np.array(['scripted']*n)
+    elif args.place_goal == 'both':
         variant = np.array(['rest' if j % 2 == 0 else 'hover' for j in range(n)])
     else:
         variant = np.array([args.place_goal]*n)
@@ -194,9 +210,14 @@ def run(args):
     c_steps, unsupported = z(dtype=torch.long), z(dtype=torch.long)
     carry_target = torch.tensor(carry.carry_target, device=d).expand(n, 3)
     torso_idx, palm_link = env.robot.body_names.index('torso_link'), env.robot.body_names.index('right_base_link')
+    # scripted set-down state: arm reference profile, frozen arm, support count, C kept after the result
+    lower_start, lower_target, lower_frozen = z(7), z(7), z(7)
+    lower_hold = torch.zeros(n, dtype=torch.bool, device=d)
+    support_count = z(dtype=torch.long)
+    c_done = torch.zeros(n, dtype=torch.bool, device=d)
     postures = None
     if c_v2:
-        from dextrah_lab.wholebody.carry_posture import CarryPostures
+        from dextrah_lab.wholebody.carry_posture import CarryPostures, min_jerk
         postures = CarryPostures(carry.postures, d, target=carry.carry_target, target_jitter=0., w_q=carry.posture_w_q)
     lateral = torch.tensor([-1., 0., 0.], device=d)        # robot's right for the -90 deg start yaw (checked below)
     shift = args.table_offset*lateral                       # table A -> table B
@@ -233,7 +254,7 @@ def run(args):
 
     original_observation = env._wholebody_observation
     def wholebody_observation():
-        ids = torch.nonzero(torch.isin(phase, torch.tensor(C_PHASES, device=d))).flatten().tolist()
+        ids = torch.nonzero(torch.isin(phase, torch.tensor(C_CONTROL, device=d))).flatten().tolist()
         if ids:
             now = env._sim_step_counter*env.physics_dt
             rp = (env.robot.data.root_pos_w[ids]-env.scene.env_origins[ids]).cpu().numpy()
@@ -261,6 +282,12 @@ def run(args):
                 # C's episode time after this step (the training env counts the step before observing)
                 tc = (c_steps[idx]+1).float()*env.step_dt
                 arm_now[idx] = carry_arm_reference(q_grasp[idx], q_carry[idx], arm_D[idx], tc, carry.warmup_s, carry.settle_s)
+                if scripted:
+                    low = idx[(phase[idx] == LOWER) | (phase[idx] == OPEN)]
+                    if low.numel():
+                        blend = min_jerk((phase_steps[low]+1).float()*env.step_dt/args.lower_s)[:, None]
+                        profile = lower_start[low]+blend*(lower_target[low]-lower_start[low])
+                        arm_now[low] = torch.where(lower_hold[low][:, None], lower_frozen[low], profile)
                 q[:, :, right_arm] = arm_now[idx][:, None]
             qd = torch.as_tensor(np.stack(QD), device=d)
             qd[:, :, arm_ids] = 0.
@@ -326,7 +353,7 @@ def run(args):
         obs = policy.clone()
         obs[:, goal_slice] = 0
         obs[:, goal_surface] = 0
-        one_hot = torch.stack((phase == SETTLE, phase == WALK, phase == FINAL), -1).float()
+        one_hot = torch.stack((phase == SETTLE, phase == WALK, (phase == FINAL) | (phase == LOWER) | (phase == OPEN)), -1).float()
         cmd = torch.as_tensor(command, device=d, dtype=torch.float32)
         torque = env.robot.data.applied_torque[:, env._hand_joint_ids].clamp(-5, 5)
         context = torch.cat((z(1), cmd, one_hot, z(6), torque), -1)
@@ -400,10 +427,10 @@ def run(args):
                         command[j] = 0.
                         err = np.linalg.norm(rp[k][:2]-route[j].waypoints[-1])
                         records[j].update(arrived_s=round(t, 2), arrival_error_m=round(float(err), 3))
-            for j in torch.nonzero(torch.isin(phase, torch.tensor((SETTLE, FINAL), device=d))).flatten().tolist():
+            for j in torch.nonzero(torch.isin(phase, torch.tensor((SETTLE, FINAL, LOWER, OPEN), device=d))).flatten().tolist():
                 command[j] = 0.
             # -------- policies
-            c_mode[:] = torch.isin(phase, torch.tensor(C_PHASES, device=d))
+            c_mode[:] = torch.isin(phase, torch.tensor(C_CONTROL, device=d)) | c_done
             m_out = m_model(dict(obs=torch.cat((obs['policy'], leader), -1), is_train=False, prev_actions=None, rnn_states=m_states))
             c_out = c_model(dict(obs=torch.cat((c_observation(obs['policy']), leader), -1), is_train=False,
                                  prev_actions=None, rnn_states=c_states))
@@ -423,8 +450,11 @@ def run(args):
             action = torch.where(c_mode[:, None], c_action, m_mu)
             release = phase == RELEASE
             action = torch.where(release[:, None], torch.cat((last_latent, q_open), -1), action)
+            if scripted:
+                action = torch.where((phase == OPEN)[:, None], torch.cat((c_action[:, :64], q_open), -1), action)
             keep = (phase == DONE)
-            action = torch.where(keep[:, None], torch.cat((last_latent, frozen_fingers), -1), action)
+            kept_latent = torch.where(c_done[:, None], torch.zeros_like(last_latent), last_latent)
+            action = torch.where(keep[:, None], torch.cat((kept_latent, frozen_fingers), -1), action)
             m_active = (phase == GRASP) | (phase == PLACE)
             last_latent = torch.where(m_active[:, None], m_mu[:, :64], last_latent)
             frozen_fingers = torch.where(keep[:, None], frozen_fingers, action[:, 64:70])
@@ -573,6 +603,34 @@ def run(args):
                 dyaw = float(yaw_of(env.robot.data.root_quat_w[j:j+1])[0]-start_yaw[j])
                 records[j]['stance_offset_m'] = [round(float(x), 3) for x in (rel_b-rel_a)]
                 records[j]['stance_yaw_offset_deg'] = round(math.degrees(math.atan2(math.sin(dyaw), math.cos(dyaw))), 1)
+                if scripted:
+                    # C keeps control; set-down target straight below the object, at the table top minus the overshoot
+                    jj = torch.tensor([j], device=d)
+                    body = env.robot.data.body_state_w[jj]
+                    obj_w = env.object.data.root_pos_w[jj]
+                    top = float(env.scene.env_origins[j, 2]+table_b[j, 2])+TABLE_SIZE[2]/2
+                    drop = float(obj_w[0, 2])-top+args.lower_overshoot
+                    target_w = obj_w.clone()
+                    target_w[0, 2] -= drop
+                    t_po, palm_torso = grasp_in_torso(body[:, torso_idx], body[:, palm_link], obj_w)
+                    q_meas = env.robot.data.joint_pos[jj][:, env._body_ids][:, right_arm]
+                    target_t = object_in_torso(body[:, torso_idx], target_w)
+                    _, q_low, p_low = postures.select(t_po, palm_torso, q_meas, target_t)
+                    lower_start[j], lower_target[j] = arm_now[j], q_low[0]
+                    lower_hold[j], support_count[j] = False, 0
+                    goal_b[j, :3] = target_w[0]-env.scene.env_origins[j]
+                    goal_b[j, 3:] = env.object.data.root_quat_w[j]
+                    now_t = object_in_torso(body[:, torso_idx], obj_w)
+                    records[j]['set_down'] = dict(object_above_table_m=round(drop-args.lower_overshoot, 3),
+                                                  posture_lowers_m=round(float(now_t[0, 2]-p_low[0, 2]), 3),
+                                                  posture_miss_m=round(float((p_low-target_t).norm()), 3),
+                                                  max_joint_change_rad=round(float((q_low-q_meas).abs().max()), 3))
+                    pose = goal_b[j:j+1].clone()
+                    pose[:, :3] += env.scene.env_origins[j]
+                    env.goal_viz.write_root_pose_to_sim(pose, env_ids=jj)
+                    phase[j], phase_steps[j] = LOWER, 0
+                    records[j]['handback_s'] = round(t+dt, 2)
+                    continue
                 for s_ in m_states+(p_states if p_model is not m_model else ()):
                     s_[:, j, :] = 0
                 home_pos[j], home_yaw[j] = start_pos[j], start_yaw[j]     # table B where table A was
@@ -607,8 +665,23 @@ def run(args):
                 finish(j, 'no_release', t+dt, goal_distance_m=round(float(goal_dist[j]), 3), table_support=bool(support[j] > .5),
                        smoothed_speed_ms=round(float(velocity_ema[j].norm()), 3),
                        object_minus_goal_m=[round(float(x), 3) for x in (obj_pos[j]-goal_b[j, :3])])
+            if scripted:
+                lowering = phase == LOWER
+                support_count = torch.where(lowering & (support > .5), support_count+1, torch.zeros_like(support_count))
+                ready = lowering & ((support_count >= 3) | (phase_steps*dt >= args.lower_s+args.lower_hold_s))
+                for j in torch.nonzero(ready).flatten().tolist():
+                    lower_frozen[j] = env.robot.data.joint_pos[j, env._body_ids][right_arm]
+                    lower_hold[j] = True
+                    records[j].update(release_s=round(t+dt, 2), support_at_release=bool(support[j] > .5),
+                                      lowering_s=round(float(phase_steps[j])*dt, 2),
+                                      hand_contact_at_release=round(float(hand_contact[j]), 3),
+                                      goal_distance_at_release_m=round(float((obj_pos[j]-goal_b[j, :3]).norm()), 3))
+                    phase[j], phase_steps[j] = OPEN, 0
+                for j in torch.nonzero(lowering & (obj_pos[:, 2] < table_b[:, 2]-.1)).flatten().tolist():
+                    finish(j, 'dropped_place', t+dt)
+                c_done |= (phase == OPEN) & (phase_steps*dt >= args.release_s)
             # release -> result
-            for j in torch.nonzero((phase == RELEASE) & (phase_steps*dt >= args.release_s)).flatten().tolist():
+            for j in torch.nonzero(((phase == RELEASE) | (phase == OPEN)) & (phase_steps*dt >= args.release_s)).flatten().tolist():
                 rel_b = (obj_pos[j]-table_b[j])
                 on_b = bool((rel_b[:2].abs() <= torch.tensor(TABLE_SIZE[:2], device=d)/2).all())
                 resting = bool(support[j] > .5) and float(obj_speed[j]) < .05
@@ -701,7 +774,7 @@ def summarize(records):
                     placed_error_xy_median_m=round(float(np.median(errs)), 3) if errs else None,
                     outcomes={o: sum(1 for r in rs if r.get('outcome') == o) for o in sorted({r.get('outcome') for r in rs})})
     s = dict(all=stats(rows))
-    for v in ('rest', 'hover', 'nearest'):
+    for v in ('rest', 'hover', 'nearest', 'scripted'):
         s['goal_'+v] = stats([r for r in rows if r['place_goal'] == v])
     for t in TYPES:
         s[t] = stats([r for r in rows if r['type'] == t])
@@ -788,7 +861,7 @@ def render(args, mj_model, meta, records):
                 # object target as a ghost of the object: M's own goal while grasping (blue), the table-B
                 # placement goal while placing (green); C has no object target
                 ghost = None
-                if ph in ('place', 'release'):
+                if ph in ('place', 'release', 'lower', 'open'):
                     ghost = (tr['goal'][f, k], (.1, .9, .2, .35))
                 elif ph == 'grasp' and 'm_goal' in tr:
                     ghost = (tr['m_goal'][f, k], (.2, .45, 1., .35))
@@ -805,15 +878,19 @@ def render(args, mj_model, meta, records):
             img = Image.fromarray(np.concatenate(views, 1))
             draw = ImageDraw.Draw(img)
             cmd = tr['command'][f, k]
-            policy = 'C (carry)' if ph in ('settle', 'walk', 'final') else ('M (manipulation)' if ph in ('grasp', 'place') else ph)
+            policy = {'settle': 'C (carry)', 'walk': 'C (carry)', 'final': 'C (carry)', 'grasp': 'M (manipulation)',
+                      'place': 'M-place', 'lower': 'C + scripted arm lowering', 'open': 'C body, scripted finger opening'}.get(ph, ph)
             status = (f"t={tr['time_s'][f]:5.2f}s  phase {ph}  policy {policy}  cmd vx {cmd[0]:+.2f} vy {cmd[1]:+.2f} wz {cmd[2]:+.2f}"
                       f"  lifted {'yes' if tr['lifted'][f, k] else 'no'}  fingers on object {int(tr['touching'][f, k])}"
                       f"  object-table force {tr['support'][f, k]:.1f} N")
-            target = tr['goal'][f, k] if ph in ('place', 'release') else (tr['m_goal'][f, k] if ph == 'grasp' and 'm_goal' in tr else None)
+            target = (tr['goal'][f, k] if ph in ('place', 'release', 'lower', 'open') else
+                      (tr['m_goal'][f, k] if ph == 'grasp' and 'm_goal' in tr else None))
             if target is not None and 'obj' in tr:
                 o = tr['obj'][f, k]
                 ang = 2*math.degrees(math.acos(min(1., abs(float(np.dot(o[3:], target[3:]))))))
-                which = 'placement goal (resting pose on table B)' if ph in ('place', 'release') else "M's goal (its task target)"
+                which = {'place': 'placement goal (resting pose on table B)', 'release': 'placement goal (resting pose on table B)',
+                         'lower': 'set-down target (straight below, table top)', 'open': 'set-down target (straight below, table top)'
+                         }.get(ph, "M's goal (its task target)")
                 target_txt = (f"target: {which}   object -> target {100*np.linalg.norm(o[:3]-target[:3]):5.1f} cm"
                               f" (height {100*(o[2]-target[2]):+5.1f} cm), rotation {ang:4.0f} deg")
             elif ph in ('settle', 'walk', 'final'):
@@ -857,6 +934,11 @@ def main():
     p.add_argument('--place-limit', type=float, default=15.)
     p.add_argument('--release-s', type=float, default=2.)
     p.add_argument('--place-goal', choices=('rest', 'hover', 'both', 'nearest'), default='both')
+    p.add_argument('--place-mode', choices=('policy', 'scripted'), default='policy',
+                   help="'scripted': C keeps control at table B, scripted arm lowering until table support, then the fingers open")
+    p.add_argument('--lower-s', type=float, default=2., help='scripted: duration of the arm lowering profile')
+    p.add_argument('--lower-overshoot', type=float, default=.02, help='scripted: target below the table top (m)')
+    p.add_argument('--lower-hold-s', type=float, default=1., help='scripted: wait after the profile for table support')
     p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (for --place-goal nearest)')
     p.add_argument('--grasp-min-fingers', type=int, default=1)
     p.add_argument('--video-per-type', type=int, default=2)
