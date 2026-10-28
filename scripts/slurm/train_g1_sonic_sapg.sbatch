@@ -131,6 +131,12 @@ if [[ "${BACKEND:-isaac}" == mjlab && "${FROZEN_PRETRAINED_SONIC:-0}" == 1 && "$
     extra_args+=(--hand-surface-obs)
 fi
 if [[ -n "${SGS_STATE:-}" ]]; then extra_args+=(--sgs-state "$SGS_STATE"); fi
+# Table observation and table pose randomization (wholebody/table_obs.py; opt-in, 2026-10-28)
+if [[ "${TABLE_OBS:-0}" == 1 ]]; then extra_args+=(--table-obs); fi
+if [[ "${NO_TABLE_OBS_NOISE:-0}" == 1 ]]; then extra_args+=(--no-table-obs-noise); fi
+if [[ -n "${TABLE_HEIGHT_RANGE:-}" ]]; then extra_args+=(--table-height-range "$TABLE_HEIGHT_RANGE"); fi
+if [[ -n "${TABLE_XY_RANGE:-}" ]]; then extra_args+=(--table-xy-range "$TABLE_XY_RANGE"); fi
+if [[ -n "${TABLE_YAW_RANGE_DEG:-}" ]]; then extra_args+=(--table-yaw-range-deg "$TABLE_YAW_RANGE_DEG"); fi
 if [[ -n "${DIAGNOSTIC_CAPTURE_SECONDS:-}" ]]; then
     extra_args+=(--diagnostic-capture-seconds "$DIAGNOSTIC_CAPTURE_SECONDS")
 fi
