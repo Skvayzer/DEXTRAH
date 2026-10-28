@@ -208,6 +208,46 @@ class NeurosimTests(unittest.TestCase):
         rep = uncertainty_report(ens, t, torch.arange(8), horizons=(1, 4), samples=64, generator=torch.Generator().manual_seed(0))
         self.assertIn('aleatoric_pos', rep)
 
+    def test_counterfactual_pairs(self):
+        import tempfile
+        from pathlib import Path
+        from dextrah_lab.neurosim.pairs import difference_scales, load_pairs, pair_loss
+        G, K, T = 3, 4, 7                                   # rows t0-2 .. t0+H with H = 4
+        data, _ = synthetic(N=G*K)
+        data = {k: v[:T].clone() for k, v in data.items()}
+        data['done'][:] = 0; data['end'][:] = 0
+        model = HandObjectWorldModel(Layout(hand=4), hidden=(32, 32))
+        model.dt = 1/60
+        with tempfile.TemporaryDirectory() as d:
+            for rnd in range(2):
+                raw = {k: v.clone() for k, v in data.items()}
+                for g in range(G):                          # copies identical to their baseline
+                    for c in range(1, K):
+                        for k_ in raw:
+                            raw[k_][:, g*K+c] = raw[k_][:, g*K]
+                raw.update(group_end=torch.zeros(G, dtype=torch.bool), bps=torch.randn(G*K, 128),
+                           asset=torch.arange(G*K) % 5)
+                torch.save(raw, Path(d)/f'round_{rnd:03d}.pt')
+            tp = load_pairs(d, exo_mode='post', lowpass_tau=None, labels='lost', dt=1/60, copies=K)
+        self.assertEqual(tp['state'].shape[:2], (T, 2*G*K))
+        self.assertEqual(tp['group_end'].shape, (2*G,))
+        t = {k: v for k, v in tp.items() if k not in ('copies', 'group_end', 'asset')}
+        rows = (torch.randint(1, T, (200,)), torch.randint(0, 2*G*K, (200,)))
+        model.fit_normalizers(t, rows)
+        groups = torch.arange(2*G)
+        ss, sf = difference_scales(tp, groups, T-2, torch.full((model.L.state,), 1e-3), torch.full((model.L.forces,), 1e-3))
+        self.assertTrue(torch.allclose(ss, torch.full_like(ss, 1e-3)))     # identical copies: only the floor
+        # identical copies with identical actions: predicted and simulated differences are both zero
+        loss, logs = pair_loss(model, tp, groups, T-2, ss, sf)
+        self.assertLess(float(loss), 1e-8)
+        # a perturbed copy: a non-zero, differentiable loss
+        tp['state'][2:, 1] += .01
+        tp['action'][2:, 1] += .3
+        loss, logs = pair_loss(model, tp, groups[:1].repeat(16), T-2, ss, sf, generator=torch.Generator().manual_seed(0))
+        self.assertTrue(math.isfinite(float(loss)) and float(loss) > 0)
+        loss.backward()
+        self.assertTrue(all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()))
+
     def test_auc(self):
         self.assertAlmostEqual(auc(torch.tensor([.1, .4, .35, .8]), torch.tensor([0, 0, 1, 1])), .75)
         self.assertAlmostEqual(auc(torch.tensor([1., 1., 1., 1.]), torch.tensor([0, 1, 0, 1])), .5)

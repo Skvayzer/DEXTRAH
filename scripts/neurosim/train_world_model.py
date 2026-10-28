@@ -34,6 +34,13 @@ def main():
     p.add_argument('--test-fraction', type=float, default=.1)
     p.add_argument('--eval-every', type=int, default=2000)
     p.add_argument('--max-chunks', type=int, default=None)
+    p.add_argument('--init', type=Path, default=None,
+                   help='fine-tune this world_model.pt: its weights, normalisers, held-out objects, exo mode, low-pass, labels, widths')
+    p.add_argument('--pairs', type=Path, default=None, help='paired counterfactual rounds (collect_counterfactual_pairs.py)')
+    p.add_argument('--pair-copies', type=int, default=8)
+    p.add_argument('--pair-weight', type=float, default=1.)
+    p.add_argument('--pair-batch', type=int, default=1024)
+    p.add_argument('--pair-test-fraction', type=float, default=.1, help='pair groups of this share of their objects held out')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--device', default='cuda:0')
     p.add_argument('--wandb', choices=['online', 'disabled'], default='online')
@@ -75,6 +82,13 @@ def train(args):
     torch.backends.cuda.matmul.allow_tf32 = True
     dev = args.device
     t0 = time.time()
+    init = torch.load(args.init, map_location='cpu', weights_only=False) if args.init else None
+    if init is not None:
+        # the fine-tuned model keeps the original's inputs, labels, widths and held-out objects
+        args.exo_mode, args.lowpass_tau, args.labels = init['exo_mode'], init['lowpass_tau'] or 0, init['labels']
+        args.hidden = ','.join(str(h) for h in init['hidden'])
+        if init.get('members', 0) or args.members:
+            raise ValueError('--init supports single models only')
     parts = []
     for directory in args.data:
         data, context = load_chunks(directory, fields=FIELDS, max_chunks=args.max_chunks)
@@ -87,7 +101,11 @@ def train(args):
     lowpass = 6 if args.lowpass_tau else 0
     layout = Layout(hand=int(t['state'].shape[-1]-15-lowpass)//2, actuated=int(t['action'].shape[-1]), bps=int(t['bps'].shape[-1]),
                     lowpass=lowpass, exo=int(t['exo'].shape[-1]))
-    train_mask, test_mask = split_envs(asset, args.test_fraction, args.seed)
+    if init is not None:
+        test_mask = torch.isin(asset, torch.tensor(init['test_assets']))
+        train_mask = ~test_mask
+    else:
+        train_mask, test_mask = split_envs(asset, args.test_fraction, args.seed)
     train_envs, test_envs = torch.nonzero(train_mask).flatten(), torch.nonzero(test_mask).flatten()
     stats = dict(rows=T, envs=N, transitions=int(T*N), train_envs=len(train_envs), test_envs=len(test_envs),
                  test_assets=int(torch.unique(asset[test_mask]).numel()), episode_ends=int(t['done'].sum()),
@@ -108,9 +126,33 @@ def train(args):
         loss_fn = lambda w, **kw: window_loss(model, w, args.k, **kw)
     model.dt = float(context['dt'])
     # normalisers from up to 2M training rows
-    m = min(2_000_000, T*len(train_envs))
-    rows = (torch.randint(1, T, (m,), generator=g).to(dev), train_envs.to(dev)[torch.randint(0, len(train_envs), (m,), generator=g).to(dev)])
-    model.fit_normalizers(t, rows)
+    if init is not None:
+        model.load_state_dict(init['state_dict'])
+    else:
+        m = min(2_000_000, T*len(train_envs))
+        rows = (torch.randint(1, T, (m,), generator=g).to(dev), train_envs.to(dev)[torch.randint(0, len(train_envs), (m,), generator=g).to(dev)])
+        model.fit_normalizers(t, rows)
+    tp = None
+    if args.pairs is not None:
+        from dextrah_lab.neurosim.pairs import difference_scales, load_pairs, pair_loss
+        K = args.pair_copies
+        tp = load_pairs(args.pairs, exo_mode=args.exo_mode, lowpass_tau=args.lowpass_tau or None, labels=args.labels,
+                        dt=float(context['dt']), copies=K)
+        base_asset = tp['asset'][::K]
+        usable = ~tp['group_end'] & ~torch.isin(base_asset, asset[test_mask].unique())
+        pair_assets = base_asset[usable].unique()
+        held = pair_assets[torch.randperm(len(pair_assets), generator=g)[:int(round(args.pair_test_fraction*len(pair_assets)))]]
+        pair_test = usable & torch.isin(base_asset, held)
+        pair_train_groups = torch.nonzero(usable & ~pair_test).flatten().to(dev)
+        pair_test_groups = torch.nonzero(pair_test).flatten().to(dev)
+        tp = {k: (v.to(dev) if torch.is_tensor(v) else v) for k, v in tp.items()}
+        k_pair = tp['state'].shape[0]-2
+        scale_state, scale_forces = difference_scales(tp, pair_train_groups, k_pair, 1e-2*model.norm_state.std,
+                                                      1e-2*model.norm_forces.std)
+        pair_stats = dict(groups=int(len(base_asset)), train_groups=len(pair_train_groups), test_groups=len(pair_test_groups),
+                          ended_groups=int((~usable).sum()), k=k_pair, test_objects=len(held))
+        print('NEUROSIM_PAIRS '+json.dumps(pair_stats), flush=True)
+        stats['pairs'] = pair_stats
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: .03+.97*.5*(1+math.cos(math.pi*min(i, args.iters)/args.iters)))
     history = []
@@ -137,6 +179,11 @@ def train(args):
             weight = None
         loss, logs = loss_fn(gather(t, s, e, args.k), lost_pos_weight=args.lost_pos_weight, window_weight=weight,
                              support_in_secure=args.support_in_secure)
+        if tp is not None:
+            gi = pair_train_groups[torch.randint(0, len(pair_train_groups), (args.pair_batch,), generator=g).to(dev)]
+            lp, plogs = pair_loss(model, tp, gi, k_pair, scale_state, scale_forces, generator=g)
+            loss = loss+args.pair_weight*lp
+            logs.update(plogs)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         grad = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.))
@@ -152,6 +199,10 @@ def train(args):
                 s, e = sample_windows(t, test_envs_d, args.k, args.batch, generator=g, device=dev)
                 test_loss, test_logs = loss_fn(gather(t, s, e, args.k), lost_pos_weight=args.lost_pos_weight,
                                                support_in_secure=args.support_in_secure)
+                if tp is not None and len(pair_test_groups):
+                    gi = pair_test_groups[torch.randint(0, len(pair_test_groups), (min(4096, 4*len(pair_test_groups)),), generator=g).to(dev)]
+                    _, pair_test_logs = pair_loss(model, tp, gi, k_pair, scale_state, scale_forces, generator=g)
+                    test_logs.update({f'heldout_{k}': v for k, v in pair_test_logs.items()})
             row = dict(iter=it, train_loss=round(float(loss), 5), test_loss=round(float(test_loss), 5),
                        test=dict((k, round(v, 5)) for k, v in test_logs.items()), wall_s=round(time.time()-t0, 1))
             history.append(row)

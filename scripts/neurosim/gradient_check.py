@@ -48,6 +48,8 @@ def main():
     p.add_argument('--randomization', choices=('off', 'training'), default='off',
                    help="the run config's per-step domain randomisation (action / observation delays, object-state "
                         "noise): 'off' (copies identical except for the perturbation; before 2026-10-28 it was on)")
+    p.add_argument('--held-out-only', action='store_true',
+                   help="states of the world model's held-out objects only (a model fine-tuned on paired data never saw them)")
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
     report = dict(completed=False, args={k: str(v) for k, v in vars(args).items()})
@@ -92,7 +94,11 @@ def run(args):
     dev, dt = env.device, env.step_dt
     g = torch.Generator().manual_seed(args.seed)
     configs = env._sgs.configs
-    chosen = torch.randperm(configs.numel(), generator=g)[:args.states].to(dev)
+    pool = torch.arange(configs.numel())
+    if args.held_out_only:
+        held = torch.tensor(torch.load(args.world_model, map_location='cpu', weights_only=False)['test_assets'])
+        pool = torch.nonzero(torch.isin(env._sgs.assets.cpu(), held)).flatten()
+    chosen = pool[torch.randperm(len(pool), generator=g)[:args.states]].to(dev)
     assigned = chosen.repeat_interleave(D*K)               # world w -> holding config index (into configs)
     env._sgs.eval_mask[:] = False
     env._sgs.sampler.sample = lambda k, generator=None: assigned[:k]
