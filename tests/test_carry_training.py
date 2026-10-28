@@ -35,6 +35,17 @@ class CarryTrainingTests(unittest.TestCase):
             opt.step()
             self.assertEqual(float(p), expected)
 
+    def test_critic_warmup_counts_from_the_resume_epoch(self):
+        p = nn.Parameter(torch.ones(1))
+        opt = torch.optim.SGD([p], lr=1.)
+        algo = SimpleNamespace(optimizer=opt, epoch_num=2487)
+        install_critic_warmup(algo, 2, start=2487)
+        for epoch, expected in ((2488, 1.), (2489, 1.), (2490, 0.)):
+            algo.epoch_num = epoch
+            p.grad = torch.ones(1)
+            opt.step()
+            self.assertEqual(float(p), expected)
+
     def test_critic_warmup_trains_policy_value_head_only(self):
         class Net(nn.Module):
             def __init__(self):

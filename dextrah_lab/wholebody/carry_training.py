@@ -44,8 +44,8 @@ def reset_all_value_normalizers(algo):
     return names
 
 
-def install_critic_warmup(algo, epochs):
-    """Freeze the policy for the first ``epochs`` epochs.
+def install_critic_warmup(algo, epochs, start=0):
+    """Freeze the policy for the first ``epochs`` epochs after epoch ``start`` (a resumed run: its resume epoch).
 
     The asymmetric critic has its own optimizer and keeps learning, so the new
     reward's value function settles before the copied policy is changed. The
@@ -60,7 +60,7 @@ def install_critic_warmup(algo, epochs):
     head = {id(p) for n, p in (model.named_parameters() if model is not None else ()) if n.split('.')[-2:-1] == ['value']}
 
     def step(self, *args, **kwargs):
-        if algo.epoch_num <= epochs:
+        if algo.epoch_num <= start+epochs:
             if not head:
                 return None
             for group in self.param_groups:

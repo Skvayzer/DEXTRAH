@@ -817,6 +817,12 @@ def main():
                     if previous.get(key) != contract[key]:
                         raise ValueError(f'Incompatible frozen-controller continuation: {key}')
             report['resume'] = resume_at_episode_boundary(algo, args.resume)
+            if args.critic_warmup_epochs and not args.mj_carry:
+                # A resumed run with a changed start distribution: frozen policy for the warm-up, counted from the
+                # resume epoch (the frozen-policy reference of scripts/table_stop_rule.py).
+                from dextrah_lab.wholebody.carry_training import install_critic_warmup
+                install_critic_warmup(algo, args.critic_warmup_epochs, start=int(algo.epoch_num))
+                report['resume']['critic_warmup'] = dict(epochs=args.critic_warmup_epochs, from_epoch=int(algo.epoch_num))
             if args.reset_best and eval_best is None:
                 # The parent's best return belongs to a different MDP; keeping
                 # it would block every best-checkpoint save in this run. The
