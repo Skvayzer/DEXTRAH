@@ -36,7 +36,14 @@ def mjlab_task_config(args):
     cfg = load_run_cfg(parent)
     cfg.scene.num_envs = args.num_envs
     cfg.bps_artifact_dir = str(args.output/'bps')
-    contract = verify_task_contract(load_yaml(Path(TOUCH_RUN)/'params/env_resolved.yaml'), cfg)
+    touch = load_yaml(Path(TOUCH_RUN)/'params/env_resolved.yaml')
+    if parent_contract.exists() and 'table' in json.loads(parent_contract.read_text()):
+        # The parent ran with the opt-in table randomization (recorded in its contract['table']) and saved its
+        # resolved task with it; check the task without it, the table options are re-applied from the arguments.
+        for key in ('table_reset_z_range', 'table_reset_xy_range_m', 'table_reset_yaw_range_deg'):
+            if key in touch['reset']:
+                setattr(cfg.reset, key, touch['reset'][key])
+    contract = verify_task_contract(touch, cfg)
     contract['task_config_source'] = str(parent/'params/env_resolved.yaml')
     if args.teacher_checkpoint is not None:
         # The teacher must have solved this same task (fails closed otherwise).
