@@ -850,10 +850,18 @@ def object_lowest_z(bank, a, pos, quat):
 
 def select_videos(records, spec):
     """World ids to film for --video-all: 'outcome:count,...' (outcome names as in worlds.json, prefix match), object
-    types interleaved within each outcome."""
+    types interleaved within each outcome; 'progress:k' = the k worlds that got furthest. Video-only runs:
+    --worlds 8 --video-all --video-select progress:2 (8 attempts, the rest of the env idle; ~10 min)."""
     chosen = []
     for i, item in enumerate(spec.split(',')):
         outcome, count = item.split(':')
+        if outcome == 'progress':
+            # the worlds that got furthest (placed, handed back, arrived, walked, grasped), for short video runs
+            rank = lambda r: (str(r.get('outcome', '')).startswith('placed'), 'handback_s' in r, 'arrived_s' in r,
+                              'walk_start_s' in r, 'grasp_s' in r, r.get('end_s', 0.))
+            pool = sorted((j for j in records if j not in chosen), key=lambda j: rank(records[j]), reverse=True)
+            chosen += pool[:int(count)]
+            continue
         pool = [j for j in sorted(records) if str(records[j].get('outcome', '')).startswith(outcome) and j not in chosen]
         order = TYPES[i % len(TYPES):]+TYPES[:i % len(TYPES)]          # a different first type per outcome
         by_type = {t: [j for j in pool if records[j]['type'] == t] for t in order}
