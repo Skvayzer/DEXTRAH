@@ -156,10 +156,13 @@ def run(args):
         if args.place_library is None:
             raise ValueError('--place-goal nearest needs --place-library')
         nearest_goals = PlacementGoals(env, args.place_library, 1., orientation='nearest')
-    video = []
-    for t in TYPES:
-        video += [int(j) for j in worlds if kind[j] == t][:args.video_per_type]
-    video = sorted(video)
+    if args.video_all:
+        video = sorted(int(j) for j in worlds)           # every world recorded; the filmed ones are picked by outcome
+    else:
+        video = []
+        for t in TYPES:
+            video += [int(j) for j in worlds if kind[j] == t][:args.video_per_type]
+        video = sorted(video)
 
     settings = SgsSettings(**dict(m_contract['sgs']['settings'], eval_pool_size=0))
     state = torch.load(args.m_checkpoint.with_suffix('.sgs.pt'), map_location='cpu', weights_only=False)
@@ -640,15 +643,28 @@ def run(args):
                 torch.save(handback_store, path)
                 handback.clear()
             if step % stride == 0 and len(video):
+                origin = env.scene.env_origins[vid]
                 frames.append(dict(time_s=t, qpos=a(env.sim.data.qpos[vid]),
-                                   table=a(env.table.data.root_pos_w[vid]-env.scene.env_origins[vid]),
-                                   goal=a(goal_b[vid]), phase=a(phase[vid]), command=command[video].copy(),
+                                   table=a(env.table.data.root_pos_w[vid]-origin),
+                                   goal=a(goal_b[vid]),
+                                   m_goal=a(torch.cat((env.goal_viz.data.root_pos_w[vid]-origin, env.goal_viz.data.root_quat_w[vid]), -1)),
+                                   obj=a(torch.cat((env.object.data.root_pos_w[vid]-origin, env.object.data.root_quat_w[vid]), -1)),
+                                   phase=a(phase[vid]), command=command[video].copy(),
                                    support=a(support[vid]), touching=a(touching[vid]), lifted=a(lifted[vid])))
     for j in worlds:
         j = int(j)
         records[j].update(table_a=a(table_a[j]).round(3).tolist(), table_b=a(table_b[j]).round(3).tolist())
         if int(phase[j]) != DONE:
             records[j].update(outcome='running_at_end_'+PHASES[int(phase[j])])
+    if frames and args.video_all:
+        # film by outcome: keep the trajectories of the selected worlds only
+        chosen = select_videos(records, args.video_select)
+        pos = [video.index(j) for j in chosen]
+        n_rec = len(video)
+        frames = [{k: (v[pos] if isinstance(v, np.ndarray) and v.ndim >= 1 and v.shape[0] == n_rec else v) for k, v in f.items()}
+                  for f in frames]
+        video = chosen
+        print('VIDEO_SELECT '+json.dumps({str(j): records[j].get('outcome') for j in chosen}), flush=True)
     if frames:
         np.savez_compressed(args.output/'trajectories.npz', **{k: np.stack([f[k] for f in frames]) for k in frames[0]})
     from dextrah_lab.mj.scene import object_indices
@@ -690,6 +706,24 @@ def summarize(records):
     for t in TYPES:
         s[t] = stats([r for r in rows if r['type'] == t])
     return s
+
+
+def select_videos(records, spec):
+    """World ids to film for --video-all: 'outcome:count,...' (outcome names as in worlds.json, prefix match), object
+    types interleaved within each outcome."""
+    chosen = []
+    for i, item in enumerate(spec.split(',')):
+        outcome, count = item.split(':')
+        pool = [j for j in sorted(records) if str(records[j].get('outcome', '')).startswith(outcome) and j not in chosen]
+        order = TYPES[i % len(TYPES):]+TYPES[:i % len(TYPES)]          # a different first type per outcome
+        by_type = {t: [j for j in pool if records[j]['type'] == t] for t in order}
+        picked = []
+        while len(picked) < int(count) and any(by_type.values()):
+            for t in order:
+                if by_type[t] and len(picked) < int(count):
+                    picked.append(by_type[t].pop(0))
+        chosen += picked
+    return chosen
 
 
 def render(args, mj_model, meta, records):
@@ -751,14 +785,21 @@ def render(args, mj_model, meta, records):
                         mujoco.mjv_initGeom(sc.geoms[sc.ngeom], int(mujoco.mjtGeom.mjGEOM_BOX), np.array(TABLE_SIZE)/2, pos,
                                             np.eye(3).flatten(), np.array(rgba, dtype=np.float32))
                         sc.ngeom += 1
+                # object target as a ghost of the object: M's own goal while grasping (blue), the table-B
+                # placement goal while placing (green); C has no object target
+                ghost = None
                 if ph in ('place', 'release'):
-                    gp, gq = tr['goal'][f, k, :3], tr['goal'][f, k, 3:]
+                    ghost = (tr['goal'][f, k], (.1, .9, .2, .35))
+                elif ph == 'grasp' and 'm_goal' in tr:
+                    ghost = (tr['m_goal'][f, k], (.2, .45, 1., .35))
+                if ghost is not None:
+                    gp, gq = ghost[0][:3], ghost[0][3:]
                     R = quat_mat(gq)
                     for s in range(4):
                         if not ob['used'][a, s] or sc.ngeom >= sc.maxgeom:
                             continue
                         mujoco.mjv_initGeom(sc.geoms[sc.ngeom], int(slot_type[s]), ob['size'][a, s], gp+R @ ob['pos'][a, s],
-                                            (R @ quat_mat(ob['quat'][a, s])).flatten(), np.array([.1, .9, .2, .3], dtype=np.float32))
+                                            (R @ quat_mat(ob['quat'][a, s])).flatten(), np.array(ghost[1], dtype=np.float32))
                         sc.ngeom += 1
                 views.append(renderer.render())
             img = Image.fromarray(np.concatenate(views, 1))
@@ -768,11 +809,23 @@ def render(args, mj_model, meta, records):
             status = (f"t={tr['time_s'][f]:5.2f}s  phase {ph}  policy {policy}  cmd vx {cmd[0]:+.2f} vy {cmd[1]:+.2f} wz {cmd[2]:+.2f}"
                       f"  lifted {'yes' if tr['lifted'][f, k] else 'no'}  fingers on object {int(tr['touching'][f, k])}"
                       f"  object-table force {tr['support'][f, k]:.1f} N")
-            draw.rectangle((0, 0, img.width, 30), fill=(0, 0, 0))
+            target = tr['goal'][f, k] if ph in ('place', 'release') else (tr['m_goal'][f, k] if ph == 'grasp' and 'm_goal' in tr else None)
+            if target is not None and 'obj' in tr:
+                o = tr['obj'][f, k]
+                ang = 2*math.degrees(math.acos(min(1., abs(float(np.dot(o[3:], target[3:]))))))
+                which = 'placement goal (resting pose on table B)' if ph in ('place', 'release') else "M's goal (its task target)"
+                target_txt = (f"target: {which}   object -> target {100*np.linalg.norm(o[:3]-target[:3]):5.1f} cm"
+                              f" (height {100*(o[2]-target[2]):+5.1f} cm), rotation {ang:4.0f} deg")
+            elif ph in ('settle', 'walk', 'final'):
+                target_txt = 'target: none (C holds the grasp; the arm keeps its grasp-time angles)'
+            else:
+                target_txt = ''
+            draw.rectangle((0, 0, img.width, 44), fill=(0, 0, 0))
             draw.text((6, 2), title, fill=(255, 255, 255), font=font)
             draw.text((6, 16), status, fill=(255, 230, 120), font=font)
+            draw.text((6, 30), target_txt, fill=(150, 220, 255), font=font)
             note = ('one simulated table per world: after the back-off it moves to table B (solid); translucent: the other position.'
-                    '  green: placement goal')
+                    '  blue ghost: M goal while grasping   green ghost: placement goal')
             draw.text((6, img.height-14), note, fill=(255, 255, 255), font=font)
             writer.append_data(np.asarray(img))
         writer.close()
@@ -807,6 +860,10 @@ def main():
     p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (for --place-goal nearest)')
     p.add_argument('--grasp-min-fingers', type=int, default=1)
     p.add_argument('--video-per-type', type=int, default=2)
+    p.add_argument('--video-all', action='store_true',
+                   help='record every world and film --video-select worlds by outcome after the run (successes and failures)')
+    p.add_argument('--video-select', default='placed:4,no_release:2,dropped_place:1,released_not_placed:1,dropped_walk:1,'
+                   'dropped_settle:1,no_arrival:1,no_grasp:1,ended_grasp:1', help="--video-all: 'outcome:count,...'")
     p.add_argument('--fps', type=int, default=30)
     p.add_argument('--width', type=int, default=640)
     p.add_argument('--height', type=int, default=480)
