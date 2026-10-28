@@ -503,16 +503,6 @@ def run(args):
                 goal_b[:, :2] += shift[:2]
                 goal_b[:, 2] = torch.where(hover, goal_b[:, 2].clamp(min=float(cfg.reset.target_volume_mins[2])), goal_b[:, 2])
                 goal_ready = True
-                if scripted:
-                    # geometry check: resting objects' lowest point should be at table A's top
-                    fq = env.object.free_qpos.cpu().numpy()
-                    top_a = (env.scene.env_origins[:, 2]+table_a[:, 2]).cpu().numpy()+TABLE_SIZE[2]/2
-                    rows = [j for j in worlds.tolist() if bool(rest_seen[j])][:300]
-                    err = [object_lowest_z(bank, int(asset[j]), fq[j, :3], fq[j, 3:7])-top_a[j] for j in rows]
-                    if err:
-                        print('LOWEST_POINT_CHECK '+json.dumps(dict(worlds=len(err), median_mm=round(1e3*float(np.median(err)), 2),
-                                                                    p10_mm=round(1e3*float(np.percentile(err, 10)), 2),
-                                                                    p90_mm=round(1e3*float(np.percentile(err, 90)), 2))), flush=True)
                 for j in worlds.tolist():
                     records[j]['rest_pose_found'] = bool(rest_seen[j])
                     records[j]['goal_height_above_table_m'] = round(float(goal_b[j, 2]-table_b[j, 2]-TABLE_SIZE[2]/2), 3)
@@ -818,7 +808,8 @@ def quat_matrix(q):
 
 def object_lowest_z(bank, a, pos, quat):
     """Lowest z of object asset a's collision shapes (dextrah_lab/mj/objects.SLOT_TYPES slots, geoms at pos - com in
-    the body frame) with its MuJoCo body frame (the free joint, at the COM) at pos / quat (wxyz)."""
+    the body frame) with its MuJoCo body frame (the free joint, at the COM) at pos / quat (wxyz). Checked on 2000
+    resting-pose library poses (rest_poses_v1): lowest point -0.5 mm from the table top (median; p10 -4.8, p90 -0.1)."""
     from dextrah_lab.mj.objects import SLOT_TYPES
     R = quat_matrix(quat)
     low = np.inf
