@@ -705,9 +705,14 @@ def main():
                               round(float(cfg.reset.table_reset_z)+.15+float(cfg.reset.table_reset_z_range), 3)],
                 xy_range_m=list(cfg.reset.table_reset_xy_range_m), yaw_range_deg=float(cfg.reset.table_reset_yaw_range_deg),
                 goals_follow_table=bool(getattr(cfg.sonic_body, 'goals_follow_table', False)),
-                sgs_starts=('every restored start gets a table height sampled uniformly over the range: resting starts '
-                            'move object, lift reference and goal with the table (robot pose kept); held starts keep the '
-                            'table top >= 5 cm below the object\'s lowest keypoint; success logged per table-top bin'
+                sgs_starts=('the table height of every training start is drawn first, uniformly over the range; resting '
+                            'starts move object, lift reference and goal with the table (robot pose kept); a held start '
+                            'that does not fit the drawn height (table top within 3 cm of the lowest object keypoint, '
+                            'stored goal outside 0.10-0.28 m above the top, or a robot geom deeper in the table or within '
+                            '3 cm above its top than in the stored state: CPU MuJoCo mask per 1 cm of table height) is '
+                            're-drawn from the sampler (8 tries), then replaced by a resting start; outcomes are credited '
+                            'to the start that ran; success, knock-off and start mix logged per start family x '
+                            'table-top bin; evaluation: validated fresh resting starts, uniform heights'
                             if getattr(cfg.sonic_body, 'sgs_table_heights', False) else None))
             changes = []
             if table is not None:

@@ -155,11 +155,15 @@ class SgsTableHeightTests(unittest.TestCase):
         self.assertTrue(torch.allclose(lowest_keypoint_z(flip, offsets), torch.full((4,), .95), atol=1e-6))
 
     def fake_task(self, n_cfg=8):
-        """Configurations 0-3 resting, 4-7 held (object lowest keypoint 0.92 m; goals 1.00 m)."""
+        """Configurations 0-3 resting, 4-7 held (object lowest keypoint 0.92 m; goals 1.00 m); held 6-7 have a
+        robot geom over the table down to 0.85 m (palm-up grasp)."""
         from dextrah_lab.sgs.mj_task import FAMILIES, HEIGHT_BINS, MjSgsTask
         pose = torch.tensor([[0., 0., .95, 1., 0., 0., 0.]]).repeat(n_cfg, 1)
         goal = torch.tensor([[0., 0., 1.0, 1., 0., 0., 0.]]).repeat(n_cfg, 1)
         cfg = dict(table_z=torch.full((n_cfg,), .65), object_pose=pose, goal_pose=goal, asset=torch.zeros(n_cfg, dtype=torch.long))
+        fit_tops = torch.arange(21)*.01+.70
+        table_fit = torch.ones(n_cfg, 21, dtype=torch.bool)
+        table_fit[6:, 13:] = False                                  # robot clear of tables up to a 0.82 m top
         family = torch.tensor([0]*4+[1]*4)
         g = torch.Generator().manual_seed(0)
 
@@ -171,16 +175,17 @@ class SgsTableHeightTests(unittest.TestCase):
         me = types.SimpleNamespace(cfg=cfg, family=family, tab=dict(keypoints=torch.tensor([[[0., 0., -.03], [0., 0., .03]]])),
                                    goal_band=(.10, .28), table_lo=.55, table_hi=.75, device='cpu', generator=g,
                                    fit_stats=dict(held_drawn=0., held_rejected=0., fallback=0.), sampler=Sampler(),
-                                   blocks={'reaching': (0, 4), 'stable_grasp': (4, 8)})
+                                   blocks={'reaching': (0, 4), 'stable_grasp': (4, 8)}, fit_tops=fit_tops, table_fit=table_fit)
         me._fits = lambda k, z: MjSgsTask._fits(me, k, z)
         return me, MjSgsTask, FAMILIES
 
     def test_fits(self):
         me, T, _ = self.fake_task()
-        k = torch.tensor([0, 4, 4, 4])
-        z = torch.tensor([.75, .55, .65, .72])                    # table tops 0.90, 0.70, 0.80, 0.87
-        # resting always fits; held: top <= 0.92 - 0.05 = 0.87 and goal (1.00) 0.10-0.28 above the top
-        self.assertEqual(T._fits(me, k, z).tolist(), [True, False, True, True])   # 0.70 top: goal 0.30 above (out of band)
+        k = torch.tensor([0, 4, 4, 4, 4, 6, 6])
+        z = torch.tensor([.75, .55, .65, .735, .75, .665, .69])   # table tops 0.90, 0.70, 0.80, 0.885, 0.90, 0.815, 0.84
+        # resting always fits; held: top <= min(object 0.92, robot) - 0.03 and goal (1.00) 0.10-0.28 above the top
+        # (0.70 top: goal 0.30 above, out of the band; config 6: its robot clearance mask ends at a 0.82 top)
+        self.assertEqual(T._fits(me, k, z).tolist(), [True, False, True, True, False, True, False])
 
     def test_heights_drawn_first_independent_of_start_type(self):
         me, T, _ = self.fake_task()
@@ -198,8 +203,56 @@ class SgsTableHeightTests(unittest.TestCase):
         self.assertGreater(float(top.min()), .699)
         self.assertLess(float(top.max()), .901)
         self.assertAlmostEqual(float(top.mean()), .80, delta=.005)
-        self.assertTrue(bool(((top[held] >= .72-1e-6) & (top[held] <= .87+1e-6)).all()))
+        self.assertTrue(bool(((top[held] >= .72-1e-6) & (top[held] <= .89+1e-6)).all()))
+        palm_up = c >= 6
+        self.assertTrue(bool((top[palm_up] <= .82+1e-6).all()))
         self.assertGreater(me.fit_stats['held_rejected'], 0.)
+
+    def test_table_fit_mask(self):
+        """A hand capsule above the table (lowest point 0.93 m) blocks table tops within 3 cm of it; a leg 2 cm beside
+        the box face (side gap, horizontal normal) blocks nothing."""
+        import mujoco
+        import numpy as np
+        from dextrah_lab.sgs.mj_task import table_fit_mask
+        xml = """<mujoco><worldbody>
+          <body name='base' mocap='true' pos='0 0 .6'><body name='table' pos='0 0 .05'><geom type='box' size='.2 .2 .15'/></body></body>
+          <body name='hand' pos='0 0 .95'><freejoint/><geom type='capsule' size='.02 .05' quat='.7071 0 .7071 0'/></body>
+          <body name='leg' pos='.27 0 .5'><freejoint/><geom type='box' size='.05 .05 .2'/></body>
+        </worldbody></mujoco>"""
+        m = mujoco.MjModel.from_xml_string(xml)
+        tops = np.array([.70, .80, .89, .91, .95])
+        robot = [m.body('hand').id, m.body('leg').id]
+        q, stored = m.qpos0[None].copy(), np.array([.80])
+        mask, on_table = table_fit_mask(m, q, tops, stored, robot, m.body('table').id, .03)
+        self.assertEqual(mask[0].tolist(), [True, True, True, False, False])
+        self.assertFalse(bool(on_table[0]))
+        only_leg, _ = table_fit_mask(m, q, tops, stored, [m.body('leg').id], m.body('table').id, .03)
+        self.assertTrue(bool(only_leg.all()))
+        # the hand 1 cm above its stored table (top 0.92): lower tables fit, any raise does not
+        mask, _ = table_fit_mask(m, q, np.array([.80, .92, .925]), np.array([.92]), robot, m.body('table').id, .03)
+        self.assertEqual(mask[0].tolist(), [True, True, False])
+
+    def test_table_fit_mask_stored_contact(self):
+        """A hip leaning 1 mm into the table's side face when stored: the same contact at other heights is not new;
+        a table lowered onto a hand under its bottom is."""
+        import mujoco
+        import numpy as np
+        from dextrah_lab.sgs.mj_task import table_fit_mask
+        xml = """<mujoco><worldbody>
+          <body name='base' mocap='true' pos='0 0 .65'><body name='table'><geom type='box' size='.2 .2 .15'/></body></body>
+          <body name='hip' pos='.249 0 .6'><freejoint/><geom type='box' size='.05 .05 .05'/></body>
+          <body name='hand' pos='0 0 .43'><freejoint/><geom type='sphere' size='.02'/></body>
+        </worldbody></mujoco>"""
+        m = mujoco.MjModel.from_xml_string(xml)
+        q = m.qpos0[None].copy()
+        tops = np.array([.70, .74, .80, .85])
+        mask, on_table = table_fit_mask(m, q, tops, np.array([.80]), [m.body('hip').id], m.body('table').id, .03)
+        self.assertTrue(bool(on_table[0]))
+        self.assertTrue(bool(mask.all()))
+        # hand (top of the sphere at 0.45) under the box bottom (0.50 at a 0.80 top): bottom 0.40-0.44 cuts it
+        mask, on_table = table_fit_mask(m, q, tops, np.array([.80]), [m.body('hand').id], m.body('table').id, .03)
+        self.assertFalse(bool(on_table[0]))
+        self.assertEqual(mask[0].tolist(), [False, False, True, True])
 
     def test_worst_bin(self):
         from dextrah_lab.sgs.mj_task import _Rolling, _WorstBin

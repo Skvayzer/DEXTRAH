@@ -71,6 +71,30 @@ class SgsEvalBestTests(unittest.TestCase):
             self.assertAlmostEqual(record['value'], 3.5)
             self.assertIn(('sgs/best_eval_goals_reached_count', 3.5, 50), algo.writer.scalars)
 
+    def test_keeps_the_latest_bests_with_side_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            stats = {'any_goal_success_rate': _Rolling(2, 'cpu')}
+            env = SimpleNamespace(_sgs=SimpleNamespace(eval_stats=stats))
+            algo = Algo(root)
+            saved = algo.save
+
+            def save(path, override_state=None):
+                saved(path)
+                for ext in ('.sgs.pt', '.tablenorm.json'):
+                    open(path+ext, 'w').close()
+            algo.save = save
+            best = SgsEvalBest(env, 'sgs_eval_success', min_interval_epochs=1, keep_top=3)
+            best.after_init(algo)
+            best.disable_reward_best()
+            for epoch, value in zip(range(101, 106), (.1, .2, .3, .4, .5)):
+                stats['any_goal_success_rate'].add(torch.tensor([value, value]))
+                best.after_print_stats(epoch, epoch, 0.)
+            files = sorted(os.listdir(os.path.join(root, 'best')))
+            expected = [f'best_epoch{e}{x}' for e in (103, 104, 105) for x in ('.pth', '.sgs.pt', '.tablenorm.json')]
+            self.assertEqual(files, sorted(expected+['best_eval.json', 'model.pth']))
+            record = json.loads(open(os.path.join(root, 'best', 'best_eval.json')).read())
+            self.assertEqual([k['epoch'] for k in record['kept']], [103, 104, 105])
+
     def test_rejects_unknown_metric(self):
         with self.assertRaises(ValueError):
             SgsEvalBest(None, 'reward')

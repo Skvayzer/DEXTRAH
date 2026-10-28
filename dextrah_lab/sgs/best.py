@@ -7,10 +7,14 @@ checkpoint (same file and best/model.pth link as rl_games) when a rolling
 evaluation statistic of the fresh-rho evaluation envs (MjSgsTask.eval_stats,
 full window only) reaches a new maximum, at most once per ``min_interval_epochs`` (after a restart the window
 refills with short episodes first, so the statistic climbs for a while).
+The ``keep_top`` latest bests (= the highest values: every new best beats all earlier ones) are also kept as
+best/best_epoch<N>.pth with their side files (.sgs.pt, .tablenorm.json): the maximum over many noisy evaluations
+is biased upward, so the final choice re-evaluates them with the deterministic evaluation script on fresh starts.
 """
 import json
 import os
 from pathlib import Path
+import shutil
 from types import MethodType
 
 from rl_games.algos_torch import torch_ext
@@ -21,12 +25,13 @@ METRICS = {'sgs_eval_goals': 'goals_reached_count', 'sgs_eval_success': 'any_goa
 
 
 class SgsEvalBest:
-    def __init__(self, env, metric, delay_epochs=0, min_interval_epochs=25):
+    def __init__(self, env, metric, delay_epochs=0, min_interval_epochs=25, keep_top=3):
         if metric not in METRICS:
             raise ValueError(f'Unknown SGS best metric {metric}; choose from {sorted(METRICS)}')
         self.env, self.metric, self.key, self.delay = env, metric, METRICS[metric], int(delay_epochs)
         self.algo, self.best, self.start_epoch = None, float('-inf'), None
         self.min_interval, self.last_save_epoch = int(min_interval_epochs), None
+        self.keep_top, self.kept = int(keep_top), []
 
     def after_init(self, algo):
         self.algo = algo
@@ -67,8 +72,21 @@ class SgsEvalBest:
         best_dir = os.path.join(algo.experiment_dir, 'best')
         torch_ext.safe_filesystem_op(os.makedirs, best_dir, exist_ok=True)
         torch_ext.safe_symlink(os.path.relpath(path+'.pth', start=best_dir), os.path.join(best_dir, 'model.pth'))
+        if self.keep_top > 0:
+            copies = []
+            for ext in ('.pth', '.sgs.pt', '.tablenorm.json'):
+                if os.path.exists(path+ext):
+                    copies.append(os.path.join(best_dir, f'best_epoch{int(epoch_num)}{ext}'))
+                    shutil.copy2(path+ext, copies[-1])
+            self.kept.append(dict(epoch=int(epoch_num), value=value, files=copies))
+            for old in self.kept[:-self.keep_top]:
+                for f in old['files']:
+                    if os.path.exists(f):
+                        os.remove(f)
+            self.kept = self.kept[-self.keep_top:]
         record = dict(metric=self.metric, value=value, epoch=int(epoch_num), frame=int(frame),
-                      eval={k: float(r.mean()) for k, r in stats.items()}, episodes_in_window=window.size)
+                      eval={k: float(r.mean()) for k, r in stats.items()}, episodes_in_window=window.size,
+                      kept=[dict(epoch=k['epoch'], value=k['value']) for k in self.kept])
         Path(best_dir, 'best_eval.json').write_text(json.dumps(record, indent=2))
         algo.writer.add_scalar(f'sgs/best_eval_{self.key}', value, frame)
         print(f'SGS_BEST_EVAL {self.key}={value:.4f} '+' '.join(f'{k}={v:.4f}' for k, v in record['eval'].items())

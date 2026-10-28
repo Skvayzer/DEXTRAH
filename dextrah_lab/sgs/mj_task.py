@@ -153,8 +153,90 @@ class SgsSettings:
 
 
 HEIGHT_BINS = 4              # table-height bins for the per-height success metrics
-HELD_TABLE_CLEARANCE = .05   # held starts fit a table whose top is at least this far below the object's lowest keypoint
+HELD_TABLE_CLEARANCE = .03   # held starts fit a table whose top is at least this far below the lowest object keypoint
+                             # and below every robot geom above the table (exact: table_fit_mask)
 HELD_FIT_TRIES = 8           # re-draws of a held start that does not fit its sampled table height
+TABLE_FIT_STEP = .01         # table-top grid of the robot clearance masks (m)
+RESTORE_CONTACT_N = .5       # robot-table normal force on the first step after a restore that counts as contact
+
+
+def table_mocap(m, table_body):
+    """(mocap id, z of the table body above its mocap ancestor): the table box is welded under a mocap body."""
+    b, dz = int(table_body), 0.
+    while int(m.body_mocapid[b]) < 0:
+        if b == 0:
+            raise RuntimeError('The table is expected to hang under a mocap body')
+        dz += float(m.body_pos[b][2])
+        b = int(m.body_parentid[b])
+    return int(m.body_mocapid[b]), dz
+
+
+PENETRATION_TOL = .001       # a table height may deepen a robot geom's table penetration by at most this
+
+
+class TableContacts:
+    """Robot-table contacts of robot states (CPU MuJoCo) with the table top at a given height; `margin` raises the
+    table geom's contact margin (contacts up to that distance are reported)."""
+
+    def __init__(self, m, robot_bodies, table_body, margin=0., table_xy=(0., 0.)):
+        import copy
+        import mujoco
+        self.mujoco = mujoco
+        self.m = copy.deepcopy(m)
+        table_geoms = np.nonzero(self.m.geom_bodyid == table_body)[0]
+        self.m.geom_margin[table_geoms] = margin
+        self.d = mujoco.MjData(self.m)
+        self.mocap, self.dz = table_mocap(self.m, table_body)
+        self.half = float(self.m.geom_size[table_geoms[0], 2])
+        self.is_table = np.zeros(self.m.ngeom, dtype=bool)
+        self.is_table[table_geoms] = True
+        self.is_robot = np.isin(self.m.geom_bodyid, np.asarray(robot_bodies))
+        self.xy = table_xy
+
+    def at(self, qpos, top):
+        """(robot geom, distance, above-the-top flag) of each robot-table contact; above = contact point at the top
+        face with a mostly vertical normal."""
+        d = self.d
+        d.qpos[:] = qpos
+        d.mocap_pos[self.mocap] = (self.xy[0], self.xy[1], float(top)-self.half-self.dz)
+        self.mujoco.mj_kinematics(self.m, d)
+        self.mujoco.mj_collision(self.m, d)
+        n = d.ncon
+        g1, g2 = d.contact.geom1[:n], d.contact.geom2[:n]
+        pair = (self.is_table[g1] & self.is_robot[g2]) | (self.is_table[g2] & self.is_robot[g1])
+        robot = np.where(self.is_table[g1], g2, g1)[pair]
+        above = (d.contact.pos[:n, 2] > float(top)-.005) & (np.abs(d.contact.frame[:n, 2]) > .5)
+        return robot, d.contact.dist[:n][pair], above[pair]
+
+    def penetration(self, qpos, top):
+        """(ngeom,) table penetration depth per robot geom (<= 0, 0 = none)."""
+        robot, dist, _ = self.at(qpos, top)
+        base = np.zeros(self.m.ngeom)
+        np.minimum.at(base, robot, np.minimum(dist, 0.))
+        return base
+
+
+def table_fit_mask(m, qpos, tops, stored_tops, robot_bodies, table_body, clearance, table_xy=(0., 0.)):
+    """Robot clearance of held states per table-top height, NO WORSE THAN THE STORED STATE (whose table top is
+    stored_tops[i]; M's held states lean on the table edge in about a fifth of the cases, < 2.2 mm deep):
+      * no robot geom penetrates the table more than PENETRATION_TOL deeper than at the stored table, and
+      * when the table is raised above its stored height, no robot geom is within `clearance` above its top
+        (side gaps to the box faces and gaps under the box bottom do not count).
+    Returns ((n, len(tops)) bool, (n,) bool: robot-table penetration at the stored table). A table contact
+    interval along the vertical is at least the box height (0.3 m) long, so two clear neighbouring grid heights
+    mean the heights between them are clear too."""
+    near = TableContacts(m, robot_bodies, table_body, margin=clearance, table_xy=table_xy)
+    out = np.zeros((len(qpos), len(tops)), dtype=bool)
+    stored_contact = np.zeros(len(qpos), dtype=bool)
+    for i in range(len(qpos)):
+        base = near.penetration(qpos[i], stored_tops[i])
+        stored_contact[i] = bool((base < 0).any())
+        for j, top in enumerate(tops):
+            robot, dist, above = near.at(qpos[i], top)
+            deeper = dist < base[robot]-PENETRATION_TOL
+            close = (float(top) > float(stored_tops[i])+1e-6) & (dist < clearance) & above
+            out[i, j] = not bool((deeper | close).any())
+    return out, stored_contact
 
 
 def lowest_keypoint_z(pose, offsets):
@@ -278,8 +360,9 @@ class MjSgsTask:
         # Table heights (opt-in, cfg.sonic_body.sgs_table_heights; 2026-10-28 placement review): the table height of
         # every training start is drawn first (uniform over the reset range), then the start: a held / near-goal
         # start that does not fit that height (table top within HELD_TABLE_CLEARANCE of the object's lowest
-        # keypoint, or its stored goal outside the goal band above that table) is re-drawn from the sampler, so
-        # the height stays independent of the start type. Resting starts move object, lift reference and goal
+        # keypoint, its stored goal outside the goal band above that table, or a robot geom deeper in the table /
+        # within HELD_TABLE_CLEARANCE above its top than in the stored state: table_fit_mask) is re-drawn from the
+        # sampler, so the height stays independent of the start type.  Startup check: SGS_TABLE_FIT_CHECK. Resting starts move object, lift reference and goal
         # with the table (robot pose kept); held starts keep object and goal, only the table moves. Success and
         # knock-off rate are logged per start family x table-top bin (train) and per bin (evaluation).
         rc = env.cfg.reset
@@ -299,6 +382,18 @@ class MjSgsTask:
         if self.table_heights:
             # best checkpoint by the worst table-height bin (BEST_METRIC=sgs_eval_table_worst)
             self.eval_stats['table_worst_bin'] = _WorstBin(self.height_eval)
+        # Robot clearance of held starts per table-top grid height (table_fit_mask, CPU MuJoCo; not saved:
+        # recomputed at startup and when a slot gets a new held state).
+        self.fit_tops = torch.arange(round((self.table_hi-self.table_lo)/TABLE_FIT_STEP)+1, device=self.device)*TABLE_FIT_STEP \
+            + self.table_lo+TABLE_SIZE[2]/2
+        self.table_fit = torch.zeros(N, len(self.fit_tops), dtype=torch.bool, device=self.device)
+        self.stored_contact = torch.zeros(N, dtype=torch.bool, device=self.device)   # robot on the table when stored
+        self.fit_known = torch.zeros(N, dtype=torch.bool, device=self.device)
+        # First step after a restore: robot-table contact rate of training starts (0 resting, 1 held).
+        self.contact_check = torch.full((n_env,), -1, dtype=torch.long, device=self.device)
+        self.restore_contact = [_Rolling(w, self.device) for _ in range(3)]   # resting, held new, held any
+        self.restore_contact_warned = 0
+        self.fit_check = {}
         self.steps = 0
         self.validated = torch.zeros(N, dtype=torch.bool, device=self.device)
         self.spawn_stats = dict(checked=0, valid=0, spawn_overlap=0, ejected=0, off_table=0, not_at_rest=0, max_nefc=0, max_nefc_other=0)
@@ -306,6 +401,10 @@ class MjSgsTask:
             self.load_state_dict(state)
         elif 'reaching' in settings.families:
             self._fill_reaching()
+        if self.table_heights:
+            held = torch.nonzero(self.filled & (self.family != FAMILIES.index('reaching'))).flatten()
+            self._table_fit_cpu(held[~self.fit_known[held]])
+            self._fit_check(held)
         # Evaluation starts: fresh rho (default) or a validated pool of fresh rho draws.
         self.eval_pool = None
         self.eval_current = torch.zeros(n_env, dtype=torch.long, device=self.device)
@@ -754,6 +853,7 @@ class MjSgsTask:
         if self.table_heights:
             b = torch.bucketize(env._table_z_per_env[ids], self.height_edges[1:-1])
             self.height_starts.index_put_((self.family[k], b), torch.ones(len(ids), device=self.device), accumulate=True)
+            self.contact_check[ids] = (~reach).long()
         if bool(reach.any()):
             r, kr = ids[reach], k[reach]
             env.robot.write_joint_state_to_sim(c['joint_pos'][kr], c['joint_vel'][kr], env_ids=r)
@@ -798,7 +898,9 @@ class MjSgsTask:
             top = table_z[held]+TABLE_SIZE[2]/2
             low = lowest_keypoint_z(c['object_pose'][kh], self.tab['keypoints'][c['asset'][kh]])
             goal = c['goal_pose'][kh, 2]-top
-            ok[held] = (top <= low-HELD_TABLE_CLEARANCE) & (goal >= self.goal_band[0]) & (goal <= self.goal_band[1])
+            x = ((top-self.fit_tops[0])/TABLE_FIT_STEP).clamp(0, len(self.fit_tops)-1)
+            robot = self.table_fit[kh, x.floor().long()] & self.table_fit[kh, x.ceil().long()]     # both grid neighbours clear
+            ok[held] = robot & (top <= low-HELD_TABLE_CLEARANCE) & (goal >= self.goal_band[0]) & (goal <= self.goal_band[1])
         return ok
 
     def _draw_heights(self, chosen):
@@ -827,6 +929,84 @@ class MjSgsTask:
             self.fit_stats['fallback'] += float(bad.numel())
         return chosen, heights
 
+    def _table_xy(self):
+        env = self.env
+        return (env.table.data.root_pos_w[0, :2]-env.scene.env_origins[0, :2]).tolist()
+
+    def _table_fit_cpu(self, slots):
+        """table_fit of the held states in slots (table_fit_mask on their stored qpos)."""
+        if slots.numel() == 0:
+            return
+        m = self.env.sim.mj_model
+        mask, stored = table_fit_mask(m, self.cfg['qpos'][slots].cpu().numpy().astype(np.float64), self.fit_tops.cpu().numpy(),
+                                      (self.cfg['table_z'][slots]+TABLE_SIZE[2]/2).cpu().numpy(),
+                                      self.env._contacts_cfg['robot_bodies'], int(m.body('table/box').id),
+                                      HELD_TABLE_CLEARANCE, self._table_xy())
+        self.table_fit[slots] = torch.as_tensor(mask, device=self.device)
+        self.stored_contact[slots] = torch.as_tensor(stored, device=self.device)
+        self.fit_known[slots] = True
+
+    def _fit_check(self, held, limit=4000):
+        """Startup check of the fit test: held starts at a random table height they fit (drawn uniformly over the
+        range, kept where _fits accepts it; between grid heights) must have no new or deeper robot-table
+        penetration than at their stored table (CPU MuJoCo, margin 0). Raises above 1%."""
+        if held.numel() == 0:
+            return
+        c, m = self.cfg, self.env.sim.mj_model
+        g = torch.Generator(device=self.device).manual_seed(0)
+        z = self.table_lo+(self.table_hi-self.table_lo)*torch.rand(len(held), device=self.device, generator=g)
+        fits = self._fits(held, z)
+        top = z+TABLE_SIZE[2]/2
+        goal = c['goal_pose'][held, 2]-top
+        in_band = (goal >= self.goal_band[0]) & (goal <= self.goal_band[1])
+        object_ok = top <= lowest_keypoint_z(c['object_pose'][held], self.tab['keypoints'][c['asset'][held]])-HELD_TABLE_CLEARANCE
+        sel = torch.nonzero(fits).flatten()
+        sel = sel[torch.randperm(len(sel), device=self.device, generator=g)[:limit]]
+        contacts = TableContacts(m, self.env._contacts_cfg['robot_bodies'], int(m.body('table/box').id), 0., self._table_xy())
+        q = c['qpos'][held[sel]].cpu().numpy().astype(np.float64)
+        tops, stored = top[sel].cpu().numpy(), (c['table_z'][held[sel]]+TABLE_SIZE[2]/2).cpu().numpy()
+        touching, depth = 0, 0.
+        for i in range(len(sel)):
+            base = contacts.penetration(q[i], stored[i])
+            robot, dist, _ = contacts.at(q[i], tops[i])
+            extra = dist-base[robot]
+            worse = extra < -PENETRATION_TOL
+            touching += int(worse.any())
+            depth = min(depth, float(extra[worse].min()) if worse.any() else 0.)
+        clear = self.table_fit[held].float().mean(0)
+        self.fit_check = dict(held=int(held.numel()), random_height=dict(fits=int(fits.sum()), goal_band_ok=int(in_band.sum()),
+                                                                         goal_band_and_object_ok=int((in_band & object_ok).sum())),
+                              checked=len(sel), new_or_deeper_penetration=int(touching), deepest_extra_mm=round(-1000*depth, 2),
+                              robot_on_table_when_stored=round(float(self.stored_contact[held].float().mean()), 3),
+                              robot_clear_share_by_top={f'{t:.2f}': round(v, 3) for t, v in
+                                                        zip(self.fit_tops[::4].tolist(), clear[::4].tolist())})
+        print('SGS_TABLE_FIT_CHECK '+json.dumps(self.fit_check), flush=True)
+        if touching > .01*max(len(sel), 1):
+            raise RuntimeError(f'Held starts penetrate the table deeper than when stored at a height they fit: {touching}/{len(sel)}')
+
+    def _check_restore_contact(self):
+        """Robot-table contact on the first step after a restore (normal force > RESTORE_CONTACT_N, any robot geom):
+        rolling rates of resting starts, of held starts with contact their stored state did not have, and of held
+        starts with any contact; warning when either of the first two exceeds 1%."""
+        env = self.env
+        ids = torch.nonzero(self.contact_check >= 0).flatten()
+        kind = self.contact_check[ids]
+        self.contact_check[ids] = -1
+        force = getattr(env, '_robot_table_force_step', None)
+        if force is None:
+            return
+        touch = force[ids] > RESTORE_CONTACT_N
+        k = self.current[ids].clamp_min(0)
+        new = touch & ~((kind == 1) & self.stored_contact[k])           # held: contact the stored state did not have
+        self.restore_contact[0].add(touch[kind == 0])
+        self.restore_contact[1].add(new[kind == 1])
+        self.restore_contact[2].add(touch[kind == 1])
+        rates = [float(r.mean()) if r.size else 0. for r in self.restore_contact]
+        if self.restore_contact[1].size >= 1000 and max(rates[:2]) > .01 and self.restore_contact_warned < 5:
+            self.restore_contact_warned += 1
+            print(f'SGS_TABLE_WARNING robot-table contact on the first step after a restore: resting {100*rates[0]:.1f}%, '
+                  f'held (new vs the stored state) {100*rates[1]:.1f}%, held (any) {100*rates[2]:.1f}%', flush=True)
+
     def _add_by_height(self, stats, table_z, values):
         b = torch.bucketize(table_z, self.height_edges[1:-1])
         for i, r in enumerate(stats):
@@ -836,6 +1016,8 @@ class MjSgsTask:
     def after_step(self):
         """Collect held states (until the families are full) and publish metrics.
         Called after rewards/dones, before done envs are reset."""
+        if self.table_heights and bool((self.contact_check >= 0).any()):
+            self._check_restore_contact()
         if not self.harvest_done:
             self._harvest()
         elif self.settings.reharvest_every and any(f in self.blocks for f in HARVESTED):
@@ -947,6 +1129,8 @@ class MjSgsTask:
                 maxs=rc.target_volume_maxs, scale=rc.target_volume_region_scale)
         c['goal_pose'][slots] = torch.cat((pos, quat), -1)
         self.filled[slots] = True
+        if self.table_heights:
+            self._table_fit_cpu(slots)                  # new held states: their robot clearance per table height
         if sequential:
             self.fill_count[family] += n
         else:
@@ -1025,6 +1209,8 @@ class MjSgsTask:
                 maxs=rc.target_volume_maxs, scale=rc.target_volume_region_scale)
         c['goal_pose'][slots] = torch.cat((pos, quat), -1)
         self.generation[slots], self.parent[slots], self.edited[slots] = gen, parents, True
+        self.table_fit[slots], self.fit_known[slots] = self.table_fit[parents], self.fit_known[parents]   # same state
+        self.stored_contact[slots] = self.stored_contact[parents]
         self.filled[slots] = True
         self._renew(slots)
         self._asset_index = None
@@ -1132,11 +1318,12 @@ class MjSgsTask:
             x[f'sgs/{f}/configs'] = float(self.fill_count[f])
         if self.table_heights:
             tops = (self.height_edges+TABLE_SIZE[2]/2).tolist()
-            share = self.height_starts/self.height_starts.sum().clamp_min(1.)
+            share = self.height_starts/self.height_starts.sum(0, keepdim=True).clamp_min(1.)   # start mix within each bin
             for j in range(HEIGHT_BINS):
                 name = f'sgs/table_top_{tops[j]:.2f}_{tops[j+1]:.2f}'
                 x[f'{name}/eval_success'] = self.height_eval[j].mean()
                 x[f'{name}/eval_knockoff'] = self.height_eval_knock[j].mean()
+                x[f'{name}/eval_episodes'] = torch.tensor(float(self.height_eval[j].size))   # in the rolling window
                 for i, f in enumerate(FAMILIES):
                     if f in self.train_stats:
                         x[f'{name}/{f}/train_success'] = self.height_train[(f, j)].mean()
@@ -1145,6 +1332,9 @@ class MjSgsTask:
             fs = self.fit_stats
             x['sgs/table_heights/held_rejected_first_draw'] = fs['held_rejected']/max(fs['held_drawn'], 1.)
             x['sgs/table_heights/fallback_to_resting'] = fs['fallback']
+            x['sgs/table_heights/restore_robot_table_contact_resting'] = self.restore_contact[0].mean()
+            x['sgs/table_heights/restore_robot_table_contact_held_new'] = self.restore_contact[1].mean()
+            x['sgs/table_heights/restore_robot_table_contact_held_any'] = self.restore_contact[2].mean()
         x['sgs/harvest_done'] = float(self.harvest_done)
         if self.settings.reharvest_every:
             x['sgs/reharvest/rounds'] = float(self.round)

@@ -369,6 +369,8 @@ class G1SonicTouchMjEnv:
         self.contacts = ContactReader(self.sim, self.sim.mj_model, pad_tensors=self.pad_tensors, **self._contacts_cfg)
         if getattr(self, '_table_obs', None) is not None:
             self.contacts.object_table = True        # the table block's critic force
+        if getattr(self.cfg.sonic_body, 'sgs_table_heights', False):
+            self.contacts.robot_table = True         # SGS: robot-table contact on the first step after a restore
         self.contacts.active_only = self._fast_step
 
     def enable_grasp_reward(self, scale, energy_scale=0.):
@@ -587,6 +589,8 @@ class G1SonicTouchMjEnv:
         self.touch_contact_w[:] = c['centroid_w']
         if 'body_table_force' in c:
             self._body_table_force_step = c['body_table_force']
+        if 'robot_table_force' in c:
+            self._robot_table_force_step = c['robot_table_force']
         self.touch_model.advance(self.touch_raw)
 
     def _get_dones(self):
