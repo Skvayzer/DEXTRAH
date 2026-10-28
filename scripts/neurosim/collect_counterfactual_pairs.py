@@ -99,7 +99,8 @@ def run(args):
     for rnd in range(args.rounds):
         chosen = allowed[torch.randperm(allowed.numel(), generator=gc)[:G].to(dev)]
         assigned['idx'] = chosen.repeat_interleave(K)
-        obs, _ = env.reset()
+        with torch.inference_mode():                              # env buffers are inference tensors after round 0
+            obs, _ = env.reset()
         ended[:] = False                                          # the reset records the previous round's worlds
         states = tuple(s.to(dev) for s in policy.get_default_rnn_state())
         leader = torch.zeros(n, 1, device=dev)
