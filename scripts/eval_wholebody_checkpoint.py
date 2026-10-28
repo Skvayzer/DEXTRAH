@@ -196,7 +196,13 @@ def main():
         coef = torch.tensor(COEF_IDS, device=device)[block]
         report.update(checkpoint_sha256=sha, epoch=int(payload['epoch']), frame=int(payload['frame']),
                       teacher=str(teacher), spawn_check=dict(task.spawn_stats), eval_pool=len(task.eval_pool['asset']))
-        print('EVAL_READY '+json.dumps({k: report[k] for k in ('epoch', 'frame', 'eval_pool')}), flush=True)
+        # Spawn validation leaves torch's cache full; MuJoCo Warp's captured graphs allocate from their own pool at
+        # launch (job 1636: out of memory on the first rollout step at 12000 envs).
+        torch.cuda.empty_cache()
+        free, total = torch.cuda.mem_get_info()
+        report['gpu_memory_gib'] = dict(free=round(free/2**30, 2), total=round(total/2**30, 2),
+                                        torch_reserved=round(torch.cuda.memory_reserved()/2**30, 2))
+        print('EVAL_READY '+json.dumps({k: report[k] for k in ('epoch', 'frame', 'eval_pool', 'gpu_memory_gib')}), flush=True)
         results = {}
         for mode in args.modes.split(','):
             hook.records, hook.recording = [], False
