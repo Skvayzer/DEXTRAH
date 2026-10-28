@@ -54,7 +54,7 @@ class EvalStarts:
                 done.float(), env._object_asset_index_per_env[done].float(), env._successes[done].float(),
                 env._episode_ever_lifted[done].float(), r['fall'][done].float(), r['hand_far'][done].float(),
                 r['max_successes'][done].float(), r['timeout'][done].float(), env._body_fallen[done].float(),
-                self.length[done].float()), -1))
+                self.length[done].float(), env._table_z_per_env[done].float()), -1))
         pool = self.task.eval_pool
         self.pick[ids] = torch.randint(0, len(pool['asset']), (ids.numel(),), device=self.device, generator=self.g)
         self.task.assign_objects(ids, pool['asset'][self.pick[ids]])
@@ -77,7 +77,8 @@ class EvalStarts:
         self.censored_from = sum(len(x) for x in self.records)
         self.records.append(torch.stack((
             ids.float(), env._object_asset_index_per_env[ids].float(), env._successes[ids].float(),
-            env._episode_ever_lifted[ids].float(), zero, zero, zero, zero, zero, self.length[ids].float()), -1))
+            env._episode_ever_lifted[ids].float(), zero, zero, zero, zero, zero, self.length[ids].float(),
+            env._table_z_per_env[ids].float()), -1))
 
 
 def build_policy(env, checkpoint, contract, device):
@@ -103,7 +104,8 @@ def build_policy(env, checkpoint, contract, device):
     return model.eval().requires_grad_(False), payload
 
 
-FIELDS = ('env', 'asset', 'goals', 'lifted', 'object_drop', 'hand_far', 'max_successes', 'timeout', 'robot_fall', 'steps')
+FIELDS = ('env', 'asset', 'goals', 'lifted', 'object_drop', 'hand_far', 'max_successes', 'timeout', 'robot_fall', 'steps',
+          'table_z')
 
 
 def summarize(rows, types, step_dt, censored):
@@ -138,6 +140,9 @@ def main():
     p.add_argument('--nconmax', type=int, default=64)
     p.add_argument('--njmax', type=int, default=300)
     p.add_argument('--seed', type=int, default=0)
+    p.add_argument('--contact-condim', type=int, default=None, help='scene contact model (training default 3; C and the route use 4)')
+    p.add_argument('--table-height-range', type=float, default=None,
+                   help='+- m on the table height (goals follow the table); success reported per table-top bin')
     args = p.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
@@ -160,8 +165,19 @@ def main():
         contract = json.loads((run/'task_contract.json').read_text())
         if 'mujoco_warp_cone_fix' not in Path(mujoco_warp.__file__).parts:
             raise RuntimeError('Training used the vendored mujoco_warp cone Hessian fix; put it on PYTHONPATH')
+        scene_params = None
+        if args.contact_condim is not None:
+            from dextrah_lab.mj.robot import ContactParams
+            from dextrah_lab.mj.scene import SceneParams
+            scene_params = SceneParams(contact=ContactParams(condim=args.contact_condim))
+
+        def configure(cfg):
+            if args.table_height_range is not None:
+                cfg.reset.table_reset_z_range = float(args.table_height_range)
+                cfg.sonic_body.goals_follow_table = True
         env = make_mj_env(args.num_envs, device, nconmax=args.nconmax, njmax=args.njmax, run=run,
-                          spawn_on_table=contract['body_termination']['spawn_on_table'])
+                          spawn_on_table=contract['body_termination']['spawn_on_table'], scene_params=scene_params,
+                          configure=configure)
         teacher = Path(contract['source_checkpoint'])
         model, payload = build_policy(env, args.checkpoint, contract, device)
         with args.checkpoint.open('rb') as f:
@@ -226,6 +242,14 @@ def main():
             per_asset = np.full(len(paths), np.nan)
             for a in np.unique(rows[:, 1].astype(int)):
                 per_asset[a] = float((rows[rows[:, 1] == a, 2] > 0).mean())
+            # success per table-top height bin (first episodes; table top = centre + 0.15 m)
+            top = rows[:, 10]+.15
+            edges = np.round(np.linspace(top.min(), top.max()+1e-6, 5), 3) if top.max()-top.min() > .02 else None
+            if edges is not None:
+                s['per_table_top'] = {f'{edges[i]:.2f}-{edges[i+1]:.2f}': summarize(rows[first & (top >= edges[i]) & (top < edges[i+1])],
+                                                                                   types[first & (top >= edges[i]) & (top < edges[i+1])],
+                                                                                   env.step_dt, cens[first & (top >= edges[i]) & (top < edges[i+1])])['all']
+                                      for i in range(4)}
             s['assets_evaluated'] = int(np.isfinite(per_asset).sum())
             s['assets_never_succeeded'] = int((per_asset == 0).sum())
             s['steps'], s['wall_s'] = steps, time.monotonic()-t0
