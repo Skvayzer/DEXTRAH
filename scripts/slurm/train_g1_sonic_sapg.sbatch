@@ -98,6 +98,10 @@ if [[ "${MJ_CARRY:-0}" == 1 ]]; then
     if [[ -n "${CARRY_LEVEL:-}" ]]; then extra_args+=(--carry-level "$CARRY_LEVEL"); fi
     if [[ -n "${CARRY_STATE:-}" ]]; then extra_args+=(--carry-state "$CARRY_STATE"); fi
 fi
+# Critic warm-up (policy frozen for N epochs) for --init-weights runs that are not carry runs (2026-10-28)
+if [[ "${CARRY:-0}" != 1 && "${MJ_CARRY:-0}" != 1 && -n "${CRITIC_WARMUP_EPOCHS:-}" ]]; then
+    extra_args+=(--critic-warmup-epochs "$CRITIC_WARMUP_EPOCHS")
+fi
 if [[ "${NO_TABLE_BODY_SUPPORT:-0}" == 1 ]]; then extra_args+=(--no-table-body-support); fi
 if [[ "${BODY_TABLE_CONTACT_TERMINATION:-0}" == 1 ]]; then extra_args+=(--body-table-contact-termination); fi
 if [[ "${PER_ENV_OBJECT_PHYSICS:-0}" == 1 ]]; then extra_args+=(--per-env-object-physics); fi

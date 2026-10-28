@@ -216,14 +216,18 @@ ACTOR_LSTM_KEY = 'a2c_network.source.rnn.rnn.weight_ih_l0'
 CRITIC_FIRST_KEY = 'model.a2c_network.actor_mlp.0.weight'
 
 
-def load_expanded_initial_weights(algo, checkpoint, hand_dim):
+def load_expanded_initial_weights(algo, checkpoint, hand_dim, preserve_stats=True):
     """--init-weights from a checkpoint with a smaller (or no) hand-surface block into an
     expanded model: every trained tensor copied, zero input columns for the added inputs
     (appended at the end of the hand block: actor task LSTM, critic first layer). The
-    hand normaliser gets the added channels (mean 0, var 1) and its count reset to 1 so
-    every channel re-estimates at the first update (a fresh normaliser when the
-    checkpoint had no block). Fresh optimizers and counters (as
-    carry_training.load_initial_weights)."""
+    hand normaliser gets the added channels (mean 0, var 1). preserve_stats (default): its
+    count and the existing channels' statistics are kept, so the inputs the policy was
+    trained on stay normalised as before (the added channels are pre-scaled, O(1)).
+    preserve_stats=False: count reset to 1, every channel re-estimates at the first update;
+    expanding the 114-input block by the table block that way shifted every existing
+    input at once (job 1629: first-update KL 4.2, 56% of samples > 1, vs 0.27 for the
+    same checkpoint without expansion). A fresh normaliser when the checkpoint had no
+    block. Fresh optimizers and counters (as carry_training.load_initial_weights)."""
     import hashlib
     from pathlib import Path
     from .task_contract import BODY_EXTRA_DIM, TASK_ACTOR_DIM, TASK_CRITIC_DIM
@@ -239,7 +243,8 @@ def load_expanded_initial_weights(algo, checkpoint, hand_dim):
             k = prefix+'running_mean_std.hand.'
             d[k+'running_mean'] = torch.cat((d[k+'running_mean'], d[k+'running_mean'].new_zeros(added)))
             d[k+'running_var'] = torch.cat((d[k+'running_var'], d[k+'running_var'].new_ones(added)))
-            d[k+'count'] = torch.ones_like(d[k+'count'])
+            if not preserve_stats:
+                d[k+'count'] = torch.ones_like(d[k+'count'])
     actor, added_actor = expand_state_dict(model, algo.model.state_dict(), {ACTOR_LSTM_KEY: (TASK_ACTOR_DIM+old_dim, added)})
     algo.model.load_state_dict(actor, strict=True)
     critic, added_critic = expand_state_dict(critic_state, algo.central_value_net.state_dict(),
@@ -251,7 +256,8 @@ def load_expanded_initial_weights(algo, checkpoint, hand_dim):
                 source_epoch=int(state.get('epoch', -1)), source_frame=int(state.get('frame', -1)),
                 optimizers='fresh', epoch_and_frame='start at zero', hand_surface_dim=hand_dim,
                 checkpoint_hand_surface_dim=old_dim, added_inputs=added,
-                normaliser='added channels mean 0 / var 1, count reset to 1' if old_dim else 'fresh',
+                normaliser=(('added channels mean 0 / var 1, existing channels and count kept' if preserve_stats else
+                             'added channels mean 0 / var 1, count reset to 1') if old_dim else 'fresh'),
                 zero_columns=dict(actor_lstm_input=[TASK_ACTOR_DIM+old_dim, TASK_ACTOR_DIM+hand_dim],
                                   critic_first_layer=[TASK_CRITIC_DIM+BODY_EXTRA_DIM+old_dim,
                                                       TASK_CRITIC_DIM+BODY_EXTRA_DIM+hand_dim]),

@@ -119,7 +119,7 @@ class SurgeryTests(unittest.TestCase):
 
     def test_expand_initial_weights_from_smaller_hand_block(self):
         """51-input hand block (job 1414) -> 51 + 12 arm + 51 goal: trained columns kept in
-        place, zero columns appended to the block, normaliser channels appended, count reset."""
+        place, zero columns appended to the block, normaliser channels appended, count kept (default)."""
         import tempfile
         from types import SimpleNamespace
         from dextrah_lab.wholebody.task_contract import BODY_EXTRA_DIM, TASK_ACTOR_DIM, TASK_CRITIC_DIM
@@ -162,6 +162,18 @@ class SurgeryTests(unittest.TestCase):
         m = algo.model.d['running_mean_std.hand.running_mean']
         self.assertTrue(torch.equal(m[:old], ckpt_actor['running_mean_std.hand.running_mean']) and not bool(m[old:].any()))
         self.assertTrue(bool((algo.model.d['running_mean_std.hand.running_var'][old:] == 1).all()))
+        # default: the existing channels' statistics and the count are kept (job 1629: a count reset shifted
+        # every existing input at the first update)
+        self.assertEqual(float(algo.model.d['running_mean_std.hand.count']), 1e9)
+        self.assertEqual(float(algo.central_value_net.d['model.running_mean_std.hand.count']), 1e9)
+        self.assertTrue(torch.equal(algo.model.d['running_mean_std.hand.running_var'][:old],
+                                    ckpt_actor['running_mean_std.hand.running_var']))
+        # preserve_stats=False: the earlier behaviour, count reset to 1
+        algo = SimpleNamespace(model=Net(nets(new)[0]), central_value_net=Net(nets(new)[1]))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'ckpt.pth'
+            torch.save({'model': ckpt_actor, 'assymetric_vf_nets': ckpt_critic, 'epoch': 5, 'frame': 9}, path)
+            hs.load_expanded_initial_weights(algo, path, new, preserve_stats=False)
         self.assertEqual(float(algo.model.d['running_mean_std.hand.count']), 1.)
         self.assertEqual(float(algo.central_value_net.d['model.running_mean_std.hand.count']), 1.)
 
