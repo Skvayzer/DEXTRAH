@@ -27,7 +27,10 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
             < 5 cm/s (held objects chatter in the hand at ~10 cm/s instantaneous), for 0.25 s; then
             the fingers go to their pre-grasp commands with the arm command frozen, for 2 s.
             Support at the release (the strict rule) is reported per world.
-  result    placed = resting on table B (contact, speed < 5 cm/s), no hand contact, robot upright.
+  result    placed = the object landed on table B after the release: table contact (> 0.5 N) with the hand clear
+            (< 0.2 N) inside table B's footprint at some step of the release window (2026-10-28 user review: a
+            tool that lands and then rolls away was set down; it is reported as placed_rolled_off when it ends off
+            table B or falls to the floor). Resting at the end of the window is reported per world.
 
 --place-mode scripted (baseline, carry v2 only): no switch back to M at table B. C keeps the body and the grip;
   lower    the right-arm reference blends (minimum jerk, --lower-s) to the carry-posture library posture that puts
@@ -38,7 +41,7 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
            of the object, the palm / wrist or a fingertip (2 steps);
   open     the fingers go to their pre-grasp commands for --release-s (the object drops the remaining clearance),
            C's body control and the frozen arm kept;
-  result   as above (placed = resting on table B, hand free, robot upright). The release target (straight below,
+  result   as above (placed = landed on table B with the hand clear). The release target (straight below,
            current orientation) is the goal for the placement errors and the green ghost in the videos.
 
 C's end states at the hand-back (arrived holding) are saved in the SGS holding-state field layout
@@ -215,6 +218,7 @@ def run(args):
     # scripted set-down state: arm reference profile, frozen arm, support count, C kept after the result
     lower_start, lower_target, lower_frozen = z(7), z(7), z(7)
     lower_hold = torch.zeros(n, dtype=torch.bool, device=d)
+    landed = torch.zeros(n, dtype=torch.bool, device=d)     # landed on table B with the hand clear after the release
     support_count = z(dtype=torch.long)
     c_done = torch.zeros(n, dtype=torch.bool, device=d)
     hand_table_cols = [i for i, name in enumerate(getattr(env, 'body_table_names', []))
@@ -474,6 +478,11 @@ def run(args):
             reasons = {k: v for k, v in env._termination_reasons.items()}
             for j in torch.nonzero(done & (phase != DONE)).flatten().tolist():
                 p = PHASES[int(phase[j])]
+                if int(phase[j]) in (RELEASE, OPEN) and bool(landed[j]) and not bool(fell[j]):
+                    # landed, then rolled off table B (the task's object-fall termination): set down, then lost
+                    finish(j, 'placed_rolled_off', t+dt, termination=[k for k, v in reasons.items() if bool(v[j])],
+                           on_table_b=False, resting=False)
+                    continue
                 finish(j, ('robot_fell_' if bool(fell[j]) else 'ended_')+p, t+dt,
                        termination=[k for k, v in reasons.items() if bool(v[j])])
             # -------- state for the checks
@@ -697,6 +706,12 @@ def run(args):
                 for j in torch.nonzero(lowering & (obj_pos[:, 2] < table_b[:, 2]-.1)).flatten().tolist():
                     finish(j, 'dropped_place', t+dt)
                 c_done |= (phase == OPEN) & (phase_steps*dt >= args.release_s)
+            # landing: table contact with the hand clear, inside table B's footprint, after the release
+            releasing = (phase == RELEASE) | (phase == OPEN)
+            on_b_now = ((obj_pos[:, :2]-table_b[:, :2]).abs() <= torch.tensor(TABLE_SIZE[:2], device=d)/2).all(-1)
+            for j in torch.nonzero(releasing & ~landed & (support > .5) & (hand_contact < .2) & on_b_now).flatten().tolist():
+                landed[j] = True
+                records[j].update(landed_s=round(t+dt, 2), landed_after_release_s=round(t+dt-records[j]['release_s'], 2))
             # release -> result
             for j in torch.nonzero(((phase == RELEASE) | (phase == OPEN)) & (phase_steps*dt >= args.release_s)).flatten().tolist():
                 rel_b = (obj_pos[j]-table_b[j])
@@ -705,8 +720,8 @@ def run(args):
                 free = float(hand_contact[j]) < .2
                 q_err = quat_mul(quat_conjugate(goal_b[j:j+1, 3:]), env.object.data.root_quat_w[j:j+1])
                 angle = float(2*torch.atan2(q_err[0, 1:].norm(), q_err[0, 0].abs()))
-                placed = resting and on_b and free
-                finish(j, 'placed' if placed else 'released_not_placed', t+dt, on_table_b=on_b, resting=resting,
+                outcome = ('placed' if on_b else 'placed_rolled_off') if bool(landed[j]) else 'released_not_placed'
+                finish(j, outcome, t+dt, on_table_b=on_b, resting=resting,
                        hand_free=free, placement_error_xy_m=round(float((obj_pos[j, :2]-goal_b[j, :2]).norm()), 3),
                        placement_error_z_m=round(float(obj_pos[j, 2]-goal_b[j, 2]), 3),
                        placement_error_deg=round(math.degrees(angle), 1))
@@ -787,6 +802,8 @@ def summarize(records):
                     transfer_rate_given_grasp=round(handed/max(grasped, 1), 3),
                     placement_rate_given_handback=round(placed/max(handed, 1), 3),
                     end_to_end=round(placed/nn, 3),
+                    placed_rolled_off=out('placed_rolled_off'),
+                    placed_resting=sum(1 for r in rs if r.get('outcome') == 'placed' and r.get('resting')),
                     robot_falls=sum(1 for r in rs if r.get('outcome', '').startswith('robot_fell')),
                     placed_error_xy_median_m=round(float(np.median(errs)), 3) if errs else None,
                     outcomes={o: sum(1 for r in rs if r.get('outcome') == o) for o in sorted({r.get('outcome') for r in rs})})
