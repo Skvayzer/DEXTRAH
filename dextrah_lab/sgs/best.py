@@ -16,7 +16,8 @@ from types import MethodType
 from rl_games.algos_torch import torch_ext
 
 METRICS = {'sgs_eval_goals': 'goals_reached_count', 'sgs_eval_success': 'any_goal_success_rate',
-           'carry_eval': 'carry_score'}     # mj/carry_env.py: curriculum level + evaluation carry success
+           'carry_eval': 'carry_score',      # mj/carry_env.py: curriculum level + evaluation carry success
+           'sgs_eval_table_worst': 'table_worst_bin'}   # lowest evaluation success over the table-height bins (+ mean tiebreak)
 
 
 class SgsEvalBest:

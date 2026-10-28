@@ -145,25 +145,71 @@ class GoalsFollowTableTests(unittest.TestCase):
 
 
 class SgsTableHeightTests(unittest.TestCase):
-    def test_lowest_keypoint_and_shift(self):
-        from dextrah_lab.sgs.mj_task import HELD_TABLE_CLEARANCE, MjSgsTask, lowest_keypoint_z
+    def test_lowest_keypoint(self):
+        from dextrah_lab.sgs.mj_task import lowest_keypoint_z
         offsets = torch.tensor([[[0., 0., -.03], [0., 0., .03], [.05, 0., 0.]]]).repeat(4, 1, 1)
         pose = torch.tensor([[0., 0., 1., 1., 0., 0., 0.]]).repeat(4, 1)
         self.assertTrue(torch.allclose(lowest_keypoint_z(pose, offsets), torch.full((4,), .97)))
         flip = pose.clone()
         flip[:, 3:7] = torch.tensor([math.cos(math.pi/4), 0., math.sin(math.pi/4), 0.])   # 90 deg about y: x -> -z
         self.assertTrue(torch.allclose(lowest_keypoint_z(flip, offsets), torch.full((4,), .95), atol=1e-6))
-        # restored starts: two resting, two held (object lowest keypoint at 0.97 m, stored table centre 0.65 -> top 0.80)
-        cfg = dict(table_z=torch.full((4,), .65), object_pose=pose)
-        me = types.SimpleNamespace(cfg=cfg, table_lo=.55, table_hi=.75, device='cpu', generator=torch.Generator().manual_seed(0),
-                                   env=types.SimpleNamespace(_keypoint_offsets=offsets))
-        reach = torch.tensor([True, True, False, False])
-        dz = torch.stack([MjSgsTask._table_shift(me, torch.arange(4), torch.arange(4), reach) for _ in range(200)])
-        top = .65+dz+.15
-        self.assertTrue(bool((top >= .70-1e-6).all() and (top <= .90+1e-6).all()))
-        self.assertGreater(float(dz[:, :2].std()), .04)                                  # resting: uniform over the range
-        self.assertTrue(bool((top[:, 2:] <= .97-HELD_TABLE_CLEARANCE+1e-6).all()))       # held: clearance kept
-        self.assertGreater(float((dz[:, 2:] < 0).float().mean()), .3)                    # held tables also go down
+
+    def fake_task(self, n_cfg=8):
+        """Configurations 0-3 resting, 4-7 held (object lowest keypoint 0.92 m; goals 1.00 m)."""
+        from dextrah_lab.sgs.mj_task import FAMILIES, HEIGHT_BINS, MjSgsTask
+        pose = torch.tensor([[0., 0., .95, 1., 0., 0., 0.]]).repeat(n_cfg, 1)
+        goal = torch.tensor([[0., 0., 1.0, 1., 0., 0., 0.]]).repeat(n_cfg, 1)
+        cfg = dict(table_z=torch.full((n_cfg,), .65), object_pose=pose, goal_pose=goal, asset=torch.zeros(n_cfg, dtype=torch.long))
+        family = torch.tensor([0]*4+[1]*4)
+        g = torch.Generator().manual_seed(0)
+
+        class Sampler:
+            available = torch.ones(n_cfg, dtype=torch.bool)
+
+            def sample(self, k, generator=None):
+                return torch.randint(0, n_cfg, (k,), generator=g)
+        me = types.SimpleNamespace(cfg=cfg, family=family, tab=dict(keypoints=torch.tensor([[[0., 0., -.03], [0., 0., .03]]])),
+                                   goal_band=(.10, .28), table_lo=.55, table_hi=.75, device='cpu', generator=g,
+                                   fit_stats=dict(held_drawn=0., held_rejected=0., fallback=0.), sampler=Sampler(),
+                                   blocks={'reaching': (0, 4), 'stable_grasp': (4, 8)})
+        me._fits = lambda k, z: MjSgsTask._fits(me, k, z)
+        return me, MjSgsTask, FAMILIES
+
+    def test_fits(self):
+        me, T, _ = self.fake_task()
+        k = torch.tensor([0, 4, 4, 4])
+        z = torch.tensor([.75, .55, .65, .72])                    # table tops 0.90, 0.70, 0.80, 0.87
+        # resting always fits; held: top <= 0.92 - 0.05 = 0.87 and goal (1.00) 0.10-0.28 above the top
+        self.assertEqual(T._fits(me, k, z).tolist(), [True, False, True, True])   # 0.70 top: goal 0.30 above (out of band)
+
+    def test_heights_drawn_first_independent_of_start_type(self):
+        me, T, _ = self.fake_task()
+        chosen_all, heights_all = [], []
+        for _ in range(400):
+            chosen = me.sampler.sample(64)
+            c, h = T._draw_heights(me, chosen.clone(), )
+            self.assertTrue(bool(T._fits(me, c, h).all()))
+            chosen_all.append(c)
+            heights_all.append(h)
+        c, h = torch.cat(chosen_all), torch.cat(heights_all)
+        top = h+.15
+        held = me.family[c] == 1
+        # heights uniform over 0.70-0.90 for all starts (not moved); held starts only where they fit (top 0.72-0.87)
+        self.assertGreater(float(top.min()), .699)
+        self.assertLess(float(top.max()), .901)
+        self.assertAlmostEqual(float(top.mean()), .80, delta=.005)
+        self.assertTrue(bool(((top[held] >= .72-1e-6) & (top[held] <= .87+1e-6)).all()))
+        self.assertGreater(me.fit_stats['held_rejected'], 0.)
+
+    def test_worst_bin(self):
+        from dextrah_lab.sgs.mj_task import _Rolling, _WorstBin
+        bins = [_Rolling(4, 'cpu') for _ in range(2)]
+        w = _WorstBin(bins)
+        bins[0].add(torch.tensor([1., 1., 1., 0.]))
+        self.assertEqual(w.size, 0)
+        bins[1].add(torch.tensor([1., 0., 0., 0.]))
+        self.assertEqual(w.size, 4)
+        self.assertAlmostEqual(float(w.mean()), .25+1e-3*.5, places=6)
 
     def test_height_bins(self):
         from dextrah_lab.sgs.mj_task import HEIGHT_BINS, MjSgsTask, _Rolling

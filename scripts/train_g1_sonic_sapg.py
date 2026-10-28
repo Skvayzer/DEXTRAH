@@ -208,7 +208,7 @@ def main():
     p.add_argument('--table-yaw-range-deg', type=float, default=None, help='+- degrees on the table yaw')
     p.add_argument('--sgs-state', type=Path,
                    help='SGS state to continue (X.sgs.pt); default: the --resume checkpoint\'s')
-    p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success', 'carry_eval'], default='reward',
+    p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success', 'carry_eval', 'sgs_eval_table_worst'], default='reward',
                    help='Best checkpoint by training reward (rl_games) or, with --sgs, by the rolling statistic of the '
                         'fresh-rho evaluation envs')
     if backend == 'isaac':
@@ -886,9 +886,23 @@ def main():
             # The table channels (last TABLE_OBS_DIM of the hand normaliser) keep their own sample count.
             from dextrah_lab.wholebody.table_obs import TABLE_OBS_DIM, install_own_counter
             start = hand_dim-TABLE_OBS_DIM
-            install_own_counter(algo.model.running_mean_std.hand, start)
-            install_own_counter(algo.central_value_net.model.running_mean_std.hand, start)
-            report['table_normaliser'] = dict(own_counter_channels=[start, hand_dim], shared_count_kept=True)
+            counts = dict(actor=1., critic=1.)
+            side = args.resume.with_suffix('.tablenorm.json') if args.resume else None
+            if side is not None and side.exists():
+                counts.update(json.loads(side.read_text()))          # resumed: the table channels keep their count
+            actor_rms, critic_rms = algo.model.running_mean_std.hand, algo.central_value_net.model.running_mean_std.hand
+            install_own_counter(actor_rms, start, counts['actor'])
+            install_own_counter(critic_rms, start, counts['critic'])
+            network_save_table = algo.save
+            def save_with_table_counts(filename, override_state=None):
+                # the own counts are not in the network state: X.tablenorm.json beside every checkpoint
+                network_save_table(filename, override_state)
+                target = Path(str(filename)+'.tablenorm.json')
+                target.with_suffix('.pending').write_text(json.dumps(dict(actor=float(actor_rms.own_count), critic=float(critic_rms.own_count))))
+                os.replace(target.with_suffix('.pending'), target)
+            algo.save = save_with_table_counts
+            report['table_normaliser'] = dict(own_counter_channels=[start, hand_dim], shared_count_kept=True, counts_at_start=counts,
+                                              actor_and_critic=True, side_file='X.tablenorm.json beside every checkpoint')
             print('TABLE_NORMALISER '+json.dumps(report['table_normaliser']), flush=True)
         start_frame, start_time = int(algo.frame), time.monotonic()
         torch.cuda.reset_peak_memory_stats()
