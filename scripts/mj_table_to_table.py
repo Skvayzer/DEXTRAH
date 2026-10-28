@@ -31,12 +31,14 @@ checkpoint, mean actions). One attempt per world, all worlds in one env:
 
 --place-mode scripted (baseline, carry v2 only): no switch back to M at table B. C keeps the body and the grip;
   lower    the right-arm reference blends (minimum jerk, --lower-s) to the carry-posture library posture that puts
-           the held object straight below its current position, at the table-B top minus --lower-overshoot (palm
-           orientation kept, small arm change: the library cost); once the table carries the object (object-table
-           force > 0.5 N for 3 steps), or --lower-hold-s after the blend without it, the arm reference freezes at
-           the measured angles;
-  open     the fingers go to their pre-grasp commands for --release-s, C's body control and the frozen arm kept;
-  result   as above (placed = resting on table B, hand free, robot upright). The set-down target (straight below,
+           the held object straight below its current position, with its lowest point (from its collision shapes)
+           --release-clearance above the table-B top (palm orientation kept, small arm change: the library cost).
+           The object is not pressed onto the table: the fingers around it would touch the table first. The arm
+           reference freezes at the measured angles --lower-hold-s after the blend, or earlier on any table contact
+           of the object, the palm / wrist or a fingertip (2 steps);
+  open     the fingers go to their pre-grasp commands for --release-s (the object drops the remaining clearance),
+           C's body control and the frozen arm kept;
+  result   as above (placed = resting on table B, hand free, robot upright). The release target (straight below,
            current orientation) is the goal for the placement errors and the green ghost in the videos.
 
 C's end states at the hand-back (arrived holding) are saved in the SGS holding-state field layout
@@ -215,6 +217,9 @@ def run(args):
     lower_hold = torch.zeros(n, dtype=torch.bool, device=d)
     support_count = z(dtype=torch.long)
     c_done = torch.zeros(n, dtype=torch.bool, device=d)
+    hand_table_cols = [i for i, name in enumerate(getattr(env, 'body_table_names', []))
+                       if name.startswith('right_') and any(k in name for k in ('wrist', 'base_link', 'palm', 'hand'))]
+    bank = env.object_bank
     postures = None
     if c_v2:
         from dextrah_lab.wholebody.carry_posture import CarryPostures, min_jerk
@@ -498,6 +503,16 @@ def run(args):
                 goal_b[:, :2] += shift[:2]
                 goal_b[:, 2] = torch.where(hover, goal_b[:, 2].clamp(min=float(cfg.reset.target_volume_mins[2])), goal_b[:, 2])
                 goal_ready = True
+                if scripted:
+                    # geometry check: resting objects' lowest point should be at table A's top
+                    fq = env.object.free_qpos.cpu().numpy()
+                    top_a = (env.scene.env_origins[:, 2]+table_a[:, 2]).cpu().numpy()+TABLE_SIZE[2]/2
+                    rows = [j for j in worlds.tolist() if bool(rest_seen[j])][:300]
+                    err = [object_lowest_z(bank, int(asset[j]), fq[j, :3], fq[j, 3:7])-top_a[j] for j in rows]
+                    if err:
+                        print('LOWEST_POINT_CHECK '+json.dumps(dict(worlds=len(err), median_mm=round(1e3*float(np.median(err)), 2),
+                                                                    p10_mm=round(1e3*float(np.percentile(err, 10)), 2),
+                                                                    p90_mm=round(1e3*float(np.percentile(err, 90)), 2))), flush=True)
                 for j in worlds.tolist():
                     records[j]['rest_pose_found'] = bool(rest_seen[j])
                     records[j]['goal_height_above_table_m'] = round(float(goal_b[j, 2]-table_b[j, 2]-TABLE_SIZE[2]/2), 3)
@@ -609,7 +624,9 @@ def run(args):
                     body = env.robot.data.body_state_w[jj]
                     obj_w = env.object.data.root_pos_w[jj]
                     top = float(env.scene.env_origins[j, 2]+table_b[j, 2])+TABLE_SIZE[2]/2
-                    drop = float(obj_w[0, 2])-top+args.lower_overshoot
+                    fq = env.object.free_qpos[j].cpu().numpy()
+                    low = object_lowest_z(bank, int(asset[j]), fq[:3], fq[3:7])
+                    drop = max(0., low-top-args.release_clearance)
                     target_w = obj_w.clone()
                     target_w[0, 2] -= drop
                     t_po, palm_torso = grasp_in_torso(body[:, torso_idx], body[:, palm_link], obj_w)
@@ -621,7 +638,7 @@ def run(args):
                     goal_b[j, :3] = target_w[0]-env.scene.env_origins[j]
                     goal_b[j, 3:] = env.object.data.root_quat_w[j]
                     now_t = object_in_torso(body[:, torso_idx], obj_w)
-                    records[j]['set_down'] = dict(object_above_table_m=round(drop-args.lower_overshoot, 3),
+                    records[j]['set_down'] = dict(lowest_point_above_table_m=round(low-top, 3), lower_m=round(drop, 3),
                                                   posture_lowers_m=round(float(now_t[0, 2]-p_low[0, 2]), 3),
                                                   posture_miss_m=round(float((p_low-target_t).norm()), 3),
                                                   max_joint_change_rad=round(float((q_low-q_meas).abs().max()), 3))
@@ -667,12 +684,22 @@ def run(args):
                        object_minus_goal_m=[round(float(x), 3) for x in (obj_pos[j]-goal_b[j, :3])])
             if scripted:
                 lowering = phase == LOWER
-                support_count = torch.where(lowering & (support > .5), support_count+1, torch.zeros_like(support_count))
-                ready = lowering & ((support_count >= 3) | (phase_steps*dt >= args.lower_s+args.lower_hold_s))
+                # table contact: object, palm / wrist links, or a fingertip's contact force beyond its object force
+                finger_other = (env.touch_link_force_w.abs().sum(-1)-force).amax(-1)
+                bt = getattr(env, '_body_table_force_step', None)
+                hand_table = bt[:, hand_table_cols].amax(-1) if bt is not None and hand_table_cols else z()
+                touching_table = (support > .5) | (hand_table > 1.) | (finger_other > 2.)
+                support_count = torch.where(lowering & touching_table, support_count+1, torch.zeros_like(support_count))
+                ready = lowering & ((support_count >= 2) | (phase_steps*dt >= args.lower_s+args.lower_hold_s))
                 for j in torch.nonzero(ready).flatten().tolist():
                     lower_frozen[j] = env.robot.data.joint_pos[j, env._body_ids][right_arm]
                     lower_hold[j] = True
+                    reason = ('object_table' if float(support[j]) > .5 else 'hand_table' if float(hand_table[j]) > 1. else
+                              'finger_table' if float(finger_other[j]) > 2. else 'lowered')
+                    fq = env.object.free_qpos[j].cpu().numpy()
+                    top = float(env.scene.env_origins[j, 2]+table_b[j, 2])+TABLE_SIZE[2]/2
                     records[j].update(release_s=round(t+dt, 2), support_at_release=bool(support[j] > .5),
+                                      lower_stop=reason, release_height_m=round(object_lowest_z(bank, int(asset[j]), fq[:3], fq[3:7])-top, 3),
                                       lowering_s=round(float(phase_steps[j])*dt, 2),
                                       hand_contact_at_release=round(float(hand_contact[j]), 3),
                                       goal_distance_at_release_m=round(float((obj_pos[j]-goal_b[j, :3]).norm()), 3))
@@ -779,6 +806,31 @@ def summarize(records):
     for t in TYPES:
         s[t] = stats([r for r in rows if r['type'] == t])
     return s
+
+
+def quat_matrix(q):
+    """Rotation matrix of a wxyz quaternion (numpy)."""
+    w, x, y, z = np.asarray(q, dtype=np.float64)/np.linalg.norm(q)
+    return np.array([[1-2*(y*y+z*z), 2*(x*y-w*z), 2*(x*z+w*y)],
+                     [2*(x*y+w*z), 1-2*(x*x+z*z), 2*(y*z-w*x)],
+                     [2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)]])
+
+
+def object_lowest_z(bank, a, pos, quat):
+    """Lowest z of object asset a's collision shapes (dextrah_lab/mj/objects.SLOT_TYPES slots, geoms at pos - com in
+    the body frame) with its MuJoCo body frame (the free joint, at the COM) at pos / quat (wxyz)."""
+    from dextrah_lab.mj.objects import SLOT_TYPES
+    R = quat_matrix(quat)
+    low = np.inf
+    for s, kind in enumerate(SLOT_TYPES):
+        if not bank.used[a, s]:
+            continue
+        centre = np.asarray(pos, dtype=np.float64)+R @ (bank.pos[a, s]-bank.com[a])
+        Rg = R @ quat_matrix(bank.quat[a, s])
+        size = bank.size[a, s]
+        z = centre[2]-((np.abs(Rg[2])*size).sum() if kind == 'box' else abs(Rg[2, 2])*size[1]+size[0])
+        low = min(low, float(z))
+    return low
 
 
 def select_videos(records, spec):
@@ -937,8 +989,9 @@ def main():
     p.add_argument('--place-mode', choices=('policy', 'scripted'), default='policy',
                    help="'scripted': C keeps control at table B, scripted arm lowering until table support, then the fingers open")
     p.add_argument('--lower-s', type=float, default=2., help='scripted: duration of the arm lowering profile')
-    p.add_argument('--lower-overshoot', type=float, default=.02, help='scripted: target below the table top (m)')
-    p.add_argument('--lower-hold-s', type=float, default=1., help='scripted: wait after the profile for table support')
+    p.add_argument('--release-clearance', type=float, default=.03,
+                   help="scripted: release height of the object's lowest point above the table top (m)")
+    p.add_argument('--lower-hold-s', type=float, default=.3, help='scripted: wait after the lowering blend before opening')
     p.add_argument('--place-library', type=Path, default=None, help='resting-pose library (for --place-goal nearest)')
     p.add_argument('--grasp-min-fingers', type=int, default=1)
     p.add_argument('--video-per-type', type=int, default=2)
