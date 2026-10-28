@@ -671,7 +671,12 @@ def main():
                 sgs_file = args.sgs_state or (args.resume.with_suffix('.sgs.pt') if args.resume else None)
                 sgs_state = (torch.load(sgs_file, map_location='cpu', weights_only=False)
                              if sgs_file is not None and sgs_file.exists() else None)
+                # SGS setup runs minutes of CPU MuJoCo / numpy (table-height masks, arm inverse kinematics); the
+                # periodic stack dump walks the running thread's frames and crashed it there (job 1639, as in
+                # run 528): no dumps during the setup.
+                faulthandler.cancel_dump_traceback_later()
                 env.enable_sgs(sgs_settings, sgs_state)
+                faulthandler.dump_traceback_later(60, repeat=True, file=stack_log)
                 report['sgs'] = dict(contract['sgs'], resumed_from=str(sgs_file) if sgs_state else None,
                                      spawn_check=dict(env._sgs.spawn_stats))
                 print('SGS_ENABLED '+json.dumps(report['sgs']), flush=True)
