@@ -172,6 +172,66 @@ def table_mocap(m, table_body):
 
 
 PENETRATION_TOL = .001       # a table height may deepen a robot geom's table penetration by at most this
+ARM_FOLLOW_JOINTS = ('right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
+                     'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint')
+ARM_FOLLOW_BODY = 'right_base_link'    # the hand base: moved with the table, orientation kept, fingers ride along
+
+
+def arm_follow_ik(m, qpos, shifts, qadr, dadr, hand_body, iters=150, tol_pos=2e-4, tol_rot=2e-3, damping=1e-2,
+                  rot_weight=.2, max_step=.1, null_gain=.2):
+    """Arm joint offsets that move the hand body straight up by shifts[i, j] with its orientation kept, everything
+    else fixed: damped least squares on the joints qadr / dadr (rotation error weighted rot_weight m/rad, step norm
+    <= max_step rad, null-space pull toward the original arm pose, joint limits respected; per state the shifts
+    are solved outward from the smallest, each warm-started from its neighbour). qpos (n, nq), shifts (n, S).
+    Returns (offsets (n, S, len(qadr)), position residual (n, S) m, rotation residual (n, S) rad)."""
+    import mujoco
+    d = mujoco.MjData(m)
+    qadr, dadr = np.asarray(qadr), np.asarray(dadr)
+    jnt = np.array([int(np.nonzero(m.jnt_qposadr == a)[0][0]) for a in qadr])
+    lo = np.where(m.jnt_limited[jnt] > 0, m.jnt_range[jnt, 0], -np.inf)
+    hi = np.where(m.jnt_limited[jnt] > 0, m.jnt_range[jnt, 1], np.inf)
+    n, S = shifts.shape
+    out = np.zeros((n, S, len(qadr)))
+    res_p, res_r = np.zeros((n, S)), np.zeros((n, S))
+    jacp, jacr, err_r = np.zeros((3, m.nv)), np.zeros((3, m.nv)), np.zeros(3)
+    eye = damping**2*np.eye(6)
+    for i in range(n):
+        d.qpos[:] = qpos[i]
+        mujoco.mj_kinematics(m, d)
+        p0, q0 = d.xpos[hand_body].copy(), d.xquat[hand_body].copy()
+        base = qpos[i, qadr].copy()
+        order = np.argsort(shifts[i])
+        start = int(np.argmin(np.abs(shifts[i][order])))
+        for sweep in (order[start:], order[:start+1][::-1]):
+            q = base.copy()
+            for j in sweep:
+                target = p0+np.array([0., 0., shifts[i, j]])
+                for _ in range(iters):
+                    d.qpos[qadr] = q
+                    mujoco.mj_kinematics(m, d)
+                    e_p = target-d.xpos[hand_body]
+                    mujoco.mju_subQuat(err_r, q0, d.xquat[hand_body])
+                    e_r = d.xmat[hand_body].reshape(3, 3) @ err_r
+                    if np.linalg.norm(e_p) < tol_pos and np.linalg.norm(e_r) < tol_rot:
+                        break
+                    mujoco.mj_comPos(m, d)
+                    mujoco.mj_jacBody(m, d, jacp, jacr, hand_body)
+                    J = np.vstack((jacp[:, dadr], rot_weight*jacr[:, dadr]))
+                    pinv = J.T @ np.linalg.inv(J @ J.T+eye)
+                    dq = pinv @ np.concatenate((e_p, rot_weight*e_r))
+                    dq += (np.eye(len(qadr))-pinv @ J) @ (null_gain*(base-q))     # stay near the original arm pose
+                    norm = np.linalg.norm(dq)
+                    if norm > max_step:
+                        dq *= max_step/norm
+                    q = np.clip(q+dq, lo, hi)
+                d.qpos[qadr] = q
+                mujoco.mj_kinematics(m, d)
+                mujoco.mju_subQuat(err_r, q0, d.xquat[hand_body])
+                out[i, j] = q-base
+                res_p[i, j] = np.linalg.norm(target-d.xpos[hand_body])
+                res_r[i, j] = np.linalg.norm(err_r)
+            d.qpos[:] = qpos[i]
+    return out, res_p, res_r
 
 
 class TableContacts:
@@ -388,6 +448,24 @@ class MjSgsTask:
             + self.table_lo+TABLE_SIZE[2]/2
         self.table_fit = torch.zeros(N, len(self.fit_tops), dtype=torch.bool, device=self.device)
         self.stored_contact = torch.zeros(N, dtype=torch.bool, device=self.device)   # robot on the table when stored
+        # Resting starts and fresh rho draws (evaluation pool): the right arm follows the table (2026-10-29: M's
+        # reset arm pose puts the hand at the 0.80 m table top, so on raised tables it started inside the table):
+        # arm offsets per resting configuration and table-top grid height (arm_follow_ik, CPU, cached in the
+        # state); rho draws are shifted by their table's offset from the nominal height before validation.
+        self.arm_follow = self.table_heights or bool(getattr(getattr(env.cfg, 'sonic_body', None), 'arm_follows_table', False))
+        self.arm_shift = torch.zeros(N, len(self.fit_tops), len(ARM_FOLLOW_JOINTS), device=self.device)
+        self.arm_known = torch.zeros(N, dtype=torch.bool, device=self.device)
+        self.arm_stats = {}
+        if self.arm_follow:
+            m, names = env.sim.mj_model, list(env.robot.joint_names)
+            self.arm_cols = torch.tensor([names.index(j) for j in ARM_FOLLOW_JOINTS], device=self.device)
+            self.arm_qadr = [int(m.jnt_qposadr[m.joint(f'robot/{j}').id]) for j in ARM_FOLLOW_JOINTS]
+            self.arm_dadr = [int(m.jnt_dofadr[m.joint(f'robot/{j}').id]) for j in ARM_FOLLOW_JOINTS]
+            self.arm_hand = int(m.body(f'robot/{ARM_FOLLOW_BODY}').id)
+            self.joint_qadr = np.array([int(m.jnt_qposadr[m.joint(f'robot/{j}').id]) for j in names])
+            root = env.robot.data.default_root_state[0, :7].clone()
+            root[:3] -= env.scene.env_origins[0]
+            self.rest_root = root.cpu().numpy().astype(np.float64)
         self.fit_known = torch.zeros(N, dtype=torch.bool, device=self.device)
         # First step after a restore: robot-table contact rate of training starts (0 resting, 1 held).
         self.contact_check = torch.full((n_env,), -1, dtype=torch.long, device=self.device)
@@ -402,6 +480,8 @@ class MjSgsTask:
         elif 'reaching' in settings.families:
             self._fill_reaching()
         if self.table_heights:
+            rest = torch.nonzero(self.filled & (self.family == FAMILIES.index('reaching')) & ~self.arm_known).flatten()
+            self._arm_tables(rest)
             held = torch.nonzero(self.filled & (self.family != FAMILIES.index('reaching'))).flatten()
             self._table_fit_cpu(held[~self.fit_known[held]])
             self._fit_check(held)
@@ -416,6 +496,8 @@ class MjSgsTask:
             self._draw_valid(torch.arange(P, device=self.device), self.eval_pool)
         if settings.validate_spawns:
             print('SGS_SPAWN_CHECK '+json.dumps(self.spawn_stats), flush=True)
+        if self.arm_follow:
+            print('SGS_ARM_FOLLOW '+json.dumps(self.arm_stats), flush=True)
         self._sync_available()
 
     # ------------------------------------------------------------------ setup
@@ -530,11 +612,15 @@ class MjSgsTask:
         todo = slots
         for _ in range(s.spawn_max_rounds if s.validate_spawns else 1):
             cand = self._capture_reaching(len(todo), store['asset'][todo])
+            if self.arm_follow:
+                self._arm_follow_capture(cand)
             ok = self._spawn_check(cand, store['asset'][todo]) if s.validate_spawns else \
                 torch.ones(len(todo), dtype=torch.bool, device=self.device)
             keep = todo[ok]
             for key, value in cand.items():
                 store[key][keep] = value[ok]
+            if store is self.cfg:
+                self.arm_known[keep] = False
             if bool(ok.all()):
                 return todo[:0]
             last = {key: value[~ok] for key, value in cand.items()}
@@ -548,6 +634,54 @@ class MjSgsTask:
         self.spawn_stats.setdefault('unresolved', []).extend(unresolved)
         print(f'SGS_SPAWN_UNRESOLVED {len(unresolved)} after {s.spawn_max_rounds} rounds: {unresolved}', flush=True)
         return todo
+
+    def _rest_qpos(self, joint_pos):
+        """CPU qpos of standing robots (default root) with joint positions joint_pos (n, nj); object at qpos0."""
+        m = self.env.sim.mj_model
+        q = np.tile(m.qpos0.astype(np.float64), (len(joint_pos), 1))
+        q[:, :7] = self.rest_root
+        q[:, self.joint_qadr] = joint_pos.cpu().numpy().astype(np.float64)
+        return q
+
+    def _arm_ik(self, joint_pos, shifts):
+        return arm_follow_ik(self.env.sim.mj_model, self._rest_qpos(joint_pos), shifts, self.arm_qadr, self.arm_dadr,
+                             self.arm_hand)
+
+    def _arm_follow_capture(self, cand):
+        """Fresh rho draws: shift the arm so the hand keeps its height above the drawn table (rho's arm pose is
+        set for the nominal table)."""
+        dz = (cand['table_z']-float(self.env.cfg.reset.table_reset_z)).cpu().numpy().astype(np.float64)[:, None]
+        dq, res, _ = self._arm_ik(cand['joint_pos'], dz)
+        dq = torch.as_tensor(dq[:, 0], dtype=torch.float32, device=self.device)
+        for key in ('joint_pos', 'targets', 'setpoint'):
+            cand[key][:, self.arm_cols] += dq
+        st = self.arm_stats.setdefault('rho_draws', dict(n=0, over_5mm=0, max_mm=0.))
+        st['n'] += len(dz)
+        st['over_5mm'] += int((res > .005).sum())
+        st['max_mm'] = max(st['max_mm'], round(1000*float(res.max()), 1) if res.size else 0.)
+
+    def _arm_tables(self, slots):
+        """Arm offsets of resting configurations per table-top grid height, relative to their stored table."""
+        if slots.numel() == 0:
+            return
+        c = self.cfg
+        shifts = (self.fit_tops[None, :]-(c['table_z'][slots]+TABLE_SIZE[2]/2)[:, None]).cpu().numpy().astype(np.float64)
+        dq, res, rot = self._arm_ik(c['joint_pos'][slots], shifts)
+        self.arm_shift[slots] = torch.as_tensor(dq, dtype=torch.float32, device=self.device)
+        self.arm_known[slots] = True
+        over = res > .005
+        self.arm_stats['resting'] = dict(configs=int(slots.numel()), over_5mm_by_top={f'{t:.2f}': round(float(v), 3) for t, v in
+                                                                                      zip(self.fit_tops[::4].tolist(), over.mean(0)[::4].tolist())},
+                                         max_mm=round(1000*float(res.max()), 1), rot_p99_deg=round(float(np.degrees(np.quantile(rot, .99))), 2))
+        print('SGS_ARM_FOLLOW '+json.dumps(self.arm_stats), flush=True)
+
+    def _arm_offsets(self, k, top):
+        """Arm offsets of resting configurations k at table tops top (linear between grid heights)."""
+        x = ((top-self.fit_tops[0])/TABLE_FIT_STEP).clamp(0, len(self.fit_tops)-1)
+        i0 = x.floor().long()
+        i1 = x.ceil().long()
+        w = (x-i0.float())[:, None]
+        return (1-w)*self.arm_shift[k, i0]+w*self.arm_shift[k, i1]
 
     def _fill_reaching(self):
         """Reaching configurations: rho draws (validated with validate_spawns), assets
@@ -854,16 +988,24 @@ class MjSgsTask:
             b = torch.bucketize(env._table_z_per_env[ids], self.height_edges[1:-1])
             self.height_starts.index_put_((self.family[k], b), torch.ones(len(ids), device=self.device), accumulate=True)
             self.contact_check[ids] = (~reach).long()
+        targets, setpoint = c['targets'][k].clone(), c['setpoint'][k].clone()
         if bool(reach.any()):
             r, kr = ids[reach], k[reach]
-            env.robot.write_joint_state_to_sim(c['joint_pos'][kr], c['joint_vel'][kr], env_ids=r)
+            joint_pos = c['joint_pos'][kr].clone()
+            if self.table_heights:                              # the arm follows the table (hand height above it kept)
+                dq = self._arm_offsets(kr, env._table_z_per_env[r]+TABLE_SIZE[2]/2)
+                joint_pos[:, self.arm_cols] += dq
+                rows = torch.nonzero(reach).flatten()
+                targets[rows[:, None], self.arm_cols] += dq
+                setpoint[rows[:, None], self.arm_cols] += dq
+            env.robot.write_joint_state_to_sim(joint_pos, c['joint_vel'][kr], env_ids=r)
             pose = c['object_pose'][kr].clone()
             pose[:, :3] += env.scene.env_origins[r]
             pose[:, 2] += dz[reach]                             # the resting object moves with the table
             env.object.write_root_pose_to_sim(pose, env_ids=r)
             env.object.write_root_velocity_to_sim(torch.zeros(len(r), 6, device=self.device), env_ids=r)
             if self.wholebody:
-                self._standing_body(r, c['targets'][kr])
+                self._standing_body(r, targets[reach])
         held = ~reach
         if bool(held.any()):
             h, kh = ids[held], k[held]
@@ -877,9 +1019,9 @@ class MjSgsTask:
                 # Floating base: restored with qpos/qvel. SONIC inputs: history and executed body action.
                 self._restore_history(h, c['history'][kh])
                 env._last_body_action[h] = (c['targets'][kh][:, env._body_ids]-env._body_nominal)/env._body_scales
-        env._prev_targets[ids] = c['targets'][k]
-        env._cur_targets[ids] = c['targets'][k]
-        env.robot.reset_setpoint(ids, c['setpoint'][k])
+        env._prev_targets[ids] = targets
+        env._cur_targets[ids] = targets
+        env.robot.reset_setpoint(ids, setpoint)
         env._object_init_z[ids] = c['object_init_z'][k]+dz          # lift reference: rest height on this table
         goal = c['goal_pose'][k].clone()
         goal[:, :3] += origin
@@ -1357,7 +1499,8 @@ class MjSgsTask:
                     n_assets=self.n_assets, nq=self.cfg['qpos'].shape[1], nv=self.cfg['qvel'].shape[1],
                     validated=self.validated.cpu(), wholebody=self.wholebody,
                     lineage=dict(generation=self.generation.cpu(), parent=self.parent.cpu(), edited=self.edited.cpu(),
-                                 slot_version=self.slot_version.cpu(), round=self.round))
+                                 slot_version=self.slot_version.cpu(), round=self.round),
+                    arm_follow=dict(tops=self.fit_tops.cpu(), shift=self.arm_shift.cpu(), known=self.arm_known.cpu()))
 
     def load_state_dict(self, state):
         saved = SgsSettings(**state['settings']).layout()
@@ -1376,6 +1519,10 @@ class MjSgsTask:
             self.asset_harvest[k].copy_(v.to(self.device))
         if 'validated' in state:
             self.validated.copy_(state['validated'].to(self.device))
+        arm = state.get('arm_follow')                    # cached arm offsets of resting configurations (same grid only)
+        if arm is not None and arm['shift'].shape == self.arm_shift.shape and torch.allclose(arm['tops'].to(self.device), self.fit_tops):
+            self.arm_shift.copy_(arm['shift'].to(self.device))
+            self.arm_known.copy_(arm['known'].to(self.device))
         if 'lineage' in state:                           # older states: everything harvested, generation 0
             for key in ('generation', 'parent', 'edited', 'slot_version'):
                 getattr(self, key).copy_(state['lineage'][key].to(self.device))

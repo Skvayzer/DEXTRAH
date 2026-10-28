@@ -175,6 +175,7 @@ def main():
             if args.table_height_range is not None:
                 cfg.reset.table_reset_z_range = float(args.table_height_range)
                 cfg.sonic_body.goals_follow_table = True
+                cfg.sonic_body.arm_follows_table = True     # fresh rho draws: the right arm follows the drawn table
         env = make_mj_env(args.num_envs, device, nconmax=args.nconmax, njmax=args.njmax, run=run,
                           spawn_on_table=contract['body_termination']['spawn_on_table'], scene_params=scene_params,
                           configure=configure)

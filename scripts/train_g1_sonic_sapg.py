@@ -378,6 +378,7 @@ def main():
             cfg.reset.table_reset_z_range = float(args.table_height_range)
             cfg.sonic_body.goals_follow_table = True
             cfg.sonic_body.sgs_table_heights = True    # stored SGS starts adapted to a sampled height at each restore
+            cfg.sonic_body.arm_follows_table = True    # resting starts and rho draws: the right arm follows the table
         if args.table_xy_range is not None:
             cfg.reset.table_reset_xy_range_m = (float(args.table_xy_range), float(args.table_xy_range))
         if args.table_yaw_range_deg is not None:
@@ -712,7 +713,10 @@ def main():
                             '3 cm above its top than in the stored state: CPU MuJoCo mask per 1 cm of table height) is '
                             're-drawn from the sampler (8 tries), then replaced by a resting start; outcomes are credited '
                             'to the start that ran; success, knock-off and start mix logged per start family x '
-                            'table-top bin; evaluation: validated fresh resting starts, uniform heights'
+                            'table-top bin; evaluation: validated fresh resting starts, uniform heights; resting starts '
+                            'and fresh rho draws: the right arm (7 joints) follows the table by inverse kinematics of the '
+                            'hand base (height above the table and orientation kept; position, target and setpoint '
+                            'shifted alike; best effort where the arm cannot reach lower)'
                             if getattr(cfg.sonic_body, 'sgs_table_heights', False) else None))
             changes = []
             if table is not None:

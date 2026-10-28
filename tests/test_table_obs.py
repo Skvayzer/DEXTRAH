@@ -254,6 +254,40 @@ class SgsTableHeightTests(unittest.TestCase):
         self.assertFalse(bool(on_table[0]))
         self.assertEqual(mask[0].tolist(), [False, False, True, True])
 
+    def test_arm_follow_ik(self):
+        """A planar 3-joint arm: the hand moves straight up / down by the shift with its orientation kept; an
+        unreachable shift ends best effort inside the joint limits."""
+        import mujoco
+        import numpy as np
+        from dextrah_lab.sgs.mj_task import arm_follow_ik
+        xml = """<mujoco><compiler angle='radian'/><worldbody><body name='base' pos='0 0 1'>
+          <body name='upper'><joint name='j1' type='hinge' axis='1 0 0' range='-2 2' limited='true'/>
+            <geom type='capsule' fromto='0 0 0 0 .3 0' size='.02'/>
+            <body name='lower' pos='0 .3 0'><joint name='j2' type='hinge' axis='1 0 0' range='-2.5 2.5' limited='true'/>
+              <geom type='capsule' fromto='0 0 0 0 .3 0' size='.02'/>
+              <body name='hand' pos='0 .3 0'><joint name='j3' type='hinge' axis='1 0 0' range='-2 2' limited='true'/>
+                <geom type='box' size='.03 .05 .01' pos='0 .05 0'/></body></body></body></body></worldbody></mujoco>"""
+        m = mujoco.MjModel.from_xml_string(xml)
+        q0 = np.array([[-.6, 1.2, -.6]])
+        adr = [m.joint(j).qposadr[0] for j in ('j1', 'j2', 'j3')]
+        dadr = [m.joint(j).dofadr[0] for j in ('j1', 'j2', 'j3')]
+        hand = m.body('hand').id
+        shifts = np.array([[-.10, -.05, 0., .05, .10, .9]])          # 0.9 m up: out of reach
+        dq, res_p, res_r = arm_follow_ik(m, q0, shifts, adr, dadr, hand)
+        self.assertTrue(bool((res_p[0, :5] < 5e-4).all()), res_p)
+        self.assertTrue(bool((res_r[0, :5] < 5e-3).all()), res_r)
+        self.assertTrue(np.allclose(dq[0, 2], 0.))                    # zero shift: no change
+        self.assertGreater(res_p[0, 5], .1)                           # unreachable: best effort
+        q = q0[0]+dq[0, 5]
+        self.assertTrue(bool(((q >= m.jnt_range[:, 0]-1e-9) & (q <= m.jnt_range[:, 1]+1e-9)).all()))
+        d = mujoco.MjData(m)
+        d.qpos[:] = q0[0]
+        mujoco.mj_kinematics(m, d)
+        p0 = d.xpos[hand].copy()
+        d.qpos[:] = q0[0]+dq[0, 4]
+        mujoco.mj_kinematics(m, d)
+        self.assertTrue(np.allclose(d.xpos[hand]-p0, [0., 0., .10], atol=5e-4))
+
     def test_worst_bin(self):
         from dextrah_lab.sgs.mj_task import _Rolling, _WorstBin
         bins = [_Rolling(4, 'cpu') for _ in range(2)]
