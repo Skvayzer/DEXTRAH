@@ -266,6 +266,15 @@ class G1SonicTouchMjEnv:
                                                  goal=getattr(cfg.sonic_body, 'hand_surface_goal', False))
                 self.hand_surface_dim = self._hand_surface.dim
                 install_actor_pose_capture(obs_utils)
+            # Opt-in table observation (wholebody/table_obs.py), appended to the hand block (zero network columns).
+            self._table_obs = None
+            if getattr(cfg.sonic_body, 'table_obs', False):
+                from dextrah_lab.wholebody.table_obs import TableObservation
+                self._table_obs = TableObservation(self, self._hand_surface, noise=getattr(cfg.sonic_body, 'table_obs_noise', True))
+                self.hand_surface_dim += self._table_obs.dim
+            if getattr(cfg.sonic_body, 'goals_follow_table', False):
+                from dextrah_lab.wholebody.table_obs import install_goals_follow_table
+                install_goals_follow_table(reset_utils, float(cfg.reset.table_reset_z))
             cfg.observation_space = TASK_ACTOR_DIM+BODY_EXTRA_DIM+self.hand_surface_dim
             cfg.state_space = TASK_CRITIC_DIM+BODY_EXTRA_DIM+self.hand_surface_dim
             for key, size in (('policy', cfg.observation_space), ('critic', cfg.state_space)):
@@ -358,6 +367,8 @@ class G1SonicTouchMjEnv:
 
     def _init_contacts(self):
         self.contacts = ContactReader(self.sim, self.sim.mj_model, pad_tensors=self.pad_tensors, **self._contacts_cfg)
+        if getattr(self, '_table_obs', None) is not None:
+            self.contacts.object_table = True        # the table block's critic force
         self.contacts.active_only = self._fast_step
 
     def enable_grasp_reward(self, scale, energy_scale=0.):
@@ -495,6 +506,8 @@ class G1SonicTouchMjEnv:
     def _reset_idx(self, env_ids):
         # DirectRLEnv: scene.reset, episode length
         self.episode_length_buf[env_ids] = 0
+        if getattr(self, '_table_obs', None) is not None:
+            self._table_obs.reset(torch.as_tensor(env_ids, device=self.device, dtype=torch.long).reshape(-1))
         if self._sgs is not None:
             # SGS: record finished episodes, pick configurations and objects.
             self._sgs.before_reset(torch.as_tensor(env_ids, device=self.device, dtype=torch.long))
@@ -697,14 +710,16 @@ class G1SonicTouchMjEnv:
             final['critic'] = torch.cat((final['critic'], self._wholebody_observation()), -1)
             if self._hand_surface is not None:
                 final['critic'] = torch.cat((final['critic'], self._hand_surface.observation(*self._true_object_pose())), -1)
+            if getattr(self, '_table_obs', None) is not None:
+                true = self._true_object_pose()
+                final['critic'] = torch.cat((final['critic'], self._table_obs.observation(true, true)[1]), -1)
         return reward
 
     def _true_object_pose(self):
         return self.object.data.root_pos_w-self.scene.env_origins, self.object.data.root_quat_w
 
-    def _hand_surface_observations(self):
-        """(actor, critic) hand-to-surface observations: the actor sees the object pose its
-        other object observations use (delayed/noised when that DR is on), the critic the true one."""
+    def _actor_and_true_object_pose(self):
+        """The object pose the actor's object observations use (delayed/noised when that DR is on) and the true one."""
         true = self._true_object_pose()
         actor = true
         if self.cfg.domain_randomization.use_object_state_delay_noise:
@@ -712,6 +727,12 @@ class G1SonicTouchMjEnv:
             if pose is None or pose[2] != self._sim_step_counter:
                 raise RuntimeError('Actor object pose was not captured at this step')
             actor = pose[:2]
+        return actor, true
+
+    def _hand_surface_observations(self):
+        """(actor, critic) hand-to-surface observations: the actor sees the object pose its
+        other object observations use (delayed/noised when that DR is on), the critic the true one."""
+        actor, true = self._actor_and_true_object_pose()
         critic = self._hand_surface.observation(*true)
         return (critic if actor is true else self._hand_surface.observation(*actor)), critic
 
@@ -768,5 +789,8 @@ class G1SonicTouchMjEnv:
         obs = {k: torch.cat((v, extra), -1) for k, v in obs.items()}
         if self._hand_surface is not None:
             actor, critic = self._hand_surface_observations()
+            obs = dict(policy=torch.cat((obs['policy'], actor), -1), critic=torch.cat((obs['critic'], critic), -1))
+        if getattr(self, '_table_obs', None) is not None:
+            actor, critic = self._table_obs.observation(*self._actor_and_true_object_pose())
             obs = dict(policy=torch.cat((obs['policy'], actor), -1), critic=torch.cat((obs['critic'], critic), -1))
         return obs

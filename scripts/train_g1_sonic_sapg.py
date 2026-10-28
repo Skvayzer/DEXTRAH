@@ -197,6 +197,15 @@ def main():
     p.add_argument('--hand-surface-goal', action='store_true',
                    help='With --hand-surface-obs: also the 17 hand points -> object surface at the GOAL pose '
                         '(51 inputs, InterMimicGen reference geometry), appended')
+    p.add_argument('--table-obs', action='store_true',
+                   help='Frozen SONIC (mjlab), with --hand-surface-obs: table observation block (54 inputs, '
+                        'wholebody/table_obs.py: plane, edges, hand / body to table, object support point, critic forces), '
+                        'appended to the hand block; with --init-weights from a run without it, its columns start at zero')
+    p.add_argument('--no-table-obs-noise', action='store_true', help='--table-obs without the actor estimation noise')
+    p.add_argument('--table-height-range', type=float, default=None,
+                   help='+- m on the table height (nominal top 0.80 m; 0.10 -> 0.70-0.90 m); goals keep their height above the table')
+    p.add_argument('--table-xy-range', type=float, default=None, help='+- m on the table position (x and y)')
+    p.add_argument('--table-yaw-range-deg', type=float, default=None, help='+- degrees on the table yaw')
     p.add_argument('--sgs-state', type=Path,
                    help='SGS state to continue (X.sgs.pt); default: the --resume checkpoint\'s')
     p.add_argument('--best-metric', choices=['reward', 'sgs_eval_goals', 'sgs_eval_success', 'carry_eval'], default='reward',
@@ -238,6 +247,8 @@ def main():
         raise ValueError('--teacher-checkpoint initializes a frozen-SONIC policy from an existing checkpoint')
     if (args.hand_surface_arm_links or args.hand_surface_goal) and not args.hand_surface_obs:
         raise ValueError('--hand-surface-arm-links / --hand-surface-goal extend --hand-surface-obs')
+    if args.table_obs and (not args.hand_surface_obs or args.mj_carry):
+        raise ValueError('--table-obs needs --hand-surface-obs (its hand points) and is not implemented for --mj-carry')
     if args.hand_surface_obs and (backend != 'mjlab' or not args.frozen_pretrained_sonic or args.carry):
         raise ValueError('--hand-surface-obs is implemented for the frozen-SONIC mjlab reposing task')
     if args.sgs_state is not None and (not args.sgs or not args.sgs_state.is_file()):
@@ -256,6 +267,9 @@ def main():
         parent_hand = bool(parent_contract.get('body_termination', {}).get('hand_surface_obs', False))
         parent_dim = int(parent_contract.get('hand_surface', {}).get('dim', HAND_SURFACE_DIM if parent_hand else 0))
         new_dim = hand_surface_dim(args.hand_surface_arm_links, args.hand_surface_goal) if args.hand_surface_obs else 0
+        if args.table_obs:
+            from dextrah_lab.wholebody.table_obs import TABLE_OBS_DIM
+            new_dim += TABLE_OBS_DIM                 # table block, appended after the hand-surface block
         if args.mj_carry:
             from dextrah_lab.mj.carry_env import context_dim
             carry_version = int(json.loads(args.carry_settings or '{}').get('version', 1))
@@ -358,6 +372,15 @@ def main():
         cfg.sonic_body.hand_surface_obs = args.hand_surface_obs
         cfg.sonic_body.hand_surface_arm_links = args.hand_surface_arm_links
         cfg.sonic_body.hand_surface_goal = args.hand_surface_goal
+        cfg.sonic_body.table_obs = args.table_obs
+        cfg.sonic_body.table_obs_noise = not args.no_table_obs_noise
+        if args.table_height_range is not None:
+            cfg.reset.table_reset_z_range = float(args.table_height_range)
+            cfg.sonic_body.goals_follow_table = True
+        if args.table_xy_range is not None:
+            cfg.reset.table_reset_xy_range_m = (float(args.table_xy_range), float(args.table_xy_range))
+        if args.table_yaw_range_deg is not None:
+            cfg.reset.table_reset_yaw_range_deg = float(args.table_yaw_range_deg)
         if args.body_table_contact_monitor_only:
             cfg.sonic_body.body_table_contact_termination = True
             cfg.sonic_body.body_table_contact_terminates = False
@@ -672,6 +695,27 @@ def main():
             (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
             if args.wandb == 'online':
                 wandb.config.update(dict(hand_surface=contract['hand_surface'], intentional_changes=contract['intentional_changes']),
+                                    allow_val_change=True)
+        if args.table_obs or args.table_height_range is not None or args.table_xy_range is not None or args.table_yaw_range_deg is not None:
+            table = getattr(env, '_table_obs', None)
+            contract['table'] = dict(
+                observation=table.contract() if table is not None else None,
+                top_height_m=[round(float(cfg.reset.table_reset_z)+.15-float(cfg.reset.table_reset_z_range), 3),
+                              round(float(cfg.reset.table_reset_z)+.15+float(cfg.reset.table_reset_z_range), 3)],
+                xy_range_m=list(cfg.reset.table_reset_xy_range_m), yaw_range_deg=float(cfg.reset.table_reset_yaw_range_deg),
+                goals_follow_table=bool(getattr(cfg.sonic_body, 'goals_follow_table', False)))
+            changes = []
+            if table is not None:
+                changes.append(f'table_observation_{table.dim}d')
+            if args.table_height_range is not None:
+                changes.append(f'table_height_randomization_pm{args.table_height_range:g}m_goals_follow_table')
+            if args.table_xy_range is not None or args.table_yaw_range_deg is not None:
+                changes.append('table_pose_randomization')
+            contract['intentional_changes'] = contract['intentional_changes']+changes
+            (args.output/'task_contract.json').write_text(json.dumps(contract, indent=2))
+            print('TABLE_SETUP '+json.dumps(contract['table']), flush=True)
+            if args.wandb == 'online':
+                wandb.config.update(dict(table=contract['table'], intentional_changes=contract['intentional_changes']),
                                     allow_val_change=True)
         register_sonic_models(actor, critic, sonic, env._body_lower[0], env._body_upper[0], student, frozen=frozen,
                               hand_dim=hand_dim)
