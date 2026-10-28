@@ -6,7 +6,8 @@ gradient is used for the carry expert's fingers, check that the model moves outc
 does when a finger command changes (finite differences in both, same perturbations):
 
   * worlds: --states holding states, each restored into 1 + 6 fingers x 2 signs x len(--deltas) worlds
-    (no mass / COM / carry-target randomisation, no pushes, tables parked, deterministic carry expert): identical except for
+    (no mass / COM / carry-target randomisation, no pushes, tables parked, per-step domain randomisation off --
+    action / observation delays, object-state noise -- deterministic carry expert): identical except for
     the perturbation, so simulator differences are exact (MuJoCo Warp is deterministic);
   * perturbation: finger j's command +-delta (command units) on top of the expert's, for --duration-s,
     starting --t0-s after the restore (secure phase; the warm-up ends at 0.5 s);
@@ -44,6 +45,9 @@ def main():
                    help='K copies of every (state, direction) with independent finger-command jitter; outcomes averaged '
                         '(expected effects, as Bundled Contact Gradients average perturbed branches)')
     p.add_argument('--jitter', type=float, default=0., help='std of the per-step finger-command jitter (command units)')
+    p.add_argument('--randomization', choices=('off', 'training'), default='off',
+                   help="the run config's per-step domain randomisation (action / observation delays, object-state "
+                        "noise): 'off' (copies identical except for the perturbation; before 2026-10-28 it was on)")
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
     report = dict(completed=False, args={k: str(v) for k, v in vars(args).items()})
@@ -83,7 +87,8 @@ def run(args):
     override = dict(mass_scale=(1., 1.), com_offset_m=0., disturbance=0., push_probability=0., carry_jitter=0.,
                     table_keep_probability=0.)
     env, policy, contract, settings = build_carry_env(args.checkpoint, n, settings_override=override,
-                                                      holding_state=args.holding_state, seed=args.seed)
+                                                      holding_state=args.holding_state, seed=args.seed,
+                                                      no_randomization=args.randomization == 'off')
     dev, dt = env.device, env.step_dt
     g = torch.Generator().manual_seed(args.seed)
     configs = env._sgs.configs

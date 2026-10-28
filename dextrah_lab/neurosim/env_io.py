@@ -10,10 +10,19 @@ import json
 from pathlib import Path
 
 
+# Per-step domain randomisation of the run config (as scripts/record_wholebody_videos.NO_RANDOMIZATION): observation
+# and action delays (each world draws a 0..max-step-old action every step), noised / delayed object state, joint
+# velocity noise, random object force / torque. Off makes worlds with identical inputs identical.
+NO_RANDOMIZATION = dict(use_obs_delay=False, use_action_delay=False, use_object_state_delay_noise=False,
+                        object_state_xyz_noise_std=0., object_state_rotation_noise_degrees=0.,
+                        joint_velocity_obs_noise_std=0., force_scale=0., torque_scale=0.)
+
+
 def build_carry_env(checkpoint, num_envs, *, settings_override=None, holding_state=None, seed=0, nconmax=64, njmax=400,
-                    level=2, device='cuda:0'):
+                    level=2, device='cuda:0', no_randomization=False):
     """(env, policy model, contract, settings) for a carry expert checkpoint; settings_override: CarrySettings
-    fields to replace (e.g. no randomisation); holding_state: another SGS state file (same scene)."""
+    fields to replace (e.g. no mass / push randomisation); holding_state: another SGS state file (same scene);
+    no_randomization: the run config's per-step domain randomisation off (NO_RANDOMIZATION)."""
     import torch  # noqa: F401
     from dextrah_lab.mj.carry_env import G1CarryMjEnv
     from dextrah_lab.mj.env import load_run_cfg
@@ -34,6 +43,11 @@ def build_carry_env(checkpoint, num_envs, *, settings_override=None, holding_sta
     task_contract = json.loads((task_run/'task_contract.json').read_text())
     cfg = load_run_cfg(task_run)
     cfg.seed = seed
+    if no_randomization:
+        for key, value in NO_RANDOMIZATION.items():
+            if not hasattr(cfg.domain_randomization, key):
+                raise KeyError(f'domain_randomization.{key} missing')
+            setattr(cfg.domain_randomization, key, value)
     cfg.sonic_body.spawn_on_table = task_contract['body_termination']['spawn_on_table']
     holding = Path(holding_state or cm['holding_state'])
     held_contract = json.loads((holding.parent.parent/'task_contract.json').read_text())

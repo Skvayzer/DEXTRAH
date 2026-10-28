@@ -18,6 +18,9 @@ action, and whether the copies differ in keeping the table. Blocks in which any 
   no_table   + table_keep_probability 0 (every copy parks its table)
   shared     no_table + every copy executes copy 0's carry-expert action (removes the expert's feedback;
              frozen SONIC still closes its loop on the body state)
+--no-randomization: the run config's per-step domain randomisation off. With it on, every world draws a
+0-2-step-old action each step (use_action_delay) and observes a delayed / noised object state, so copies
+diverge from the first step even with shared actions (2026-10-28 runs without the flag).
 """
 import argparse
 import json
@@ -37,6 +40,8 @@ def main():
     p.add_argument('--states', type=int, default=160, help='states x replicas >= the object assets (SGS assigns every asset)')
     p.add_argument('--replicas', type=int, default=8)
     p.add_argument('--seconds', type=float, default=1.2, help='from the restore (the gradient check ends at 1.1 s)')
+    p.add_argument('--no-randomization', action='store_true',
+                   help='per-step domain randomisation of the run config off (action / observation delays, object-state noise)')
     p.add_argument('--seed', type=int, default=0)
     args = p.parse_args()
     report = dict(completed=False, args={k: str(v) for k, v in vars(args).items()})
@@ -66,7 +71,8 @@ def run(args):
     override = dict(mass_scale=(1., 1.), com_offset_m=0., disturbance=0., push_probability=0., carry_jitter=0.)
     if args.variant != 'as_check':
         override['table_keep_probability'] = 0.
-    env, policy, contract, settings = build_carry_env(args.checkpoint, n, settings_override=override, seed=args.seed)
+    env, policy, contract, settings = build_carry_env(args.checkpoint, n, settings_override=override, seed=args.seed,
+                                                      no_randomization=args.no_randomization)
     dev, dt = env.device, env.step_dt
     g = torch.Generator().manual_seed(args.seed)
     chosen = torch.randperm(env._sgs.configs.numel(), generator=g)[:S].to(dev)
@@ -143,7 +149,7 @@ def run(args):
         return None
     end = rows[-1]
     t_check = [r for r in rows if abs(r['t']-1.1) < dt/2]
-    summary = dict(variant=args.variant, override={k: list(v) if isinstance(v, tuple) else v for k, v in override.items()},
+    summary = dict(variant=args.variant, no_randomization=args.no_randomization, override={k: list(v) if isinstance(v, tuple) else v for k, v in override.items()},
                    worlds=n, states=S, replicas=R, blocks_live_end=end['blocks_live'],
                    restore=dict(qpos=rows[0]['qpos'], obs=rows[0]['obs'], keep_table_mismatch=rows[0]['keep_table_mismatch']),
                    first_t_qpos_nonzero=first('qpos', 0.), first_t_object_over_0p1mm=first('object_mm', .1),
