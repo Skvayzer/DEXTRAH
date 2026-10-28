@@ -50,6 +50,10 @@ class CarrySettings:
     beta_fingers: float = .3            # finger residual bound, command units ([-1, 1] = joint range)
     beta_latent: float = 2.             # latent residual bound (x0.1 before FSQ)
     arm_reference: str = 'grasp'        # 'grasp': holding-state arm angles; 'standing': trained standing arms
+    # left (free) arm with arm_reference 'grasp': 'grasp' keeps its holding-state angles (M often leaves it raised);
+    # 'standing' blends it to the standing pose over left_arm_s from the carry start (2026-10-28 user review)
+    left_arm: str = 'grasp'
+    left_arm_s: float = 1.
     residual_joints: str = 'arms'       # body joints driven by the residual decode (rest: bare SONIC)
     drop_excess_m: float = .12          # drop: palm-frame object offset beyond the hold by this ...
     drop_steps: int = 6                 # ... for this many policy steps, or object below drop_floor_m
@@ -141,6 +145,8 @@ class CarrySettings:
             raise ValueError('Carry stage must be 1 or 2')
         if self.arm_reference not in ('grasp', 'standing') or self.residual_joints not in ('arms', 'arms_waist'):
             raise ValueError('Unknown carry arm reference / residual joints')
+        if self.left_arm not in ('grasp', 'standing') or self.left_arm_s <= 0:
+            raise ValueError('left_arm must be grasp or standing, left_arm_s > 0')
         if not 0 <= self.level < len(LEVELS):
             raise ValueError('Curriculum level out of range')
         if self.version not in (1, 2) or self.hold_mode not in ('offset', 'support'):
@@ -227,6 +233,14 @@ def carry_reward_v2(s, *, offset_error, rel_linear, rel_angular, body_velocity, 
 
 RIGHT_ARM_JOINTS = ('right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
                     'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint')
+
+
+def left_arm_reference(q_hold, q_standing, t, duration):
+    """Free (left) arm reference: from its holding-state angles q_hold to the standing pose q_standing (both
+    (..., k)), minimum jerk over duration from the carry start; t (n,) seconds since the carry start."""
+    from .carry_posture import min_jerk
+    blend = min_jerk(t/duration).reshape(-1, *([1]*(q_hold.dim()-1)))
+    return q_hold+blend*(q_standing-q_hold)
 
 
 def carry_arm_reference(q_grasp, q_carry, arm_delta, t, warmup_s, settle_s):

@@ -256,5 +256,18 @@ class CarryComposeTests(unittest.TestCase):
         self.assertEqual(len(seen), 5)                                  # no further clips or stops
 
 
+class LeftArmReferenceTest(unittest.TestCase):
+    def test_blend_to_standing(self):
+        import torch
+        from dextrah_lab.wholebody.carry_compose import CarrySettings, left_arm_reference
+        hold, standing = torch.full((3, 10, 7), .8), torch.zeros(3, 10, 7)
+        r = left_arm_reference(hold, standing, torch.tensor([0., .5, 3.]), 1.)
+        self.assertTrue(torch.allclose(r[0], hold[0]))                      # carry start: holding-state angles
+        self.assertTrue(torch.allclose(r[1], torch.full((10, 7), .4)))       # minimum jerk midpoint
+        self.assertTrue(torch.allclose(r[2], standing[2]))                   # after the blend: standing pose
+        self.assertEqual(CarrySettings().left_arm, 'grasp')                  # default unchanged
+        with self.assertRaises(ValueError):
+            CarrySettings(left_arm='up')
+
 if __name__ == '__main__':
     unittest.main()

@@ -109,7 +109,7 @@ def run(args):
     from dextrah_lab.wholebody.carry import MovingFrame, field_slice, yaw_of
     from dextrah_lab.wholebody.carry_compose import (RIGHT_ARM_JOINTS, CarrySettings, arm_delta_step, body_joint_masks,
                                                      carry_arm_reference, carry_context_v2, compose_body, finger_command,
-                                                     hand_command, hand_support)
+                                                     hand_command, hand_support, left_arm_reference)
     from dextrah_lab.wholebody.contract import BODY_JOINTS
     from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM
     from dextrah_lab.wholebody.navigation_reference import NavigationReference, yaw_of as np_yaw
@@ -211,6 +211,9 @@ def run(args):
     standing_q = env._reference_q.clone()
     # carry v2 state
     right_arm = torch.tensor([BODY_JOINTS.index(j) for j in RIGHT_ARM_JOINTS], device=d)
+    left_arm = torch.tensor([int(i) for i in arm_ids if BODY_JOINTS[int(i)].startswith('left_')], device=d)
+    left_mode = getattr(carry, 'left_arm', 'grasp') if args.left_arm == 'contract' else args.left_arm
+    left_standing, left_arm_s = left_mode == 'standing', float(getattr(carry, 'left_arm_s', 1.))
     q_grasp, q_carry, arm_D, arm_now = z(7), z(7), z(7), z(7)
     c_steps, unsupported = z(dtype=torch.long), z(dtype=torch.long)
     carry_target = torch.tensor(carry.carry_target, device=d).expand(n, 3)
@@ -287,6 +290,10 @@ def run(args):
             idx = torch.tensor(ids, device=d)
             q = torch.as_tensor(np.stack(Q), device=d)
             q[:, :, arm_ids] = arm_ref[idx][:, None]                 # C's arm reference: angles at the switch
+            if left_standing:
+                # free (left) arm: from its switch-time angles to the standing pose (C's left_arm setting)
+                tc_left = c_steps[idx].float()*env.step_dt
+                q[:, :, left_arm] = left_arm_reference(q[:, :, left_arm], standing_q[idx][:, :, left_arm], tc_left, left_arm_s)
             if c_v2:
                 # C's episode time after this step (the training env counts the step before observing)
                 tc = (c_steps[idx]+1).float()*env.step_dt
@@ -994,6 +1001,9 @@ def main():
     p.add_argument('--place-limit', type=float, default=15.)
     p.add_argument('--release-s', type=float, default=2.)
     p.add_argument('--place-goal', choices=('rest', 'hover', 'both', 'nearest'), default='both')
+    p.add_argument('--left-arm', choices=('contract', 'grasp', 'standing'), default='contract',
+                   help="free (left) arm while C carries: the carry expert's left_arm setting (contract; older runs: grasp), "
+                        "its switch-time angles (grasp), or a blend to the standing pose (standing)")
     p.add_argument('--place-mode', choices=('policy', 'scripted'), default='policy',
                    help="'scripted': C keeps control at table B, scripted arm lowering until table support, then the fingers open")
     p.add_argument('--lower-s', type=float, default=2., help='scripted: duration of the arm lowering profile')

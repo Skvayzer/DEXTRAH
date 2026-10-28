@@ -32,6 +32,7 @@ from isaaclab.utils.math import matrix_from_quat, quat_apply_inverse, quat_conju
 from dextrah_lab.wholebody.carry import MovingFrame, field_slice, quat_from_yaw, transform_clean_observation, yaw_of
 from dextrah_lab.wholebody.carry_compose import (LEVELS, RIGHT_ARM_JOINTS, CarrySettings, ClipSequencer, Curriculum,
                                                  WalkingClips, arm_delta_step, body_joint_masks, carry_arm_reference,
+                                                 left_arm_reference,
                                                  carry_context_v2, carry_reward_v2, carry_reward_v3, compose_body,
                                                  finger_command, hand_command, hand_support, region_distance,
                                                  NetRotation)
@@ -211,6 +212,7 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         self._standing_q = self._reference_q.clone()
         self._arm_ids = torch.tensor([i for i, name in enumerate(BODY_JOINTS)
                                       if any(p in name for p in ('shoulder', 'elbow', 'wrist'))], device=d)
+        self._left_arm_ids = torch.tensor([int(i) for i in self._arm_ids if BODY_JOINTS[int(i)].startswith('left_')], device=d)
         self._residual_mask = body_joint_masks(BODY_JOINTS, carry.residual_joints).to(d)
         self._wrist_body = int(self.sim.mj_model.body('robot/right_wrist_yaw_link').id)
         # Observation slices: goal-relative keypoints (task part), goal-surface vectors (hand block).
@@ -490,6 +492,9 @@ class G1CarryMjEnv(G1SonicTouchMjEnv):
         qd = qd*w
         if self.s.arm_reference == 'grasp':
             q[:, :, self._arm_ids] = self._arm_ref[:, None]
+            if getattr(self.s, 'left_arm', 'grasp') == 'standing':
+                L = self._left_arm_ids
+                q[:, :, L] = left_arm_reference(q[:, :, L], self._standing_q[:, :, L], t, self.s.left_arm_s)
         else:
             q[:, :, self._arm_ids] = self._standing_q[:, :, self._arm_ids]
         if getattr(self, '_v2', False) and self.s.arm_channel:
