@@ -91,3 +91,15 @@ the model inputs with R^2 0.94-1.00 for 5 of 6 joints, add 0.003 to the force R^
 step in 90% of steps. The model learned action effects only along the expert's closed-loop variations; the
 check's sustained +-0.05-0.1 offsets lie far outside them. Learning the response needs independent finger-command
 variation (paired counterfactuals).
+
+Paired counterfactuals (job 1620; outputs/neurosim/counterfactual/): 61,440 groups x 8 bit-identical copies
+(19,762 holding states, randomisation off, the model's held-out objects excluded), copies 1-7 with finger-command
+perturbations (constant / pulse / noise) for 8 steps. Fine-tune of combined_single, 6000 iterations, difference
+loss weight 1 (finetune_v1, W&B vwb7jes7): drop prediction kept (phase-matched AUC 0.982 -> 0.987), open loop about
+unchanged. Held-out pair objects (pair_diagnostic.json): cosine of predicted vs simulated copy - baseline
+difference, base -> fine-tuned: hand joint positions 0.54 -> 0.69, object position 0.09 -> 0.24, object rotation
+0.06 -> 0.10, object velocity 0.07 -> 0.11, pad forces 0.07 -> 0.09; the model's error on the unperturbed rollout
+is 1-4x the size of the object / contact effects. Held-out gradient check at 0.1 s (gradcheck_*_h0p1.json) stays at
+chance (cosine -0.03-0.05, sign agreement 48-53%). Within the ~0.1 s where the simulator's action effects are
+defined they are at or below a learned model's error floor; beyond it the simulator is chaotic. No usable
+first-order gradient for a SuperMimic-style objective on this task; the model remains a drop-risk predictor.
