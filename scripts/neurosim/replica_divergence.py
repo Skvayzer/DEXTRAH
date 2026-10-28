@@ -34,7 +34,7 @@ def main():
     p.add_argument('--checkpoint', type=Path, required=True, help='carry expert')
     p.add_argument('--output', type=Path, required=True, help='report .json')
     p.add_argument('--variant', choices=('as_check', 'no_table', 'shared'), required=True)
-    p.add_argument('--states', type=int, default=32)
+    p.add_argument('--states', type=int, default=160, help='states x replicas >= the object assets (SGS assigns every asset)')
     p.add_argument('--replicas', type=int, default=8)
     p.add_argument('--seconds', type=float, default=1.2, help='from the restore (the gradient check ends at 1.1 s)')
     p.add_argument('--seed', type=int, default=0)
