@@ -210,3 +210,35 @@ def install_goals_follow_table(reset_utils, nominal_table_z):
             viz.write_root_pose_to_sim = writer
     follow.follows_table = True
     reset_utils._reset_goal_pose = follow
+
+
+def install_own_counter(rms, start, count=1.):
+    """Channels ``start:`` of an rl_games RunningMeanStd keep their own sample count (2026-10-28 review): the
+    table block is appended to the hand normaliser, whose shared count (~1e9 after M's training) would leave the
+    added channels at their initial mean 0 / var 1. The shared update still runs (the existing channels keep their
+    statistics); the added channels' mean / var are then replaced by their own count-weighted estimate and the
+    input is normalised with those. The own count is not saved with the checkpoint (a resumed run re-estimates the
+    added channels from its first batches)."""
+    if getattr(rms, 'own_counter_start', None) is not None:
+        return
+    rms.register_buffer('own_count', torch.tensor(float(count), dtype=torch.float64, device=rms.count.device), persistent=False)
+    rms.own_counter_start = int(start)
+    base = rms.forward
+
+    def forward(input, denorm=False, mask=None):
+        if not rms.training or denorm or mask is not None:
+            return base(input, denorm, mask)
+        x = input[:, start:].double()
+        mean, var, n = rms._update_mean_var_count_from_moments(rms.running_mean[start:], rms.running_var[start:], rms.own_count,
+                                                               x.mean(0), x.var(0), x.shape[0])
+        base(input, denorm, mask)                       # shared update (all channels), output discarded
+        with torch.no_grad():
+            rms.running_mean[start:] = mean
+            rms.running_var[start:] = var
+        rms.own_count = n
+        rms.train(False)
+        try:
+            return base(input, denorm, mask)            # normalise with the updated statistics
+        finally:
+            rms.train(True)
+    rms.forward = forward

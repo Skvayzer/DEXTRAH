@@ -377,6 +377,7 @@ def main():
         if args.table_height_range is not None:
             cfg.reset.table_reset_z_range = float(args.table_height_range)
             cfg.sonic_body.goals_follow_table = True
+            cfg.sonic_body.sgs_table_heights = True    # stored SGS starts adapted to a sampled height at each restore
         if args.table_xy_range is not None:
             cfg.reset.table_reset_xy_range_m = (float(args.table_xy_range), float(args.table_xy_range))
         if args.table_yaw_range_deg is not None:
@@ -703,7 +704,11 @@ def main():
                 top_height_m=[round(float(cfg.reset.table_reset_z)+.15-float(cfg.reset.table_reset_z_range), 3),
                               round(float(cfg.reset.table_reset_z)+.15+float(cfg.reset.table_reset_z_range), 3)],
                 xy_range_m=list(cfg.reset.table_reset_xy_range_m), yaw_range_deg=float(cfg.reset.table_reset_yaw_range_deg),
-                goals_follow_table=bool(getattr(cfg.sonic_body, 'goals_follow_table', False)))
+                goals_follow_table=bool(getattr(cfg.sonic_body, 'goals_follow_table', False)),
+                sgs_starts=('every restored start gets a table height sampled uniformly over the range: resting starts '
+                            'move object, lift reference and goal with the table (robot pose kept); held starts keep the '
+                            'table top >= 5 cm below the object\'s lowest keypoint; success logged per table-top bin'
+                            if getattr(cfg.sonic_body, 'sgs_table_heights', False) else None))
             changes = []
             if table is not None:
                 changes.append(f'table_observation_{table.dim}d')
@@ -877,6 +882,14 @@ def main():
         signal.signal(signal.SIGTERM, request_stop)
         report.update(bootstrap=bootstrap_report, task_contract=contract, num_envs=args.num_envs)
         (args.output/'warmstart_validation.json').write_text(json.dumps(report, indent=2))
+        if getattr(env, '_table_obs', None) is not None:
+            # The table channels (last TABLE_OBS_DIM of the hand normaliser) keep their own sample count.
+            from dextrah_lab.wholebody.table_obs import TABLE_OBS_DIM, install_own_counter
+            start = hand_dim-TABLE_OBS_DIM
+            install_own_counter(algo.model.running_mean_std.hand, start)
+            install_own_counter(algo.central_value_net.model.running_mean_std.hand, start)
+            report['table_normaliser'] = dict(own_counter_channels=[start, hand_dim], shared_count_kept=True)
+            print('TABLE_NORMALISER '+json.dumps(report['table_normaliser']), flush=True)
         start_frame, start_time = int(algo.frame), time.monotonic()
         torch.cuda.reset_peak_memory_stats()
         print('SONIC_SAPG_TRAINING_START '+json.dumps(dict(envs=args.num_envs, groups=6,

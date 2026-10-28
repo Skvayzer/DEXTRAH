@@ -152,6 +152,17 @@ class SgsSettings:
         return dict(num_configs=self.num_configs, history=self.history, families=tuple(self.families))
 
 
+HEIGHT_BINS = 4              # table-height bins for the per-height success metrics
+HELD_TABLE_CLEARANCE = .05   # held starts: the table top stays this far below the object's lowest keypoint
+
+
+def lowest_keypoint_z(pose, offsets):
+    """Lowest z of the object keypoints (n, K, 3 offsets in the object frame) at env-local poses (n, 7: pos, wxyz)."""
+    w, x, y, z = pose[:, 3:7].unbind(-1)
+    row = torch.stack((2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)), -1)          # third row of R
+    return pose[:, 2]+(offsets*row[:, None]).sum(-1).amin(-1)
+
+
 class _Rolling:
     """Mean of the last ``capacity`` values (device ring buffer)."""
 
@@ -243,6 +254,18 @@ class MjSgsTask:
         self.train_stats = {f: _Rolling(w, self.device) for f in settings.families}
         self.fall_stats = {f: _Rolling(w, self.device) for f in settings.families}
         self.robot_fall_stats = {f: _Rolling(w, self.device) for f in settings.families} if self.wholebody else {}
+        # Table heights (opt-in, cfg.sonic_body.sgs_table_heights; 2026-10-28 placement review): every restored start
+        # gets a freshly sampled table height (uniform over the reset range): resting starts move with the table
+        # (object, its reference height and the goal shifted, robot pose kept); held starts keep the object in the
+        # hand and the table stays HELD_TABLE_CLEARANCE below its lowest keypoint. Success is logged per height bin.
+        rc = env.cfg.reset
+        self.table_heights = bool(getattr(getattr(env.cfg, 'sonic_body', None), 'sgs_table_heights', False))
+        self.table_lo = float(rc.table_reset_z)-float(rc.table_reset_z_range)
+        self.table_hi = float(rc.table_reset_z)+float(rc.table_reset_z_range)
+        self.height_edges = torch.linspace(self.table_lo, self.table_hi, HEIGHT_BINS+1, device=self.device)
+        self.height_train = [_Rolling(w, self.device) for _ in range(HEIGHT_BINS)]
+        self.height_eval = [_Rolling(w, self.device) for _ in range(HEIGHT_BINS)]
+        self.height_starts = torch.zeros(HEIGHT_BINS, device=self.device)        # restored starts per bin
         self.steps = 0
         self.validated = torch.zeros(N, dtype=torch.bool, device=self.device)
         self.spawn_stats = dict(checked=0, valid=0, spawn_overlap=0, ejected=0, off_table=0, not_at_rest=0, max_nefc=0, max_nefc_other=0)
@@ -623,6 +646,8 @@ class MjSgsTask:
             fam = self.family[cfg_ids[active]]
             fall = env._termination_reasons['fall'][env_ids[active]]
             robot_fall = env._body_fallen[env_ids[active]] if self.wholebody else None
+            if self.table_heights:
+                self._add_by_height(self.height_train, env._table_z_per_env[env_ids[active]], success)
             for i, f in enumerate(FAMILIES):
                 if f in self.train_stats:
                     self.train_stats[f].add(success[fam == i])
@@ -635,6 +660,8 @@ class MjSgsTask:
             self.eval_stats['any_goal_success_rate'].add(env._successes[finished_eval] > 0)
             self.eval_stats['goals_reached_count'].add(env._successes[finished_eval])
             self.eval_stats['ever_lifted_rate'].add(env._episode_ever_lifted[finished_eval])
+            if self.table_heights:
+                self._add_by_height(self.height_eval, env._table_z_per_env[finished_eval], env._successes[finished_eval] > 0)
             if self.wholebody:
                 self.eval_stats['robot_fall_rate'].add(env._body_fallen[finished_eval])
         # Evaluation: fresh rho sample with a uniformly random asset, or a uniform
@@ -674,16 +701,21 @@ class MjSgsTask:
             return
         k = self.current[ids]
         origin = env.scene.env_origins[ids]
-        table = torch.zeros(len(ids), 7, device=self.device)
-        table[:, 2], table[:, 3] = c['table_z'][k], 1.
-        env.table.write_root_pose_to_sim(table+torch.cat((origin, torch.zeros_like(table[:, 3:])), -1), env_ids=ids)
-        env._table_z_per_env[ids] = c['table_z'][k]
         reach = self.family[k] == FAMILIES.index('reaching')
+        dz = self._table_shift(ids, k, reach) if self.table_heights else torch.zeros(len(ids), device=self.device)
+        table = torch.zeros(len(ids), 7, device=self.device)
+        table[:, 2], table[:, 3] = c['table_z'][k]+dz, 1.
+        env.table.write_root_pose_to_sim(table+torch.cat((origin, torch.zeros_like(table[:, 3:])), -1), env_ids=ids)
+        env._table_z_per_env[ids] = c['table_z'][k]+dz
+        if self.table_heights:
+            self.height_starts += torch.bincount(torch.bucketize(env._table_z_per_env[ids], self.height_edges[1:-1]),
+                                                 minlength=HEIGHT_BINS).float()
         if bool(reach.any()):
             r, kr = ids[reach], k[reach]
             env.robot.write_joint_state_to_sim(c['joint_pos'][kr], c['joint_vel'][kr], env_ids=r)
             pose = c['object_pose'][kr].clone()
             pose[:, :3] += env.scene.env_origins[r]
+            pose[:, 2] += dz[reach]                             # the resting object moves with the table
             env.object.write_root_pose_to_sim(pose, env_ids=r)
             env.object.write_root_velocity_to_sim(torch.zeros(len(r), 6, device=self.device), env_ids=r)
             if self.wholebody:
@@ -704,10 +736,30 @@ class MjSgsTask:
         env._prev_targets[ids] = c['targets'][k]
         env._cur_targets[ids] = c['targets'][k]
         env.robot.reset_setpoint(ids, c['setpoint'][k])
-        env._object_init_z[ids] = c['object_init_z'][k]
+        env._object_init_z[ids] = c['object_init_z'][k]+dz          # lift reference: rest height on this table
         goal = c['goal_pose'][k].clone()
         goal[:, :3] += origin
+        goal[:, 2] += torch.where(reach, dz, torch.zeros_like(dz))  # resting starts: goal keeps its height above the table
         env.goal_viz.write_root_pose_to_sim(goal, env_ids=ids)
+
+    def _table_shift(self, ids, k, reach):
+        """Table height change for restored starts: uniform over the reset range; held starts keep the table top
+        HELD_TABLE_CLEARANCE below the object's lowest keypoint (lowered when needed, within the range)."""
+        c = self.cfg
+        stored = c['table_z'][k]
+        target = self.table_lo+(self.table_hi-self.table_lo)*torch.rand(len(ids), device=self.device, generator=self.generator)
+        dz = target-stored
+        held = ~reach
+        if bool(held.any()):
+            low = lowest_keypoint_z(c['object_pose'][k[held]], self.env._keypoint_offsets[ids[held]])
+            limit = low-HELD_TABLE_CLEARANCE-TABLE_SIZE[2]/2-stored[held]          # largest allowed shift up
+            dz[held] = torch.minimum(dz[held], limit)
+        return torch.maximum(dz, self.table_lo-stored)
+
+    def _add_by_height(self, stats, table_z, values):
+        b = torch.bucketize(table_z, self.height_edges[1:-1])
+        for i, r in enumerate(stats):
+            r.add(values[b == i])
 
     @torch.no_grad()
     def after_step(self):
@@ -1007,6 +1059,14 @@ class MjSgsTask:
             if self.wholebody:
                 x[f'sgs/{f}/train_robot_fall_rate'] = self.robot_fall_stats[f].mean()
             x[f'sgs/{f}/configs'] = float(self.fill_count[f])
+        if self.table_heights:
+            tops = (self.height_edges+TABLE_SIZE[2]/2).tolist()
+            share = self.height_starts/self.height_starts.sum().clamp_min(1.)
+            for i in range(HEIGHT_BINS):
+                name = f'sgs/table_top_{tops[i]:.2f}_{tops[i+1]:.2f}'
+                x[f'{name}/train_success'] = self.height_train[i].mean()
+                x[f'{name}/eval_success'] = self.height_eval[i].mean()
+                x[f'{name}/start_share'] = share[i]
         x['sgs/harvest_done'] = float(self.harvest_done)
         if self.settings.reharvest_every:
             x['sgs/reharvest/rounds'] = float(self.round)

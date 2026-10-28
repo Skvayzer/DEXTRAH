@@ -143,5 +143,62 @@ class GoalsFollowTableTests(unittest.TestCase):
         self.assertTrue(getattr(ru._reset_goal_pose, 'follows_table', False))
 
 
+
+class SgsTableHeightTests(unittest.TestCase):
+    def test_lowest_keypoint_and_shift(self):
+        from dextrah_lab.sgs.mj_task import HELD_TABLE_CLEARANCE, MjSgsTask, lowest_keypoint_z
+        offsets = torch.tensor([[[0., 0., -.03], [0., 0., .03], [.05, 0., 0.]]]).repeat(4, 1, 1)
+        pose = torch.tensor([[0., 0., 1., 1., 0., 0., 0.]]).repeat(4, 1)
+        self.assertTrue(torch.allclose(lowest_keypoint_z(pose, offsets), torch.full((4,), .97)))
+        flip = pose.clone()
+        flip[:, 3:7] = torch.tensor([math.cos(math.pi/4), 0., math.sin(math.pi/4), 0.])   # 90 deg about y: x -> -z
+        self.assertTrue(torch.allclose(lowest_keypoint_z(flip, offsets), torch.full((4,), .95), atol=1e-6))
+        # restored starts: two resting, two held (object lowest keypoint at 0.97 m, stored table centre 0.65 -> top 0.80)
+        cfg = dict(table_z=torch.full((4,), .65), object_pose=pose)
+        me = types.SimpleNamespace(cfg=cfg, table_lo=.55, table_hi=.75, device='cpu', generator=torch.Generator().manual_seed(0),
+                                   env=types.SimpleNamespace(_keypoint_offsets=offsets))
+        reach = torch.tensor([True, True, False, False])
+        dz = torch.stack([MjSgsTask._table_shift(me, torch.arange(4), torch.arange(4), reach) for _ in range(200)])
+        top = .65+dz+.15
+        self.assertTrue(bool((top >= .70-1e-6).all() and (top <= .90+1e-6).all()))
+        self.assertGreater(float(dz[:, :2].std()), .04)                                  # resting: uniform over the range
+        self.assertTrue(bool((top[:, 2:] <= .97-HELD_TABLE_CLEARANCE+1e-6).all()))       # held: clearance kept
+        self.assertGreater(float((dz[:, 2:] < 0).float().mean()), .3)                    # held tables also go down
+
+    def test_height_bins(self):
+        from dextrah_lab.sgs.mj_task import HEIGHT_BINS, MjSgsTask, _Rolling
+        me = types.SimpleNamespace(height_edges=torch.linspace(.55, .75, HEIGHT_BINS+1))
+        stats = [_Rolling(16, 'cpu') for _ in range(HEIGHT_BINS)]
+        MjSgsTask._add_by_height(me, stats, torch.tensor([.56, .57, .74, .66]), torch.tensor([1., 0., 1., 1.]))
+        self.assertEqual([r.size for r in stats], [2, 0, 1, 1])
+        self.assertAlmostEqual(float(stats[0].mean()), .5)
+
+
+class OwnCounterTests(unittest.TestCase):
+    def test_added_channels_learn_existing_kept(self):
+        from rl_games.algos_torch.running_mean_std import RunningMeanStd
+        from dextrah_lab.wholebody.table_obs import install_own_counter
+        rms = RunningMeanStd((6,))
+        with torch.no_grad():
+            rms.running_mean[:] = torch.tensor([1., 2., 3., 4., 0., 0.], dtype=torch.float64)
+            rms.running_var[:] = torch.tensor([1., 1., 1., 1., 1., 1.], dtype=torch.float64)
+            rms.count.fill_(1e9)
+        install_own_counter(rms, 4)
+        rms.train()
+        g = torch.Generator().manual_seed(0)
+        for _ in range(20):
+            x = torch.randn(512, 6, generator=g)
+            x[:, :4] += torch.tensor([1., 2., 3., 4.])                     # existing channels: as trained
+            x[:, 4:] = x[:, 4:]*2+5                                          # added channels: mean 5, std 2
+            out = rms(x)
+        self.assertTrue(torch.allclose(rms.running_mean[:4].float(), torch.tensor([1., 2., 3., 4.]), atol=1e-3))
+        self.assertTrue(torch.allclose(rms.running_mean[4:].float(), torch.tensor([5., 5.]), atol=.1))
+        self.assertTrue(torch.allclose(rms.running_var[4:].float(), torch.tensor([4., 4.]), atol=.3))
+        self.assertLess(float(out[:, 4:].mean().abs()), .2)                  # normalised with the own estimate
+        self.assertNotIn('own_count', rms.state_dict())                      # checkpoint layout unchanged
+        rms.eval()
+        y = rms(x)
+        self.assertTrue(torch.allclose(y, out, atol=1e-3))
+
 if __name__ == '__main__':
     unittest.main()
