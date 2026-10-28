@@ -5,9 +5,11 @@ Inputs, per epoch: sgs/table_top_<lo>_<hi>/eval_success and .../eval_episodes = 
 last <= 3000 evaluation episodes of each table-top bin (1 in 16 envs; fresh validated resting starts; uniform table
 heights; about 11-12 finished episodes per bin and epoch).
 
-Reference: each bin's rolling value at the LAST critic warm-up epoch (--warmup, policy frozen). The warm-up is 300
-epochs, so the windows then hold ~3000 frozen-policy episodes that finished after the start transient (episodes
-end early only on failure, so the first ~38 epochs = one episode length are mostly failures).
+Reference: frozen-policy episodes (critic warm-up, --warmup epochs) that finished after the start transient
+(--transient epochs: episodes end early only on failure, so the first finished ones are mostly failures; evaluation
+episodes average ~19 s = ~70 epochs because reaching a goal restarts the timer). While a bin's window has not
+wrapped (eval_episodes < 3000) the reference is exact: (successes up to the warm-up end - successes up to the
+transient end) / episodes in between, from rolling mean x count; otherwise the window at the warm-up end.
 
 FORGET (item 6): a bin touching 0.80 m below its reference by more than --forget points AND by more than the 95%
 interval of the difference (binomial, both windows' episode counts), checked once the window has been refilled
@@ -42,7 +44,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('run')
     p.add_argument('--warmup', type=int, default=300)
-    p.add_argument('--refill', type=int, default=300, help='epochs after the warm-up before the forgetting check')
+    p.add_argument('--transient', type=int, default=100, help='first epochs left out of the reference')
+    p.add_argument('--capacity', type=int, default=3000, help='rolling window (episodes per bin)')
     p.add_argument('--min-epochs', type=int, default=1800, help='warm-up + 1500 training epochs')
     p.add_argument('--fit-epochs', type=int, default=600)
     p.add_argument('--min-gain', type=float, default=.5, help='points per 200 epochs')
@@ -65,19 +68,27 @@ def main():
     if n < a.warmup:
         print(f'WARMUP ({n}/{a.warmup}): ' + ' | '.join(f'{b}: {100*succ[b][n-1]:.1f}% of {int(eps[b][n-1])}' for b in bins))
         return
-    w0 = a.warmup-1
-    rows, forget = [], []
+    w0, t1 = a.warmup-1, a.transient-1
+    rows, forget, refill = [], [], 0
     for b in bins:
-        ref, n_ref, now, n_now = succ[b][w0], eps[b][w0], succ[b][n-1], eps[b][n-1]
+        if eps[b][w0] < a.capacity:                     # no wrap yet: exact successes between the transient and warm-up end
+            n_ref = eps[b][w0]-eps[b][t1]
+            ref = (succ[b][w0]*eps[b][w0]-succ[b][t1]*eps[b][t1])/max(n_ref, 1)
+            rate = n_ref/max(w0-t1, 1)
+        else:
+            ref, n_ref, rate = succ[b][w0], eps[b][w0], eps[b][w0]/(w0+1)
+            print(f'note: bin {b} window wrapped before the warm-up end; reference = window at the warm-up end')
+        refill = max(refill, int(math.ceil(a.capacity/max(rate, 1e-9))))    # epochs until the window is all post-warm-up
+        now, n_now = succ[b][n-1], eps[b][n-1]
         half = 1.96*math.sqrt(ref*(1-ref)/max(n_ref, 1)+now*(1-now)/max(n_now, 1))
         delta = now-ref
         rows.append(f'{b}: {100*now:5.1f}% (n {int(n_now)})  ref {100*ref:5.1f}% (n {int(n_ref)})  delta {100*delta:+5.1f} +- {100*half:.1f}')
         lo, hi = (float(x) for x in b.split('_'))
-        if lo <= .80 <= hi and n >= a.warmup+a.refill and -delta > max(a.forget/100, half):
+        if lo <= .80 <= hi and n >= a.warmup+refill and -delta > max(a.forget/100, half):
             forget.append(b)
     print('\n'.join(rows))
-    if n < a.warmup+a.refill:
-        print(f'forgetting check from epoch {a.warmup+a.refill} (window refilled since the warm-up)')
+    if n < a.warmup+refill:
+        print(f'forgetting check from epoch {a.warmup+refill} (window refilled since the warm-up)')
     elif forget:
         print('FORGET (bins at 0.80 m below the reference beyond the interval): ' + ', '.join(forget))
     worst = np.min(np.stack([succ[b][:n] for b in bins]), 0)
