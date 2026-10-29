@@ -157,10 +157,10 @@ risk (long-range tail): pushing-only potentials, exact forward pass in MuJoCo Wa
 CPU-only fitting and checks, after C, alongside the cylinders and P.
 
 ### Related work (claims checked against the papers 2026-10-29)
-- ContactSDF: simulation 31.6% lower position / 24.9% lower orientation error than a QP-based MPC contact model,
+- [ContactSDF](https://www.alphaxiv.org/abs/2408.09612): simulation 31.6% lower position / 24.9% lower orientation error than a QP-based MPC contact model,
   < 5k environment steps; hardware separately: Allegro in-hand reorientation at 50 Hz within 2 min of learning.
-- Long-range contact model: barrier, twice differentiable, pushing-only, non-vanishing gradients at any distance.
-- PA-RL (potential-field actions): 100% evaluation success in simulation on peg-in-hole vs 92.6% best baseline;
+- [Long-range contact model](https://www.alphaxiv.org/abs/2509.20917): barrier, twice differentiable, pushing-only, non-vanishing gradients at any distance.
+- [PA-RL (potential-field actions)](https://www.alphaxiv.org/abs/2609.21609): 100% evaluation success in simulation on peg-in-hole vs 92.6% best baseline;
   real insertions without fine-tuning.
 - NEXUS (energy + dissipation terms), differentiable contact dynamics (backward-only smoothing), smoothing-error
   tubes, ContactNets (smooth distance-like contact functions).
