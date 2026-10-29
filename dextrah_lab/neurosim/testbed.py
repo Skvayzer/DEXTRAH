@@ -176,6 +176,12 @@ def build_spec(ts=TestbedSpec(), contact=None, capsules=None):
     g = obj.add_geom(name='object', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=(ts.cylinder.radius, ts.cylinder.height/2, 0.))
     g.mass = ts.cylinder.mass                 # uniform density: inertia from the shape
     world_geom(g, contact)
+    # inactive weld of the object to the world: holds it (with its own mass and contact softness) while the fingers
+    # close in the held-state generator; data = the object's pose, set when activated
+    hold = spec.add_equality(type=mujoco.mjtEq.mjEQ_WELD, name1='world', name2='object', objtype=mujoco.mjtObj.mjOBJ_BODY)
+    hold.name = 'object_hold'
+    hold.active = False
+    hold.data[:] = (0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 1.)
     palm = spec.worldbody.add_body(name='palm', pos=(0., .25, ts.table_top+.25))
     palm_joint = palm.add_freejoint(name='palm_free')
     palm_joint.armature = ts.palm_armature
@@ -245,6 +251,14 @@ class Testbed:
         self.table_body = m.body('table').id
         self.palm_body = m.body('palm').id
         self.object_qadr = m.jnt_qposadr[m.joint('object_free').id]
+        self.object_dadr = m.jnt_dofadr[m.joint('object_free').id]
+        self.hold_eq = m.equality('object_hold').id
+        self.finger_of_body = {}
+        for b in range(m.nbody):
+            n = m.body(b).name
+            for f in ('thumb', 'index', 'middle', 'ring', 'pinky'):
+                if n.startswith(PREFIX+'right_'+f):
+                    self.finger_of_body[b] = f
         self.palm_qadr = m.jnt_qposadr[m.joint('palm_free').id]
         self.palm_dadr = m.jnt_dofadr[m.joint('palm_free').id]
         root = m.body(PREFIX+HAND_ROOT).id
@@ -276,10 +290,11 @@ class Testbed:
         err = targets-self.d.qpos[self.qadr]
         return np.clip(self.servo_gain*err, -self.servo_vmax, self.servo_vmax)
 
-    def step(self, targets, palm_pose, palm_pose_next=None):
+    def step(self, targets, palm_pose, palm_pose_next=None, hold_object=None):
         """One 60 Hz control step: the palm moves from palm_pose to palm_pose_next at constant linear and angular
         velocity (set with the pose at each physics substep); the servo command is recomputed each substep (as
-        write_data_to_sim)."""
+        write_data_to_sim). hold_object: an object pose (7) kept fixed (pose re-set, velocity zeroed at every
+        substep: an immovable object, e.g. while the fingers close on it)."""
         m, d = self.m, self.d
         nxt = palm_pose if palm_pose_next is None else palm_pose_next
         T = SUBSTEPS*m.opt.timestep
@@ -299,11 +314,47 @@ class Testbed:
             d.qvel[self.palm_dadr:self.palm_dadr+3] = lin
             d.qvel[self.palm_dadr+3:self.palm_dadr+6] = ang
             d.ctrl[self.act] = self.servo_ctrl(targets)
+            if hold_object is not None:
+                d.qpos[self.object_qadr:self.object_qadr+7] = hold_object
+                d.qvel[self.object_dadr:self.object_dadr+6] = 0.
             mujoco.mj_step(m, d)
+        if hold_object is not None:
+            d.qpos[self.object_qadr:self.object_qadr+7] = hold_object
+            d.qvel[self.object_dadr:self.object_dadr+6] = 0.
         d.qpos[self.palm_qadr:self.palm_qadr+7] = nxt                 # exactly on the trajectory
         d.qvel[self.palm_dadr:self.palm_dadr+3] = lin
         d.qvel[self.palm_dadr+3:self.palm_dadr+6] = ang
         mujoco.mj_forward(m, d)
+
+    def finger_forces(self):
+        """Hand-object normal force per finger (thumb, index, middle, ring, pinky) and on the palm (N)."""
+        out = dict(thumb=0., index=0., middle=0., ring=0., pinky=0., palm=0.)
+        for c in self.contacts():
+            if c['pair'] == 'hand_object':
+                f = self.finger_of_body.get(int(self.m.geom_bodyid[c['hand_geom']]), 'palm')
+                out[f] += float(c['force_local'][0])
+        return out
+
+    def weld_object(self, object_pose=None):
+        """Hold the object at object_pose (default: where it is) with a weld to the world, until release_object()."""
+        d = self.d
+        p = self.d.qpos[self.object_qadr:self.object_qadr+7] if object_pose is None else object_pose
+        self.m.eq_data[self.hold_eq, 3:6] = p[:3]
+        self.m.eq_data[self.hold_eq, 6:10] = p[3:7]
+        d.eq_active[self.hold_eq] = 1
+
+    def release_object(self):
+        self.d.eq_active[self.hold_eq] = 0
+
+    def get_state(self):
+        spec = mujoco.mjtState.mjSTATE_FULLPHYSICS
+        s = np.empty(mujoco.mj_stateSize(self.m, spec))
+        mujoco.mj_getState(self.m, self.d, s, spec)
+        return s
+
+    def set_state(self, s):
+        mujoco.mj_setState(self.m, self.d, s, mujoco.mjtState.mjSTATE_FULLPHYSICS)
+        mujoco.mj_forward(self.m, self.d)
 
     def contacts(self):
         """Contacts of the hand with the object, of the object with the table and of the hand with the table:
