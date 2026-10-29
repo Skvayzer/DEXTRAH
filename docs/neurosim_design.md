@@ -103,3 +103,64 @@ is 1-4x the size of the object / contact effects. Held-out gradient check at 0.1
 chance (cosine -0.03-0.05, sign agreement 48-53%). Within the ~0.1 s where the simulator's action effects are
 defined they are at or below a learned model's error floor; beyond it the simulator is chaotic. No usable
 first-order gradient for a SuperMimic-style objective on this task; the model remains a drop-risk predictor.
+
+## Stage 3 proposal (2026-10-29): a physics-structured contact model
+
+Rebuild the model around known structure and learn only the contact parameters: exact kinematics and signed
+distances, contact as an energy, friction as a stateful dissipation, plus a small bounded residual. The reason is
+identifiability, not smoothness. Nothing is built yet. (Also in the Claude Doc, section "Stage 3 proposal".)
+
+### Why structure
+- Stage 1.5 is action-blind: finger-command effects are 4-6% of the simulator's and uncorrelated; the model inputs
+  predict the expert's finger targets with R^2 0.94-1.00 for 5 of 6 joints. Paired counterfactuals raised the
+  object-position cosine only to 0.24; the held-out gradient check stayed at chance (cosine -0.03 to 0.05, sign
+  agreement 48-53%).
+- Identifiability: when actions are almost a function of the state, a black box cannot separate what the action did
+  from what the state implied. In the structured model action -> joint -> finger geometry -> signed distance ->
+  contact energy is known kinematics; contact parameters are fitted to contact forces, which carry information
+  however correlated the actions are.
+- Forces are not the target: a policy needs d(outcome)/d(action) over a trajectory. Contact rollouts are chaotic
+  beyond ~0.1 s (~200x growth per 0.1 s), so the target is the gradient of the expected outcome under noise sigma.
+
+### Model
+E = T(q, qdot) + U_grav(q) + sum_ij U_c(d_ij; theta);  F_cons = -grad_q E;  F_fric = -dD/dv
+1. Geometry: signed distances and normals between Revo2 finger capsules, object and table (analytic cylinder / box).
+2. U_c: barrier (steep as d -> 0), pushing-only, smooth long-range tail of scale tau.
+3. Friction with internal state (Dahl / LuGre bristles): a 2-D tangential spring per contact pair; exact static
+   holding, smooth dynamics, explicit stick-end time for release decisions; torsional friction (condim 4).
+4. Small bounded residual network conditioned on mass, COM, friction (MuJoCo first, real data later).
+5. Two temperatures: stiff forward, smoothed backward, annealed smooth -> stiff during policy training.
+Learned: ~10 contact parameters (barrier stiffness, tau, mu, torsional friction, bristle stiffness/damping) + residual.
+
+### Baselines
+| Model | Expected |
+| --- | --- |
+| Stage 1.5 black box | chance on the gradient check |
+| Softened MJX (MuJoCo soft contact, JAX gradients, softened only in a gradient-only copy) | loses before contact (zero force at a distance), strong in contact |
+| Structured model | must win before contact, at least tie in contact |
+MJX first: check cylinder-box and capsule-cylinder collision support (else meshes / convex shapes); same model file
+and contact parameters as training (condim 4, elliptic cones, impratio 10). MuJoCo Warp cannot differentiate a step
+(as far as we know).
+
+### Evaluation and go/no-go
+Reference: deterministic C MuJoCo + injected noise sigma, noise-averaged finite differences, 1-8 control steps.
+- sigma sweep (actuator noise ... + perception error); choose the backward smoothing tau to match the task sigma.
+- Cosine, magnitude ratio, per-finger sign agreement; 32-step prediction error; data needed.
+- Pre-contact and in-contact states reported separately; held-out cylinder sizes.
+- Release check: predicted stick-end time vs MuJoCo on slow lowering trajectories.
+Go at the task sigma on held-out sizes: cosine >= 0.7 before and in contact; magnitude ratio, sign agreement and
+stick-end thresholds fixed before the run (proposed 0.5-2, >= 80%, within one control step on >= 80%).
+
+### Policy test and sequencing
+Only after a go: P with SAPG vs SAPG + model gradients, equal GPU-hours, upright placement success. Phantom-force
+risk (long-range tail): pushing-only potentials, exact forward pass in MuJoCo Warp, SAPG on the real simulator.
+CPU-only fitting and checks, after C, alongside the cylinders and P.
+
+### Related work (claims checked against the papers 2026-10-29)
+- ContactSDF: simulation 31.6% lower position / 24.9% lower orientation error than a QP-based MPC contact model,
+  < 5k environment steps; hardware separately: Allegro in-hand reorientation at 50 Hz within 2 min of learning.
+- Long-range contact model: barrier, twice differentiable, pushing-only, non-vanishing gradients at any distance.
+- PA-RL (potential-field actions): 100% evaluation success in simulation on peg-in-hole vs 92.6% best baseline;
+  real insertions without fine-tuning.
+- NEXUS (energy + dissipation terms), differentiable contact dynamics (backward-only smoothing), smoothing-error
+  tubes, ContactNets (smooth distance-like contact functions).
