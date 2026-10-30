@@ -30,7 +30,11 @@ from dextrah_lab.neurosim.structured.rotations import axis_angle_quat, quat_mul
 from dextrah_lab.neurosim.structured.scenes import tool_testbed
 from dextrah_lab.neurosim.structured.spec import extract
 
-BANDS = (0., .002, .005, .01, .02)
+BANDS = (0., .005, .02)
+PATH_DRAWS = int(os.environ.get('PATH_DRAWS', 8))
+# model signals: model_<band> (exact model with backward-only servo band), model_path_<sigma> (mean of the exact
+# model gradient over PATH_DRAWS noisy actions: pathwise randomized smoothing), model_pathband_mid (both, band 20 mrad)
+VARIANTS = [f'model_{b:g}' for b in BANDS]+['model_path_low', 'model_path_mid', 'model_pathband_mid']
 DT = 1/60
 T = lambda x: torch.as_tensor(np.asarray(x), dtype=torch.float64)
 
@@ -55,7 +59,7 @@ def mj_jac(tb, st, palm, tgt, delta, noises):
     return J
 
 
-def model_jac(sim, s0, palm, tgt):
+def model_jac(sim, s0, palm, tgt, a0=None):
     kfac = torch.tensor([G.COUPLE_K.get(j, 1.) for js in G.COUPLING for j in js], dtype=torch.float64)
     group = [c for c, js in enumerate(G.COUPLING) for _ in js]
 
@@ -68,7 +72,8 @@ def model_jac(sim, s0, palm, tgt):
         p1 = torch.cat((p1[:, :3]+a[6:9]*DT, quat_mul(dq, p1[0, 3:])[None]), -1)
         s = sim.step(s0, tg, T(palm[0])[None], p1)
         return torch.cat((s.obj_pos[0], s.obj_v[0]))
-    return torch.autograd.functional.jacobian(f, torch.zeros(12, dtype=torch.float64)).numpy()
+    a0 = torch.zeros(12, dtype=torch.float64) if a0 is None else torch.as_tensor(a0, dtype=torch.float64)
+    return torch.autograd.functional.jacobian(f, a0).numpy()
 
 
 def task(args):
@@ -89,13 +94,21 @@ def task(args):
     tb.set_state(st)
     s0 = SimState.from_testbed(tb)
     cm = ContactModel(sc)
+    def safe(key, fn):
+        try:
+            res[key] = fn()
+        except Exception as e:                      # report, keep the state
+            res[key] = np.full((6, 12), np.nan)
+            res['error'] = repr(e)
     for b in BANDS:
         sim = StructuredSim(sc, contact_model=cm, servo_band=b or None)
-        try:
-            res[f'model_{b:g}'] = model_jac(sim, s0, palm, tgt)
-        except Exception as e:                      # report, keep the state
-            res[f'model_{b:g}'] = np.full((6, 12), np.nan)
-            res['error'] = repr(e)
+        safe(f'model_{b:g}', lambda: model_jac(sim, s0, palm, tgt))
+    for name, band in (('path_low', None), ('path_mid', None), ('pathband_mid', .02)):
+        sig = G.SIGMAS[name.split('_')[-1]]
+        sd = np.r_[[sig[0]]*6, [sig[1]]*3, [sig[2]]*3]
+        sim = StructuredSim(sc, contact_model=cm, servo_band=band)
+        draws_m = [rng.normal(size=12)*sd for _ in range(PATH_DRAWS)]
+        safe('model_'+name, lambda: np.mean([model_jac(sim, s0, palm, tgt, n) for n in draws_m], 0))
     res['sec'] = time.time()-t0
     return res
 
@@ -116,7 +129,7 @@ def main():
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    print('CONFIG', json.dumps(vars(a)), 'EPISODE_SOURCE', G.EPISODE_SOURCE, 'BANDS', BANDS, flush=True)
+    print('CONFIG', json.dumps(vars(a)), 'EPISODE_SOURCE', G.EPISODE_SOURCE, 'VARIANTS', VARIANTS, 'PATH_DRAWS', PATH_DRAWS, flush=True)
     t0 = time.time()
     with Pool(a.workers) as pool:
         eps = pool.map(G.episode_task, [(a.seed*100_000+i,) for i in range(a.episodes)])
@@ -144,16 +157,15 @@ def main():
         S = [r for r in R if r['label'] == lab]
         for oname, osl in outs.items():
             for g, gsl in groups.items():
-                for b in BANDS:
-                    key = f'model_{b:g}'
-                    row = dict(situation=lab, outcome=oname, channel=g, band=b, n=len(S))
+                for key in VARIANTS:
+                    row = dict(situation=lab, outcome=oname, channel=g, model=key, n=len(S))
                     for ref in ('mj_local', 'mj_low', 'mj_mid'):
                         c = [cos(r[key][osl, gsl].ravel(), r[ref][osl, gsl].ravel()) for r in S]
                         rat = [np.linalg.norm(r[key][osl, gsl])/max(np.linalg.norm(r[ref][osl, gsl]), 1e-300) for r in S]
                         row[f'cos_{ref}'] = float(np.nanmedian(c)) if np.isfinite(c).any() else None
                         row[f'ratio_{ref}'] = float(np.nanmedian(rat))
                     table.append(row)
-                    print('ROW', lab, oname, g, 'band %.3f' % b, 'n=%d' % len(S),
+                    print('ROW', lab, oname, g, key, 'n=%d' % len(S),
                           ' '.join(f"{ref}: cos {row[f'cos_{ref}'] if row[f'cos_{ref}'] is None else round(row[f'cos_{ref}'], 2)} "
                                    f"ratio {row[f'ratio_{ref}']:.2g}" for ref in ('mj_local', 'mj_low', 'mj_mid')), flush=True)
     (out/'model_vs_sim_table.json').write_text(json.dumps(table, indent=1))
