@@ -75,6 +75,18 @@ def run_state(args):
     s0 = SimState.from_testbed(tb)
     cm = ContactModel(sc)
     t0 = time.time()
+    zs = {}
+
+    def cem(mu0, sd0, B):
+        mu, sdv, used, pop, elite = mu0.copy(), np.full(12, sd0), 0, min(12, B), max(2, min(12, B)//4)
+        while used+pop <= B:
+            Z = np.clip(mu+sdv*rng.normal(size=(pop, 12)), -BOUND/SCALE, BOUND/SCALE)
+            nz = rng.normal(size=(8, 12))*sd
+            fs = np.array([J(z*SCALE, nz) for z in Z])
+            used += pop
+            idx = np.argsort(fs)[:elite]
+            mu, sdv = Z[idx].mean(0), np.maximum(Z[idx].std(0), .05)
+        return evaluate(mu*SCALE)
     for vname, b, noisy in VARIANTS:
         sim = StructuredSim(sc, contact_model=cm, servo_band=b or None)
         z = torch.zeros(12, dtype=torch.float64, requires_grad=True)
@@ -90,20 +102,23 @@ def run_state(args):
                 with torch.no_grad():
                     z.copy_(torch.maximum(torch.minimum(z, bd), -bd))
             res[vname] = evaluate(z.detach().numpy()*SCALE)
+            zs[vname] = z.detach().numpy().copy()
         except Exception as e:
             res[vname] = np.nan
             res['error'] = repr(e)
     res['model_sec'] = time.time()-t0
+    # E9 trust checks on the model's best correction (stochastic-smoothing variant), few MuJoCo rollouts:
+    #  model_ls6    scale the correction by {0, .25, .5, .75, 1, 1.5}, one noisy MuJoCo rollout each, keep the best
+    #  model_cem24  CEM with 24 MuJoCo rollouts initialised at the model's correction (same std as plain CEM)
+    zm = zs.get('model_pathband_mid')
+    if zm is not None:
+        nz = rng.normal(size=(8, 12))*sd
+        scales = (0., .25, .5, .75, 1., 1.5)
+        fs = [J(np.clip(c*zm, -BOUND/SCALE, BOUND/SCALE)*SCALE, nz) for c in scales]
+        res['model_ls6'] = evaluate(np.clip(scales[int(np.argmin(fs))]*zm, -BOUND/SCALE, BOUND/SCALE)*SCALE)
+        res['model_cem24'] = cem(zm, 1., 24)
     for B in budgets:                                  # CEM with B MuJoCo rollouts
-        mu, sdv, used, pop, elite = np.zeros(12), np.ones(12), 0, min(12, B), max(2, min(12, B)//4)
-        while used+pop <= B:
-            Z = np.clip(mu+sdv*rng.normal(size=(pop, 12)), -BOUND/SCALE, BOUND/SCALE)
-            nz = rng.normal(size=(8, 12))*sd
-            fs = np.array([J(z*SCALE, nz) for z in Z])
-            used += pop
-            idx = np.argsort(fs)[:elite]
-            mu, sdv = Z[idx].mean(0), np.maximum(Z[idx].std(0), .05)
-        res[f'cem_{B}'] = evaluate(mu*SCALE)
+        res[f'cem_{B}'] = cem(np.zeros(12), 1., B)
     return res
 
 
@@ -144,7 +159,7 @@ def main():
             if (i+1) % 10 == 0:
                 print('PROGRESS %d/%d %.0fs' % (i+1, len(jobs), time.time()-t0), flush=True)
     (out/'utility_model.json').write_text(json.dumps(R, indent=1))
-    methods = [v[0] for v in VARIANTS]+[f'cem_{B}' for B in budgets]
+    methods = [v[0] for v in VARIANTS]+['model_ls6', 'model_cem24']+[f'cem_{B}' for B in budgets]
     for task in ('hold', 'lowering'):
         S = [r for r in R if r['task'] == task]
         if not S:
