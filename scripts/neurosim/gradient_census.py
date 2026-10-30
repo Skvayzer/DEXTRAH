@@ -44,7 +44,9 @@ FINGER_MODE = os.environ.get('FINGER_MODE', 'absolute')
 BAND = np.array([.5, 1.1, 1.1, 2., 2., 2., 2., 2., 2., 2., 2.])/1200.
 if FINGER_MODE == 'intent':
     SIGMAS = {k: (dict(low=.1, mid=.3, high=.5)[k], v[1], v[2]) for k, v in SIGMAS.items()}
-OUTCOMES = ('rel_pos', 'rel_rot', 'grip_force', 'slip_margin', 'table_force', 'height')
+OUTCOMES = ('rel_pos', 'rel_rot', 'grip_force', 'slip_margin', 'table_force', 'height', 'utilization', 'capacity')
+# utilization: aggregate friction utilization sum|f_t| / sum mu f_n over hand-object contacts (0 without contact);
+# capacity: sum mu f_n / (m g). Both continuous in the contact forces (the max-over-contacts slip margin is not).
 CHANNELS = ['finger']*6+['palm_lin']*3+['palm_ang']*3
 
 
@@ -59,7 +61,7 @@ def cmd_to_targets(cmd_off):
 
 def contact_terms(tb):
     m, d = tb.m, tb.d
-    grip, table, umax, n = 0., 0., 0., 0
+    grip, table, umax, n, ft_sum, cap = 0., 0., 0., 0, 0., 0.
     f = np.zeros(6)
     for c in tb.contacts():
         if c['pair'] == 'hand_object':
@@ -69,10 +71,12 @@ def contact_terms(tb):
             fn = max(f[0], 1e-9)
             grip += f[0]
             umax = max(umax, np.hypot(f[1], f[2])/(d.contact[i].friction[0]*fn))
+            ft_sum += np.hypot(f[1], f[2])
+            cap += d.contact[i].friction[0]*max(f[0], 0.)
             n += 1
         elif c['pair'] == 'object_table':
             table += float(c['force_local'][0])
-    return grip, (1-umax) if n else -1., table
+    return grip, (1-umax) if n else -1., table, ft_sum/max(cap, 1e-9) if n else 0., cap
 
 
 def height(tb, top):
@@ -91,9 +95,11 @@ def outcome(tb, palm, rel0, top):
     q = np.zeros(4)
     mujoco.mju_mat2Quat(q, np.ascontiguousarray(Rr).reshape(-1))
     mujoco.mju_quat2Vel(rv, q, 1.)
-    grip, margin, table = contact_terms(tb)
+    grip, margin, table, util, cap = contact_terms(tb)
+    mass = float(tb.m.body_mass[tb.object_body])
     return dict(rel_pos=p, rel_rot=rv, grip_force=np.array([grip]), slip_margin=np.array([margin]),
-                table_force=np.array([table]), height=np.array([height(tb, top)]))
+                table_force=np.array([table]), height=np.array([height(tb, top)]), utilization=np.array([util]),
+                capacity=np.array([cap/(mass*9.81)]))
 
 
 def perturbed_palm(palm_traj, k, v, w, dt):
@@ -214,8 +220,10 @@ def census_task(args):
     targets = ep.targets[k:k+max(H)]
     st = ep.states[k]
     t0 = time.time()
-    loc = jacobian(tb, st, palm_traj, targets, top, np.full(12, 1e-6), None, 1, rng)
-    res = dict(seed=seed, k=k, label=lab, local=loc)
+    deltas = [float(x) for x in os.environ.get('LOCAL_DELTAS', '1e-6').split(',')]
+    res = dict(seed=seed, k=k, label=lab)
+    for i, dl in enumerate(deltas):                 # noise-free central differences at several step sizes
+        res['local' if i == 0 else f'local_{dl:g}'] = jacobian(tb, st, palm_traj, targets, top, np.full(12, dl), None, 1, rng)
     for s in sig_names:
         sig = SIGMAS[s]
         delta = np.r_[[.2*sig[0]]*6, [.2*sig[1]]*3, [.2*sig[2]]*3]
@@ -246,6 +254,17 @@ def summarize(results, sig_names):
                     row = dict(situation=lab, outcome=oname, channel=gname, h=h, n=len(R),
                                zero_local=float(np.mean(np.abs(g0).max(1) < 1e-7)),
                                med_local=float(np.median(np.linalg.norm(g0, axis=1))))
+                    for key in [k for k in R[0] if k.startswith('local_')]:
+                        gd = np.stack([r[key][hi][osl, gsl].reshape(-1) for r in R])
+                        gm = np.stack([r['mid'][hi][osl, gsl].reshape(-1) for r in R]) if 'mid' in R[0] else None
+                        nd = np.linalg.norm(gd, axis=1)
+                        row[key+'_zero'] = float(np.mean(np.abs(gd).max(1) < 1e-7))
+                        row[key+'_med'] = float(np.median(nd))
+                        if gm is not None:
+                            nm = np.linalg.norm(gm, axis=1)
+                            ok = (nd > 1e-12) & (nm > 1e-12)
+                            c = np.where(ok, (gd*gm).sum(1)/np.maximum(nd*nm, 1e-300), np.nan)
+                            row[key+'_cos_mid'] = float(np.nanmedian(c)) if np.isfinite(c).any() else None
                     for s in sig_names:
                         gs = np.stack([r[s][hi][osl, gsl].reshape(-1) for r in R])
                         a = np.stack([r[s+'_halves'][0][hi][osl, gsl].reshape(-1) for r in R])
@@ -276,7 +295,7 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     sig_names = a.sigmas.split(',')
-    print('CONFIG', json.dumps(vars(a)), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2), 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
+    print('CONFIG', json.dumps(vars(a)), 'LOCAL_DELTAS', os.environ.get('LOCAL_DELTAS', '1e-6'), 'TIGHT', os.environ.get('TESTBED_TIGHT_SOLVER', ''), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2), 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
     t0 = time.time()
     with Pool(a.workers) as pool:
         eps = pool.map(episode_task, [(a.seed*100_000+i,) for i in range(a.episodes)])

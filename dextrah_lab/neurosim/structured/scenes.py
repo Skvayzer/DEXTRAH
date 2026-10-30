@@ -234,9 +234,12 @@ def tool_testbed(tool, geometry='mesh', contact=None, substeps=None):
     """substeps: physics substeps per 60 Hz control step (default: env TESTBED_SUBSTEPS or 2, the training value)."""
     import os
     substeps = substeps or int(os.environ.get('TESTBED_SUBSTEPS', 2))
-    return Testbed(TestbedSpec(geometry=geometry, object_kind='tool', substeps=substeps,
-                               tool={k: tool[k] for k in ('size', 'pos', 'quat', 'used', 'mass', 'inertia')}),
-                   contact=contact)
+    tb = Testbed(TestbedSpec(geometry=geometry, object_kind='tool', substeps=substeps,
+                             tool={k: tool[k] for k in ('size', 'pos', 'quat', 'used', 'mass', 'inertia')}),
+                 contact=contact)
+    if os.environ.get('TESTBED_TIGHT_SOLVER'):      # converge the constraint solve far below the training tolerance
+        tb.m.opt.tolerance, tb.m.opt.iterations, tb.m.opt.ls_tolerance, tb.m.opt.ls_iterations = 1e-14, 200, 1e-8, 100
+    return tb
 
 
 GROUPS = dict(thumb=[0, 1, 2], index=[3, 4], middle=[5, 6], ring=[7, 8], pinky=[9, 10])
