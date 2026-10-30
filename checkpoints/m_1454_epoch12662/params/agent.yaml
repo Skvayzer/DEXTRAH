@@ -1,0 +1,140 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: /data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_mjlab_wb_imgen_dualclip_1454
+params:
+  algo:
+    name: a2c_continuous
+  config:
+    adapter_learning_rate: 0.0003
+    bounds_loss_coef: 0.0001
+    central_value_config:
+      clip_value: true
+      kl_threshold: 0.016
+      learning_rate: 0.0001
+      mini_epochs: 2
+      minibatch_size: 39936
+      model:
+        name: sonic_sapg_value
+      network:
+        central_value: true
+        mlp:
+          activation: elu
+          d2rl: false
+          initializer:
+            name: default
+          regularizer:
+            name: None
+          units:
+          - 1024
+          - 1024
+          - 512
+          - 512
+        name: sonic_sapg_critic
+      normalize_input: true
+      truncate_grads: true
+    clip_actions: false
+    clip_value: true
+    critic_coef: 4.0
+    device: cuda:0
+    device_name: cuda:0
+    e_clip: 0.1
+    entropy_coef: 0.0
+    env_name: rlgpu
+    expl_coef_block_size: 4160
+    expl_reward_coef_embd_size: 32
+    expl_reward_coef_scale: 0.002
+    expl_reward_type: entropy
+    expl_type: mixed_expl_learn_param
+    full_experiment_name: 0_mjlab_wb_imgen_dualclip_1454
+    gamma: 0.99
+    grad_norm: 1.0
+    horizon_length: 16
+    kl_threshold: 0.016
+    learning_rate: 1.0e-05
+    lr_schedule: constant
+    max_epochs: -1
+    max_frames: -1
+    mini_epochs: 2
+    minibatch_size: 39936
+    mixed_precision: true
+    multi_gpu: false
+    name: g1_frozen_sonic_sapg_bps128_touch
+    normalize_advantage: true
+    normalize_input: true
+    normalize_value: true
+    num_actors: 24960
+    off_policy_ratio: 1.0
+    player:
+      deterministic: false
+      games_num: 100000
+      print_stats: false
+    ppo: true
+    print_stats: true
+    reward_shaper:
+      scale_value: 0.01
+    save_best_after: 100
+    save_frequency: 0
+    schedule_type: standard
+    seq_length: 16
+    tau: 0.95
+    train_dir: /data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs
+    truncate_grads: true
+    use_others_experience: lf
+    value_bootstrap: true
+    zero_rnn_on_done: true
+  env:
+    clip_actions: .inf
+    clip_observations: .inf
+  load_checkpoint: false
+  load_path: ''
+  model:
+    name: sonic_sapg_logstd
+  network:
+    mlp:
+      activation: elu
+      d2rl: false
+      initializer:
+        name: default
+      regularizer:
+        name: None
+      units:
+      - 1024
+      - 1024
+      - 512
+      - 512
+    name: sonic_sapg_actor
+    rnn:
+      before_mlp: true
+      layer_norm: true
+      layers: 1
+      name: lstm
+      units: 1024
+    separate: false
+    space:
+      continuous:
+        fixed_sigma: coef_cond
+        mu_activation: None
+        mu_init:
+          name: default
+        sigma_activation: None
+        sigma_init:
+          name: const_initializer
+          val: 0
+  seed: 42
+wandb_activate: true
+wandb_entity: skvayzer
+wandb_group: g1-sonic-bps128-touch
+wandb_name: ''
+wandb_project: adept
+wandb_tags:
+- sapg
+- g1
+- revo2
+- bps128
+- tactile-normal-shear
+- warmstart-8B
+- strict-tolerance
+- no-fabrics
+- no-pca
+- no-arm-torques

@@ -1,0 +1,357 @@
+{
+  "completed": true,
+  "checkpoint": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_mjlab_wb_imgen_dualclip_1454/best/best_epoch12662.pth",
+  "args": {
+    "checkpoint": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_mjlab_wb_imgen_dualclip_1454/best/best_epoch12662.pth",
+    "output": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/table_ft/m_eval_condim4_heights_armfollow_rerun",
+    "num_envs": "12000",
+    "episodes_per_env": "2",
+    "max_steps": "6000",
+    "modes": "det_leader",
+    "nconmax": "64",
+    "njmax": "400",
+    "seed": "0",
+    "contact_condim": "4",
+    "table_height_range": "0.1"
+  },
+  "checkpoint_sha256": "b0ce541730595f491fa5c94123a3507c645b1c5357af03bc0f25ba7e9cba4ee7",
+  "epoch": 12662,
+  "frame": 5056696320,
+  "teacher": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_bps128_touch70_fixed_mjlab_sgs_1369/nn/complete_55651467264.pth",
+  "spawn_check": {
+    "checked": 37339,
+    "valid": 16371,
+    "spawn_overlap": 12860,
+    "ejected": 258,
+    "off_table": 6487,
+    "not_at_rest": 1363,
+    "max_nefc": 143,
+    "max_nefc_other": 172,
+    "unresolved": [
+      {
+        "asset": 398,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 191,
+        "reason": "off_table"
+      },
+      {
+        "asset": 784,
+        "reason": "off_table"
+      },
+      {
+        "asset": 195,
+        "reason": "off_table"
+      },
+      {
+        "asset": 788,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 564,
+        "reason": "off_table"
+      },
+      {
+        "asset": 610,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 610,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 212,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 564,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 1124,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 677,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 396,
+        "reason": "spawn_overlap"
+      }
+    ]
+  },
+  "eval_pool": 16384,
+  "gpu_memory_gib": {
+    "free": 37.77,
+    "total": 47.36,
+    "torch_reserved": 0.58
+  },
+  "results": {
+    "det_leader": {
+      "first_episode": {
+        "all": {
+          "episodes": 12000,
+          "censored": 7,
+          "success": 0.5785833333333333,
+          "goals_mean_lower_bound": 8.494333267211914,
+          "goals_median": 2.0,
+          "lifted": 0.7870833277702332,
+          "object_drop": 0.367333322763443,
+          "hand_far": 0.004000000189989805,
+          "all_50_goals": 0.04374999925494194,
+          "timeout": 0.5816666483879089,
+          "robot_fall": 0.0038333332631736994,
+          "episode_seconds": 18.794343948364258
+        },
+        "hammer": {
+          "episodes": 1984,
+          "censored": 3,
+          "success": 0.6653225806451613,
+          "goals_mean_lower_bound": 8.834173202514648,
+          "goals_median": 3.0,
+          "lifted": 0.819556474685669,
+          "object_drop": 0.2051411271095276,
+          "hand_far": 0.004032257944345474,
+          "all_50_goals": 0.0317540317773819,
+          "timeout": 0.7479838728904724,
+          "robot_fall": 0.010584677569568157,
+          "episode_seconds": 21.118072509765625
+        },
+        "screwdriver": {
+          "episodes": 1990,
+          "censored": 0,
+          "success": 0.6844221105527638,
+          "goals_mean_lower_bound": 11.302512168884277,
+          "goals_median": 5.0,
+          "lifted": 0.7969849109649658,
+          "object_drop": 0.5050251483917236,
+          "hand_far": 0.008040200918912888,
+          "all_50_goals": 0.05829145759344101,
+          "timeout": 0.42663317918777466,
+          "robot_fall": 0.004020100459456444,
+          "episode_seconds": 20.209314346313477
+        },
+        "marker": {
+          "episodes": 976,
+          "censored": 0,
+          "success": 0.5266393442622951,
+          "goals_mean_lower_bound": 12.190573692321777,
+          "goals_median": 1.0,
+          "lifted": 0.7223360538482666,
+          "object_drop": 0.5963114500045776,
+          "hand_far": 0.00512295076623559,
+          "all_50_goals": 0.12295082211494446,
+          "timeout": 0.27561476826667786,
+          "robot_fall": 0.0010245901066809893,
+          "episode_seconds": 19.434476852416992
+        },
+        "spatula": {
+          "episodes": 2069,
+          "censored": 2,
+          "success": 0.5988400193330111,
+          "goals_mean_lower_bound": 7.962300777435303,
+          "goals_median": 2.0,
+          "lifted": 0.7854035496711731,
+          "object_drop": 0.28612855076789856,
+          "hand_far": 0.0028999517671763897,
+          "all_50_goals": 0.03576606884598732,
+          "timeout": 0.6737554669380188,
+          "robot_fall": 0.0014499758835881948,
+          "episode_seconds": 19.416013717651367
+        },
+        "eraser": {
+          "episodes": 1038,
+          "censored": 0,
+          "success": 0.20905587668593448,
+          "goals_mean_lower_bound": 1.5982658863067627,
+          "goals_median": 0.0,
+          "lifted": 0.7495182752609253,
+          "object_drop": 0.48843929171562195,
+          "hand_far": 0.0009633911540731788,
+          "all_50_goals": 0.0028901733458042145,
+          "timeout": 0.5077071189880371,
+          "robot_fall": 0.0,
+          "episode_seconds": 9.971628189086914
+        },
+        "brush": {
+          "episodes": 3943,
+          "censored": 2,
+          "success": 0.5810296728379406,
+          "goals_mean_lower_bound": 8.085721969604492,
+          "goals_median": 2.0,
+          "lifted": 0.7925437688827515,
+          "object_drop": 0.3335024118423462,
+          "hand_far": 0.0030433679930865765,
+          "all_50_goals": 0.03778848424553871,
+          "timeout": 0.6231296062469482,
+          "robot_fall": 0.003296982031315565,
+          "episode_seconds": 18.748918533325195
+        }
+      },
+      "all_kept": {
+        "all": {
+          "episodes": 23993,
+          "censored": 206,
+          "success": 0.5823781936398116,
+          "goals_mean_lower_bound": 8.584003448486328,
+          "goals_median": 2.0,
+          "lifted": 0.7893552184104919,
+          "object_drop": 0.36585670709609985,
+          "hand_far": 0.005001458805054426,
+          "all_50_goals": 0.044137872755527496,
+          "timeout": 0.5745842456817627,
+          "robot_fall": 0.0032092693727463484,
+          "episode_seconds": 18.849529266357422
+        },
+        "hammer": {
+          "episodes": 3909,
+          "censored": 50,
+          "success": 0.6712714249168585,
+          "goals_mean_lower_bound": 8.870299339294434,
+          "goals_median": 3.0,
+          "lifted": 0.8150421977043152,
+          "object_drop": 0.2082373946905136,
+          "hand_far": 0.004093118477612734,
+          "all_50_goals": 0.031977489590644836,
+          "timeout": 0.7359938621520996,
+          "robot_fall": 0.008186236955225468,
+          "episode_seconds": 21.03899574279785
+        },
+        "screwdriver": {
+          "episodes": 4058,
+          "censored": 30,
+          "success": 0.676934450468211,
+          "goals_mean_lower_bound": 11.323311805725098,
+          "goals_median": 5.0,
+          "lifted": 0.7934943437576294,
+          "object_drop": 0.5014785528182983,
+          "hand_far": 0.008378511294722557,
+          "all_50_goals": 0.0606209971010685,
+          "timeout": 0.42114341259002686,
+          "robot_fall": 0.0034499752800911665,
+          "episode_seconds": 20.069374084472656
+        },
+        "marker": {
+          "episodes": 1989,
+          "censored": 16,
+          "success": 0.518350930115636,
+          "goals_mean_lower_bound": 12.45751667022705,
+          "goals_median": 1.0,
+          "lifted": 0.7144293785095215,
+          "object_drop": 0.5902463793754578,
+          "hand_far": 0.004022121895104647,
+          "all_50_goals": 0.12971343100070953,
+          "timeout": 0.2674711048603058,
+          "robot_fall": 0.0015082956524565816,
+          "episode_seconds": 19.596473693847656
+        },
+        "spatula": {
+          "episodes": 4079,
+          "censored": 29,
+          "success": 0.5999019367492032,
+          "goals_mean_lower_bound": 7.95587158203125,
+          "goals_median": 2.0,
+          "lifted": 0.7955381274223328,
+          "object_drop": 0.27997058629989624,
+          "hand_far": 0.006619269493967295,
+          "all_50_goals": 0.033096347004175186,
+          "timeout": 0.6734493970870972,
+          "robot_fall": 0.0012257905909791589,
+          "episode_seconds": 19.434505462646484
+        },
+        "eraser": {
+          "episodes": 2020,
+          "censored": 5,
+          "success": 0.2202970297029703,
+          "goals_mean_lower_bound": 1.649999976158142,
+          "goals_median": 0.0,
+          "lifted": 0.7653465270996094,
+          "object_drop": 0.48613861203193665,
+          "hand_far": 0.0014851485611870885,
+          "all_50_goals": 0.0014851485611870885,
+          "timeout": 0.5079208016395569,
+          "robot_fall": 0.0004950495203956962,
+          "episode_seconds": 10.153985977172852
+        },
+        "brush": {
+          "episodes": 7938,
+          "censored": 76,
+          "success": 0.5894431846812799,
+          "goals_mean_lower_bound": 8.1593599319458,
+          "goals_median": 2.0,
+          "lifted": 0.7962962985038757,
+          "object_drop": 0.3314436972141266,
+          "hand_far": 0.004031242337077856,
+          "all_50_goals": 0.03678508475422859,
+          "timeout": 0.616654098033905,
+          "robot_fall": 0.0027714790776371956,
+          "episode_seconds": 18.872766494750977
+        }
+      },
+      "per_table_top": {
+        "0.70-0.75": {
+          "episodes": 2880,
+          "censored": 0,
+          "success": 0.4232638888888889,
+          "goals_mean_lower_bound": 4.120139122009277,
+          "goals_median": 0.0,
+          "lifted": 0.7510416507720947,
+          "object_drop": 0.4850694537162781,
+          "hand_far": 0.008333333767950535,
+          "all_50_goals": 0.00798611156642437,
+          "timeout": 0.4878472089767456,
+          "robot_fall": 0.012500000186264515,
+          "episode_seconds": 12.510307312011719
+        },
+        "0.75-0.80": {
+          "episodes": 3134,
+          "censored": 2,
+          "success": 0.6732610082961072,
+          "goals_mean_lower_bound": 10.719208717346191,
+          "goals_median": 4.0,
+          "lifted": 0.9087428450584412,
+          "object_drop": 0.39725589752197266,
+          "hand_far": 0.005424377974122763,
+          "all_50_goals": 0.06030631810426712,
+          "timeout": 0.5360561609268188,
+          "robot_fall": 0.001914486289024353,
+          "episode_seconds": 20.614456176757812
+        },
+        "0.80-0.85": {
+          "episodes": 2969,
+          "censored": 4,
+          "success": 0.7241495453014483,
+          "goals_mean_lower_bound": 13.331761360168457,
+          "goals_median": 6.0,
+          "lifted": 0.8908723592758179,
+          "object_drop": 0.29134389758110046,
+          "hand_far": 0.0010104412212967873,
+          "all_50_goals": 0.09161333739757538,
+          "timeout": 0.614348292350769,
+          "robot_fall": 0.0010104412212967873,
+          "episode_seconds": 24.902690887451172
+        },
+        "0.85-0.90": {
+          "episodes": 3017,
+          "censored": 1,
+          "success": 0.4852502485913159,
+          "goals_mean_lower_bound": 5.598276615142822,
+          "goals_median": 0.0,
+          "lifted": 0.5929731726646423,
+          "object_drop": 0.29864102602005005,
+          "hand_far": 0.0013258203398436308,
+          "all_50_goals": 0.01358965877443552,
+          "timeout": 0.6864435076713562,
+          "robot_fall": 0.0003314550849609077,
+          "episode_seconds": 16.891162872314453
+        }
+      },
+      "assets_evaluated": 1200,
+      "assets_never_succeeded": 51,
+      "steps": 6000,
+      "wall_s": 1681.036208937876
+    }
+  }
+}

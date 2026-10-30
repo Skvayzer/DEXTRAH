@@ -1,0 +1,282 @@
+{
+  "completed": true,
+  "checkpoint": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_mjlab_wb_imgen_dualclip_1454/best/best_epoch12662.pth",
+  "args": {
+    "checkpoint": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_mjlab_wb_imgen_dualclip_1454/best/best_epoch12662.pth",
+    "output": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/table_ft/m_eval_condim4_fixed",
+    "num_envs": "12000",
+    "episodes_per_env": "2",
+    "max_steps": "6000",
+    "modes": "det_leader",
+    "nconmax": "64",
+    "njmax": "400",
+    "seed": "0",
+    "contact_condim": "4",
+    "table_height_range": "None"
+  },
+  "checkpoint_sha256": "b0ce541730595f491fa5c94123a3507c645b1c5357af03bc0f25ba7e9cba4ee7",
+  "epoch": 12662,
+  "frame": 5056696320,
+  "teacher": "/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_bps128_touch70_fixed_mjlab_sgs_1369/nn/complete_55651467264.pth",
+  "spawn_check": {
+    "checked": 37594,
+    "valid": 16374,
+    "spawn_overlap": 12943,
+    "ejected": 103,
+    "off_table": 6702,
+    "not_at_rest": 1472,
+    "max_nefc": 145,
+    "max_nefc_other": 139,
+    "unresolved": [
+      {
+        "asset": 398,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 642,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 1144,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 1081,
+        "reason": "off_table"
+      },
+      {
+        "asset": 120,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 1048,
+        "reason": "off_table"
+      },
+      {
+        "asset": 348,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 906,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 102,
+        "reason": "spawn_overlap"
+      },
+      {
+        "asset": 73,
+        "reason": "spawn_overlap"
+      }
+    ]
+  },
+  "eval_pool": 16384,
+  "results": {
+    "det_leader": {
+      "first_episode": {
+        "all": {
+          "episodes": 12000,
+          "censored": 10,
+          "success": 0.7261666666666666,
+          "goals_mean_lower_bound": 13.351916313171387,
+          "goals_median": 7.0,
+          "lifted": 0.9301666617393494,
+          "object_drop": 0.3551666736602783,
+          "hand_far": 0.0063333334401249886,
+          "all_50_goals": 0.08841666579246521,
+          "timeout": 0.5491666793823242,
+          "robot_fall": 0.0019166666315868497,
+          "episode_seconds": 24.05019187927246
+        },
+        "hammer": {
+          "episodes": 1984,
+          "censored": 2,
+          "success": 0.829133064516129,
+          "goals_mean_lower_bound": 13.279233932495117,
+          "goals_median": 8.0,
+          "lifted": 0.9506048560142517,
+          "object_drop": 0.19102822244167328,
+          "hand_far": 0.005040322430431843,
+          "all_50_goals": 0.06451612710952759,
+          "timeout": 0.7353830933570862,
+          "robot_fall": 0.0030241934582591057,
+          "episode_seconds": 25.743349075317383
+        },
+        "screwdriver": {
+          "episodes": 1990,
+          "censored": 0,
+          "success": 0.8824120603015075,
+          "goals_mean_lower_bound": 18.3577880859375,
+          "goals_median": 13.0,
+          "lifted": 0.951256275177002,
+          "object_drop": 0.5336683392524719,
+          "hand_far": 0.006030150689184666,
+          "all_50_goals": 0.13316583633422852,
+          "timeout": 0.3261306583881378,
+          "robot_fall": 0.0025125627871602774,
+          "episode_seconds": 27.05552864074707
+        },
+        "marker": {
+          "episodes": 976,
+          "censored": 2,
+          "success": 0.6413934426229508,
+          "goals_mean_lower_bound": 19.156763076782227,
+          "goals_median": 8.0,
+          "lifted": 0.873975396156311,
+          "object_drop": 0.4897541105747223,
+          "hand_far": 0.009221311658620834,
+          "all_50_goals": 0.25204917788505554,
+          "timeout": 0.25,
+          "robot_fall": 0.0030737705528736115,
+          "episode_seconds": 26.228212356567383
+        },
+        "spatula": {
+          "episodes": 2069,
+          "censored": 1,
+          "success": 0.7438376027066216,
+          "goals_mean_lower_bound": 12.732721328735352,
+          "goals_median": 7.0,
+          "lifted": 0.9328177571296692,
+          "object_drop": 0.28419527411460876,
+          "hand_far": 0.01014983095228672,
+          "all_50_goals": 0.06766553968191147,
+          "timeout": 0.6394393444061279,
+          "robot_fall": 0.00048332527512684464,
+          "episode_seconds": 24.955856323242188
+        },
+        "eraser": {
+          "episodes": 1038,
+          "censored": 0,
+          "success": 0.3333333333333333,
+          "goals_mean_lower_bound": 3.0452792644500732,
+          "goals_median": 0.0,
+          "lifted": 0.9210019111633301,
+          "object_drop": 0.44605010747909546,
+          "hand_far": 0.0028901733458042145,
+          "all_50_goals": 0.003853564616292715,
+          "timeout": 0.5481695532798767,
+          "robot_fall": 0.0,
+          "episode_seconds": 12.737957954406738
+        },
+        "brush": {
+          "episodes": 3943,
+          "censored": 5,
+          "success": 0.7106264265787472,
+          "goals_mean_lower_bound": 12.463353157043457,
+          "goals_median": 6.0,
+          "lifted": 0.9241694211959839,
+          "object_drop": 0.32766929268836975,
+          "hand_far": 0.005325893871486187,
+          "all_50_goals": 0.07050469517707825,
+          "timeout": 0.5949784517288208,
+          "robot_fall": 0.0020289120730012655,
+          "episode_seconds": 23.64509391784668
+        }
+      },
+      "all_kept": {
+        "all": {
+          "episodes": 23990,
+          "censored": 521,
+          "success": 0.7332221759066277,
+          "goals_mean_lower_bound": 13.46360969543457,
+          "goals_median": 7.0,
+          "lifted": 0.9312630295753479,
+          "object_drop": 0.34956231713294983,
+          "hand_far": 0.005502292420715094,
+          "all_50_goals": 0.08328469842672348,
+          "timeout": 0.5396414995193481,
+          "robot_fall": 0.001750729512423277,
+          "episode_seconds": 24.075136184692383
+        },
+        "hammer": {
+          "episodes": 3954,
+          "censored": 93,
+          "success": 0.8338391502276176,
+          "goals_mean_lower_bound": 13.554375648498535,
+          "goals_median": 8.0,
+          "lifted": 0.9506828784942627,
+          "object_drop": 0.1881638914346695,
+          "hand_far": 0.0040465351194143295,
+          "all_50_goals": 0.06246838718652725,
+          "timeout": 0.7182599902153015,
+          "robot_fall": 0.0035407182294875383,
+          "episode_seconds": 26.03661346435547
+        },
+        "screwdriver": {
+          "episodes": 4068,
+          "censored": 87,
+          "success": 0.8842182890855457,
+          "goals_mean_lower_bound": 17.95624351501465,
+          "goals_median": 12.0,
+          "lifted": 0.9542772769927979,
+          "object_drop": 0.5186824202537537,
+          "hand_far": 0.0076204524375498295,
+          "all_50_goals": 0.11799409985542297,
+          "timeout": 0.3345624506473541,
+          "robot_fall": 0.001720747328363359,
+          "episode_seconds": 26.53672981262207
+        },
+        "marker": {
+          "episodes": 1996,
+          "censored": 68,
+          "success": 0.657314629258517,
+          "goals_mean_lower_bound": 19.699899673461914,
+          "goals_median": 10.0,
+          "lifted": 0.882765531539917,
+          "object_drop": 0.47945892810821533,
+          "hand_far": 0.005511022172868252,
+          "all_50_goals": 0.23797595500946045,
+          "timeout": 0.24498997628688812,
+          "robot_fall": 0.0015030059730634093,
+          "episode_seconds": 26.566133499145508
+        },
+        "spatula": {
+          "episodes": 4074,
+          "censored": 66,
+          "success": 0.749386352479136,
+          "goals_mean_lower_bound": 12.527491569519043,
+          "goals_median": 6.0,
+          "lifted": 0.9361806511878967,
+          "object_drop": 0.2808051109313965,
+          "hand_far": 0.008591065183281898,
+          "all_50_goals": 0.06087383255362511,
+          "timeout": 0.6347569823265076,
+          "robot_fall": 0.0009818359976634383,
+          "episode_seconds": 24.655715942382812
+        },
+        "eraser": {
+          "episodes": 2038,
+          "censored": 9,
+          "success": 0.33709519136408245,
+          "goals_mean_lower_bound": 2.902355194091797,
+          "goals_median": 0.0,
+          "lifted": 0.9175662398338318,
+          "object_drop": 0.4460255205631256,
+          "hand_far": 0.001962708542123437,
+          "all_50_goals": 0.001962708542123437,
+          "timeout": 0.5461236238479614,
+          "robot_fall": 0.0,
+          "episode_seconds": 12.557171821594238
+        },
+        "brush": {
+          "episodes": 7860,
+          "censored": 198,
+          "success": 0.7180661577608143,
+          "goals_mean_lower_bound": 12.732697486877441,
+          "goals_median": 6.0,
+          "lifted": 0.9229007363319397,
+          "object_drop": 0.3208651542663574,
+          "hand_far": 0.004452926106750965,
+          "all_50_goals": 0.0692111924290657,
+          "timeout": 0.5797709822654724,
+          "robot_fall": 0.0017811704892665148,
+          "episode_seconds": 23.867353439331055
+        }
+      },
+      "assets_evaluated": 1200,
+      "assets_never_succeeded": 40,
+      "steps": 6000,
+      "wall_s": 1689.2615738012828
+    }
+  }
+}

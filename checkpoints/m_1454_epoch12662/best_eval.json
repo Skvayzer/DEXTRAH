@@ -1,0 +1,13 @@
+{
+  "metric": "sgs_eval_goals",
+  "value": 10.965332984924316,
+  "epoch": 17216,
+  "frame": 6874982400,
+  "eval": {
+    "any_goal_success_rate": 0.6930000185966492,
+    "goals_reached_count": 10.965332984924316,
+    "ever_lifted_rate": 0.9003333449363708,
+    "robot_fall_rate": 0.02266666665673256
+  },
+  "episodes_in_window": 3000
+}
