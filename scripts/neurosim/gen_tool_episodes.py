@@ -36,7 +36,7 @@ def pack(eps):
 
 
 def work(args):
-    jobs, holds_by_pool, runs, out, wid, shard_n = args
+    jobs, holds, runs, out, wid, shard_n = args          # holds: {(pool, index): hold row} of this worker's jobs
     import torch
     from dextrah_lab.mj.compat import install
     install()
@@ -44,11 +44,10 @@ def work(args):
     from dextrah_lab.neurosim.reference.tool_holds import object_bank_for_run, tool_of
     from dextrah_lab.neurosim.reference.tool_episodes import Episode
     tables = {p: object_bank_for_run(r)[2] for p, r in runs.items()}
-    holds = {p: torch.load(f, weights_only=False) for p, f in holds_by_pool.items()}
     tb_key, tb, buf, k, stats = None, None, [], 0, Counter()
     t0 = time.time()
     for n, (pool, i, seed) in enumerate(jobs):
-        h = holds[pool][i]
+        h = holds[(pool, i)]
         if tb_key != (pool, h['asset']):
             tb_key = (pool, h['asset'])
             tb = Testbed(TestbedSpec(geometry='mesh', object_kind='tool', tool=tool_of(tables[pool], h['asset'])))
@@ -85,9 +84,10 @@ def main():
     import torch
     t0 = time.time()
     rng = np.random.default_rng(a.seed)
-    cand = []                                            # (pool, index, family, firm)
+    cand, rows = [], {}                                  # (pool, index, family, firm, asset)
     for pool, f in enumerate(a.holds):
-        for i, r in enumerate(torch.load(f, weights_only=False)):
+        rows[pool] = torch.load(f, weights_only=False)
+        for i, r in enumerate(rows[pool]):
             if r['outcome'] != 'dropped':
                 cand.append((pool, i, r['family'], r['outcome'] == 'held', r['asset']))
     fams = sorted({c[2] for c in cand})
@@ -101,12 +101,11 @@ def main():
         jobs.append((c[0], c[1], int(rng.integers(2**31)), c[4]))
     jobs.sort(key=lambda j: (j[0], j[3]))                  # by pool and tool: each tool compiled once per worker
     split = np.array_split(np.arange(len(jobs)), a.workers)
-    holds_by_pool = {i: str(f) for i, f in enumerate(a.holds)}
     runs = {i: str(r) for i, r in enumerate(a.runs)}
     print(f'GEN {len(cand)} usable holds, {a.episodes} episodes, {a.workers} workers, setup {time.time()-t0:.0f} s', flush=True)
     with ProcessPoolExecutor(a.workers, mp_context=get_context('spawn')) as ex:
-        parts = list(ex.map(work, [([jobs[j][:3] for j in idx], holds_by_pool, runs, str(a.out), w, a.shard_episodes)
-                                   for w, idx in enumerate(split)]))
+        parts = list(ex.map(work, [([jobs[j][:3] for j in idx], {jobs[j][:2]: rows[jobs[j][0]][jobs[j][1]] for j in idx},
+                                    runs, str(a.out), w, a.shard_episodes) for w, idx in enumerate(split)]))
     tot = Counter()
     for s in parts:
         tot.update(s)
