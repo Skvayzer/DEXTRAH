@@ -103,6 +103,18 @@ with the measured displacement, from the post-transient states. The capsule vari
 primitives are fatter than the training hulls: 0% transfer, penetration p90 24 mm), so tools need the signed-distance
 grids of the hulls (variant b).
 
+**Cylinders in M's environment (main-plan step 4, scoping 2026-10-30).** M's objects are one body with four
+primitive slots (handle box / capsule, head box / capsule; URDF cylinders become capsules) and MuJoCo Warp cannot vary
+geom types per world, so a flat-ended cylinder needs a fifth slot. MuJoCo Warp 3.11 gives a cylinder one contact per
+pair against the table box and the hand hulls (multi-contact only for box / mesh pairs): upright on the table it stays
+within 0.65° over 2 s but keeps moving (|v| 0.09 at 2 s), against 0.12° and |v| 0.014 for a 24-gon prism mesh with 4
+contacts (`scripts/neurosim/cylinder_warp_contact_check.py`). In the hand one contact per hull is what M was trained
+with (capsule handles). Plan: a true cylinder slot behind an opt-in flag (default scene bit-identical), a separate
+cylinder generator (P2P stays pinned), frozen-M evaluation without the SGS state (reaching-only starts), lift rate and
+hold survival per radius; the prism mesh (per-world mesh variants) is the fallback if upright placement needs quieter
+contact. Out of distribution for M: 5–6 cm diameter (training cylinders ≤ 4 cm), no head, goal success needs the roll
+about the symmetry axis (so lift and hold are the metrics, not goal success).
+
 ---
 
 ## Revision 2 (research agent), unchanged
