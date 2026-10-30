@@ -29,7 +29,7 @@ import numpy as np
 from gradient_census import SIGMAS, episode_task, rollout
 from dextrah_lab.neurosim.structured.scenes import tool_testbed
 
-HZ = 8
+HZ = int(os.environ.get("UTILITY_HORIZON", 8))
 SCALE = np.r_[[.05]*6, [.03]*3, [.2]*3]
 BOUND = np.r_[[.2]*6, [.1]*3, [1.]*3]
 
@@ -47,10 +47,10 @@ def run_state(args):
     rng = np.random.default_rng(seed*7919+k)
     tb = tool_testbed(ep.tool)
     top, mass = .8, ep.tool['mass']
-    palm, tg, st = ep.palm[k:k+HZ+1], ep.targets[k:k+HZ], ep.states[k]
+    palm, tg, st = ep.palm[k:k+9], ep.targets[k:k+8], ep.states[k]          # rollout runs 8 steps; J at HZ
     sig = SIGMAS[sigma_name]
     sd = np.r_[[sig[0]]*6, [sig[1]]*3, [sig[2]]*3]
-    noise_eval = [rng.normal(size=(8, 12))*sd for _ in range(16)]
+    noise_eval = [rng.normal(size=(8, 12))*sd for _ in range(16)]           # rollout uses the first HZ rows
     zero = np.zeros((8, 12))
     J = lambda a, nz: objective(tb, st, palm, tg, np.clip(a, -BOUND, BOUND), nz, top, task, mass)
     evaluate = lambda a: float(np.mean([J(a, nz) for nz in noise_eval]))
