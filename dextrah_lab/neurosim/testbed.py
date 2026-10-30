@@ -164,6 +164,7 @@ class TestbedSpec:
     tool: dict = None
     table_top: float = .80
     palm_armature: float = 1e3                 # kg / kg m^2 on the palm's 6 DoF (prescribed motion)
+    substeps: int = SUBSTEPS                   # physics substeps per 60 Hz control step (timestep = 1/(60 substeps)); 2 = training
 
 
 def build_spec(ts=TestbedSpec(), contact=None, capsules=None):
@@ -172,6 +173,7 @@ def build_spec(ts=TestbedSpec(), contact=None, capsules=None):
     spec = mujoco.MjSpec()
     spec.compiler.degree = False
     set_training_options(spec)
+    spec.option.timestep = 1/(60*ts.substeps)
     ground = spec.worldbody.add_geom(name='ground', type=mujoco.mjtGeom.mjGEOM_PLANE, size=(0., 0., 1.))
     world_geom(ground, contact)
     table = spec.worldbody.add_body(name='table', mocap=True, pos=(0., 0., ts.table_top-TABLE_SIZE[2]/2))
@@ -321,14 +323,15 @@ class Testbed:
         substep: an immovable object, e.g. while the fingers close on it)."""
         m, d = self.m, self.d
         nxt = palm_pose if palm_pose_next is None else palm_pose_next
-        T = SUBSTEPS*m.opt.timestep
+        n_sub = self.ts.substeps
+        T = n_sub*m.opt.timestep
         lin = (nxt[:3]-palm_pose[:3])/T
         dq = np.zeros(4)
         mujoco.mju_mulQuat(dq, np.array([palm_pose[3], -palm_pose[4], -palm_pose[5], -palm_pose[6]]), nxt[3:7])
         ang = np.zeros(3)
         mujoco.mju_quat2Vel(ang, dq, T)                    # body-frame angular velocity (free joint convention)
-        for k in range(SUBSTEPS):
-            a = k/SUBSTEPS
+        for k in range(n_sub):
+            a = k/n_sub
             pose = np.empty(7)
             pose[:3] = palm_pose[:3]+a*(nxt[:3]-palm_pose[:3])
             q = palm_pose[3:7].copy()

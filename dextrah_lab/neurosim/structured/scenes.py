@@ -159,7 +159,7 @@ def make_hold(tb, rng, tool, gap_mode="census", close_steps=90, settle_steps=30,
     damp0 = tb.m.dof_damping[dofs].copy()
     ramp = np.zeros(11)
     locked = np.zeros(11, bool)
-    rate = 2*tb.m.opt.timestep
+    rate = 1/60
     groups = dict(thumb=[0, 1, 2], index=[3, 4], middle=[5, 6], ring=[7, 8], pinky=[9, 10])
     if close_mode == 'fixed':          # close straight to the closing targets on the fixed tool
         for _ in range(45):
@@ -230,9 +230,12 @@ def make_hold(tb, rng, tool, gap_mode="census", close_steps=90, settle_steps=30,
     return Hold(state, palm, targets, tool, targets-q_settled, forces, 1000*worst_m, worst_deg)
 
 
-def tool_testbed(tool, geometry='mesh', contact=None):
-    return Testbed(TestbedSpec(geometry=geometry, object_kind='tool', tool={k: tool[k] for k in
-                                                                          ('size', 'pos', 'quat', 'used', 'mass', 'inertia')}),
+def tool_testbed(tool, geometry='mesh', contact=None, substeps=None):
+    """substeps: physics substeps per 60 Hz control step (default: env TESTBED_SUBSTEPS or 2, the training value)."""
+    import os
+    substeps = substeps or int(os.environ.get('TESTBED_SUBSTEPS', 2))
+    return Testbed(TestbedSpec(geometry=geometry, object_kind='tool', substeps=substeps,
+                               tool={k: tool[k] for k in ('size', 'pos', 'quat', 'used', 'mass', 'inertia')}),
                    contact=contact)
 
 
@@ -447,7 +450,7 @@ def table_episode(rng, tool=None, close_scale=(.6, 1.), lift=.06, speed=.15):
         targets_close[7:9] = 0.
     if rng.random() > .05:
         targets_close[9:11] = 0.
-    dt = 2*m.opt.timestep
+    dt = 1/60
     log = dict(states=[], palm=[], targets=[], phase=[], obj=[], forces=[], table_force=[])
     tb.reset(above, np.zeros(11), d.qpos[tb.object_qadr:tb.object_qadr+7].copy(), table_top=top)
     cur = above.copy()

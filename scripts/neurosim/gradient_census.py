@@ -36,6 +36,14 @@ H = (1, 2, 4, 8)
 SIGMAS = dict(low=(.005, .01, .05), mid=(.02, .03, .2), high=(.05, .1, .5))     # finger rad, palm m/s, palm rad/s
 COUPLING = [(0,), (1, 2), (3, 4), (5, 6), (7, 8), (9, 10)]
 COUPLE_K = {2: 1., 4: 1.155, 6: 1.155, 8: 1.155, 10: 1.155}
+# FINGER_MODE=intent (E2): fingers are driven by a grip intent u in [-1, 1] per command group, target = q + band*u
+# (band = effort/kp, the servo's linear band): for a blocked joint the torque is kp*band*u = effort*u, i.e. torque
+# control. The base intent is the logged command's direction, u0 = clip((target - q)/band, -0.5, 0.5); the finger
+# channel offsets u (unitless). Finger noise sigma (fraction): low 0.1, mid 0.3, high 0.5.
+FINGER_MODE = os.environ.get('FINGER_MODE', 'absolute')
+BAND = np.array([.5, 1.1, 1.1, 2., 2., 2., 2., 2., 2., 2., 2.])/1200.
+if FINGER_MODE == 'intent':
+    SIGMAS = {k: (dict(low=.1, mid=.3, high=.5)[k], v[1], v[2]) for k, v in SIGMAS.items()}
 OUTCOMES = ('rel_pos', 'rel_rot', 'grip_force', 'slip_margin', 'table_force', 'height')
 CHANNELS = ['finger']*6+['palm_lin']*3+['palm_ang']*3
 
@@ -104,7 +112,7 @@ def rollout(tb, state, palm_traj, targets, a_off, noise, top):
     """Outcomes at the horizons H. a_off (12,): 6 command offsets, palm v (3), palm w (3); noise (Hmax, 12) per
     step (same layout, added to the offsets at that step; palm noise integrates like a velocity)."""
     tb.set_state(state)
-    dt = 2*tb.m.opt.timestep
+    dt = 1/60                                   # control step
     Rp0 = mat(palm_traj[0][3:])
     o = tb.object_qadr
     rel0 = (Rp0.T @ (tb.d.qpos[o:o+3]-palm_traj[0][:3]), Rp0.T @ mat(tb.d.qpos[o+3:o+7]))
@@ -114,7 +122,12 @@ def rollout(tb, state, palm_traj, targets, a_off, noise, top):
     acc_pos, acc_q = np.zeros(3), np.array([1., 0., 0., 0.])
     for k in range(max(H)):
         a = a_off+noise[k]
-        tgt = targets[k]+cmd_to_targets(a[:6])
+        if FINGER_MODE == 'intent':
+            q = tb.d.qpos[tb.qadr]
+            u = np.clip((targets[k]-q)/BAND, -.5, .5)+np.array([a[c] for c, js in enumerate(COUPLING) for _ in js])
+            tgt = q+BAND*np.clip(u, -1., 1.)
+        else:
+            tgt = targets[k]+cmd_to_targets(a[:6])
         nxt = perturbed_palm(palm_traj, k+1, a_off[6:9], a_off[9:12], dt)
         # noise: an extra velocity this step, accumulated
         acc_pos = acc_pos+noise[k, 6:9]*dt
@@ -163,7 +176,7 @@ def label(tb, ep, k):
     hand = any(c['pair'] == 'hand_object' and c['dist'] < 0 for c in cs)
     table = any(c['pair'] == 'object_table' and c['dist'] < 0 for c in cs)
     d, o = tb.d, tb.object_dadr
-    dt = 2*tb.m.opt.timestep
+    dt = 1/60                                   # control step
     pv = (ep.palm[k+1][:3]-ep.palm[k][:3])/dt
     qrel = np.zeros(4)
     mujoco.mju_mulQuat(qrel, np.array([ep.palm[k][3], -ep.palm[k][4], -ep.palm[k][5], -ep.palm[k][6]]), ep.palm[k+1][3:])
@@ -263,7 +276,7 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     sig_names = a.sigmas.split(',')
-    print('CONFIG', json.dumps(vars(a)), 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
+    print('CONFIG', json.dumps(vars(a)), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2), 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
     t0 = time.time()
     with Pool(a.workers) as pool:
         eps = pool.map(episode_task, [(a.seed*100_000+i,) for i in range(a.episodes)])
