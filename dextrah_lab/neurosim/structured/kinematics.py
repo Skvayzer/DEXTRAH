@@ -116,6 +116,40 @@ class HandKinematics:
         M = (self.mass[None, :, None, None]*Jv.transpose(-1, -2) @ Jv).sum(1)+(Jw.transpose(-1, -2) @ Iw @ Jw).sum(1)
         return M+torch.diag_embed(armature.expand(M.shape[0], -1))
 
+    def velocities(self, kin, qd, palm_pos, palm_lin, palm_ang_world):
+        """World COM linear velocities (B, nb, 3) and angular velocities (B, nb, 3) of the hand bodies."""
+        w_j = kin['axis']*qd[..., None]                                          # (B, 11, 3)
+        moves = self.moves.to(qd.dtype)
+        omega = palm_ang_world[:, None]+torch.einsum('nj,bjk->bnk', moves, w_j)
+        c = kin['xipos']
+        v = palm_lin[:, None]+torch.cross(palm_ang_world[:, None].expand_as(c), c-palm_pos[:, None], dim=-1)
+        r = c[:, :, None]-kin['anchor'][:, None]                                  # (B, nb, 11, 3)
+        v = v+(torch.cross(w_j[:, None].expand_as(r), r, dim=-1)*moves[None, :, :, None]).sum(2)
+        return v, omega
+
+    def bias_force(self, palm_pos, palm_R, q, qd, palm_lin, palm_ang_local):
+        """Coriolis / centrifugal generalised force on the 11 joints (qfrc_bias without gravity), including the
+        prescribed palm's motion (constant linear and body-frame angular velocity, zero palm acceleration):
+        sum_b Jv_bᵀ m_b a_b + Jw_bᵀ (I_b α_b + ω_b × I_b ω_b), with (a_b, α_b) the body accelerations at qdd = 0."""
+        from .rotations import so3_exp
+
+        def vel(q_, p_, th):
+            R = palm_R @ so3_exp(th)
+            k = self.fk(p_, R, q_)
+            v, w = self.velocities(k, qd, p_, palm_lin, (R @ palm_ang_local[..., None]).squeeze(-1))
+            return v, w
+        zero = torch.zeros_like(palm_lin)
+        (v, w), (a, alpha) = torch.func.jvp(vel, (q, palm_pos, zero), (qd, palm_lin, palm_ang_local))
+        kin = self.fk(palm_pos, palm_R, q)
+        bodies = torch.arange(self.nb, device=q.device)
+        Jv = self.point_jacobian(kin, bodies, kin['xipos'])
+        Jw = self.rotation_jacobian(kin, bodies)
+        Iw = kin['ximat'] @ torch.diag_embed(self.inertia) @ kin['ximat'].transpose(-1, -2)
+        Iw_w = (Iw @ w[..., None]).squeeze(-1)
+        torque = (Iw @ alpha[..., None]).squeeze(-1)+torch.cross(w, Iw_w, dim=-1)
+        f = self.mass[None, :, None]*a
+        return ((Jv.transpose(-1, -2) @ f[..., None]).squeeze(-1)+(Jw.transpose(-1, -2) @ torque[..., None]).squeeze(-1)).sum(1)
+
     def gravity_torque(self, kin, gravity):
         """Generalised gravity force on the 11 joints (the -qfrc_bias gravity part)."""
         bodies = torch.arange(self.nb, device=kin['xpos'].device)

@@ -77,7 +77,7 @@ Tests: `tests/test_neurosim_structured.py` (CPU; every comparison is against the
 | WP | Content | Pass test (against the testbed, float64) | Estimate |
 | --- | --- | --- | --- |
 | WP1 | Spec extraction, rotations, palm interpolation, hand FK, point Jacobians, primitive SDFs | FK body poses within 1e-9 m / rad of `mj_kinematics` at random joint angles and palm poses; palm substep poses equal `Testbed.step`'s; SDF of box/capsule/sphere/cylinder equals `mj_geomDistance` (< 1e-6 m) outside and the analytic depth inside; Jacobians equal `mj_jac` | 2–3 d |
-| WP2 | Contact-free dynamics: servo + implicit damping + joint mass block + gravity + limits; object free flight | Free finger trajectories (random targets, 1 s) within 1e-3 rad of the testbed; object free fall exact | 1–2 d |
+| WP2 | Contact-free dynamics: servo + implicit damping + joint mass block + gravity + Coriolis + limits; object free flight | One substep from random states (limits, clipped forces, moving palm): q̇ within 1e-4 rad/s; 60 re-synced control steps: q within 1e-6 rad; object free flight 1 s within 1e-9 (open-loop finger trajectories are not a valid test: free fingers limit-cycle, §5) | 1–2 d |
 | WP3 | Contact points + normal law + coupled solve | Tool resting on the table: penetration and per-corner force within 5% of MuJoCo; fingers pressing on a welded tool: per-finger normal force within 10–20% | 2–3 d |
 | WP4 | Friction | Tool held 2 s by a primitive-hand grip: creep < 2 mm and within 2× of MuJoCo's; slide on the table: stick → slip onset within one control step of MuJoCo's | 2–3 d |
 | WP5 | Hull SDF grids (~1 mm, 0.5 mm check on flat faces), hull witness points; replay of harvested M holds | Grid SDF vs exact hull distance < 0.3 mm (1 mm grid) near the surface; held/shifted/dropped agreement with the testbed on ≥ 300 harvested holds | 2–3 d |
@@ -92,8 +92,32 @@ lowered onto the table, fingers opened), then **M-repose** and **M-grasp** (reac
 
 | WP | Status |
 | --- | --- |
-| WP1 | in progress |
-| WP2–8 | not started |
+| WP1 | done: FK / anchors / axes 1e-15; Jacobians, 11×11 mass matrix, gravity 1e-12; palm substeps exact; primitive SDFs = `mj_geomDistance` (< 1e-6 out, < 1e-5 in); exact hull SDF of all 17 hulls within 9e-7 m; 1 mm grids near the surface median 0.01 mm, p95 0.07 mm, max 0.29 mm |
+| WP2 | done: finger substep q̇ within 1.5e-5 rad/s; re-synced control steps q within 1e-6 rad; object free flight 1e-14 |
+| WP3–8 | not started |
+
+## 5. Findings while building (MuJoCo 3.11, testbed)
+
+1. **Joint actuator force range.** MuJoCo's URDF import sets `jnt_actfrcrange` = ±effort on every hand joint, so the
+   applied servo torque is `clip(kv (v_cmd − q̇), ±effort)`, although the actuator itself is unclamped
+   (`robot.hand_servo`'s docstring says "no force clamp"). The clip binds whenever q̇ opposes v_cmd (reversals),
+   e.g. −0.5 instead of −1.07 N·m on the thumb metacarpal. implicitfast keeps the −kv damping derivative even while
+   the force is clipped (verified to 1e-15).
+2. **Free fingers never settle: the 120 Hz servo limit-cycles.** Inside the band the discrete loop gain is
+   ≈ (dt·kv / (M + dt·kv))·g·dt ≈ 10–20 ≫ 2, so each joint chatters around its target. Free hand, constant targets,
+   last 1 s: |gap| median 6–15 mrad (8 mrad typical), max 11–20 mrad, joint speeds up to ~2 rad/s. **This is the same
+   size as the census gaps in rev. 2.1 A1/A2 (median 9–13 mrad)**, so part of the measured "saturation" may be chatter
+   rather than grip; the census should be split by blocked (in contact, q̇ ≈ 0) vs moving joints before A2's gap
+   distribution is used. The same servo law and dt run in mjlab training, so the chatter is in the training data too.
+   Consequence for tests: open-loop finger trajectories diverge from 1e-7 differences, so pass tests re-sync to
+   MuJoCo's state every step.
+3. **Coriolis / centrifugal forces matter for the fingers** (per-substep q̇ error 2e-2 rad/s without, 1.5e-5 with),
+   mostly from the palm's angular velocity. They are explicit in implicitfast (treating their derivative implicitly
+   gives 5e-3).
+4. **The object's gyroscopic term is implicit in implicitfast** (MuJoCo 3.11): `(I − dt ∂τ/∂ω) Δω = dt τ` with
+   τ = −ω × Iω matches to 1e-14; explicit Euler is off by 2e-3 rad/s per substep at 6 rad/s.
+5. Joint limits are soft (solref 0.02, solimp 0.9–0.95, `dof_invweight0` as Â): fingers pushed below 0 sink to
+   −0.07 rad; the structured solve reproduces MuJoCo's limit forces.
 
 Local development (no `/data1`): set `DEXTRAH_ROBOT_URDF` to a checkout of `unitreerobotics/unitree_ros`
 (`robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf`). The upstream URDF may differ from the server's

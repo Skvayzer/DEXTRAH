@@ -55,6 +55,8 @@ class HandSpec:
     servo_effort: np.ndarray     # (11,) effort = kv * vmax (blocked-joint torque cap)
     jnt_solref: np.ndarray       # (11, 2) joint-limit softness
     jnt_solimp: np.ndarray       # (11, 5)
+    dof_invweight0: np.ndarray   # (11,) MuJoCo's diagonal approximation for joint-limit rows
+    body_invweight0: np.ndarray  # (nb, 2) translational / rotational, for contact rows
     geoms: list = field(default_factory=list)
     finger_of_body: list = field(default_factory=list)    # 'thumb' | 'index' | ... | 'palm'
 
@@ -68,6 +70,7 @@ class ObjectSpec:
     mass: float
     inertia: np.ndarray          # (3,) principal moments, body frame = principal frame at the COM
     geoms: list
+    invweight0: np.ndarray = None    # (2,) translational / rotational
 
 
 @dataclass
@@ -145,6 +148,10 @@ def extract(tb):
     kv = np.array([-m.actuator_biasprm[a, 2] for a in act])          # velocity actuator: force = kv (ctrl - qd)
     if not np.allclose(kv, m.actuator_gainprm[act, 0]):
         raise ValueError('hand actuators are not velocity servos')
+    # total actuator force per joint is clipped to the URDF effort (jnt_actfrcrange, set by MuJoCo's URDF import)
+    lim = m.jnt_actfrcrange[joint_ids]
+    if not (m.jnt_actfrclimited[joint_ids].all() and np.allclose(lim[:, 1], kv*tb.servo_vmax) and np.allclose(lim[:, 0], -lim[:, 1])):
+        raise ValueError('hand joint actuator force range differs from the servo effort kv * vmax')
     finger = []
     for b in bodies:
         n = m.body(b).name
@@ -158,13 +165,14 @@ def extract(tb):
         qpos0=m.qpos0[m.jnt_qposadr[joint_ids]].copy(), jnt_range=m.jnt_range[joint_ids].copy(),
         armature=m.dof_armature[dof].copy(), servo_gain=tb.servo_gain.copy(), servo_vmax=tb.servo_vmax.copy(),
         servo_kv=kv, servo_effort=kv*tb.servo_vmax, jnt_solref=m.jnt_solref[joint_ids].copy(),
-        jnt_solimp=m.jnt_solimp[joint_ids].copy(),
+        jnt_solimp=m.jnt_solimp[joint_ids].copy(), dof_invweight0=m.dof_invweight0[dof].copy(),
+        body_invweight0=m.body_invweight0[bodies].copy(),
         geoms=[_geom(m, int(g), index[int(m.geom_bodyid[g])]) for g in tb.hand_geoms], finger_of_body=finger)
     ob = tb.object_body
     if np.abs(m.body_ipos[ob]).max() > 1e-12 or np.abs(m.body_iquat[ob]-(1, 0, 0, 0)).max() > 1e-12:
         raise ValueError('object body frame must be its principal frame at the COM')
     obj = ObjectSpec(mass=float(m.body_mass[ob]), inertia=m.body_inertia[ob].copy(),
-                     geoms=[_geom(m, int(g), 0) for g in tb.object_geoms])
+                     geoms=[_geom(m, int(g), 0) for g in tb.object_geoms], invweight0=m.body_invweight0[ob].copy())
     tg = tb.table_geom
     contact_geoms = list(tb.hand_geoms)+list(tb.object_geoms)+[tg]
     solref, solimp = m.geom_solref[contact_geoms], m.geom_solimp[contact_geoms]

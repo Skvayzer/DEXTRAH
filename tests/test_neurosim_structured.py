@@ -9,7 +9,9 @@ import mujoco
 import numpy as np
 import torch
 
+from dextrah_lab.neurosim.structured.dynamics import SimState, StructuredSim
 from dextrah_lab.neurosim.structured.kinematics import HandKinematics, palm_substeps
+from dextrah_lab.neurosim.structured.servo import servo_velocity
 from dextrah_lab.neurosim.structured.rotations import mat_to_quat, quat_to_mat
 from dextrah_lab.neurosim.structured.sdf import HullGrid, hull_sdf_exact, primitive_sdf
 from dextrah_lab.neurosim.structured.spec import extract
@@ -140,6 +142,96 @@ class StructuredWP1(unittest.TestCase):
         q = torch.nn.functional.normalize(torch.randn(100, 4, dtype=torch.float64), dim=-1)
         q = q*torch.where(q[:, :1] < 0, -1., 1.)
         self.assertLess((mat_to_quat(quat_to_mat(q))-q).abs().max().item(), 1e-12)
+
+
+class StructuredWP2(unittest.TestCase):
+    """Contact-free dynamics. Free fingers limit-cycle around their targets (the 120 Hz velocity servo is unstable
+    inside its 0.4-1.7 mrad band: ~8 mrad median gap, up to ~2 rad/s), so open-loop trajectories diverge from any
+    tiny difference; the tests compare one substep / one control step from MuJoCo's own state."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tb = Testbed()
+        cls.scene = extract(cls.tb)
+        cls.sim = StructuredSim(cls.scene)
+
+    def _random_state(self, rng, lo_pad=.05):
+        tb, r = self.tb, self.scene.hand.jnt_range
+        palm = np.r_[0., .8, 1.2, rng.normal(size=4)]
+        palm[3:] /= np.linalg.norm(palm[3:])
+        tb.reset(palm, rng.uniform(r[:, 0]-lo_pad, r[:, 1]), np.r_[1., 1., 10., 1., 0., 0., 0.])
+        lin, ang = rng.normal(size=3)*.3, rng.normal(size=3)*2
+        d = tb.d
+        d.qvel[tb.dadr] = rng.normal(size=11)*2
+        d.qvel[tb.palm_dadr:tb.palm_dadr+3], d.qvel[tb.palm_dadr+3:tb.palm_dadr+6] = lin, ang
+        return palm, lin, ang
+
+    def test_finger_substep(self):
+        """One physics substep from random states (joint limits, clipped forces, moving palm): qvel within 1e-4."""
+        rng = np.random.default_rng(10)
+        tb, sim, worst, limits = self.tb, self.sim, 0., 0
+        r = self.scene.hand.jnt_range
+        for _ in range(150):
+            palm, lin, ang = self._random_state(rng)
+            tgt = rng.uniform(r[:, 0]-.1, r[:, 1]+.1)
+            tb.d.ctrl[tb.act] = tb.servo_ctrl(tgt)
+            mujoco.mj_forward(tb.m, tb.d)
+            limits += tb.d.nefc > 0
+            q, qd = T(tb.d.qpos[tb.qadr][None]), T(tb.d.qvel[tb.dadr][None])
+            q1, qd1 = sim.finger_substep(q, qd, T(tgt[None]), T(palm[None, :3]), quat_to_mat(T(palm[None, 3:])),
+                                         T(lin[None]), T(ang[None]))
+            mujoco.mj_step(tb.m, tb.d)
+            worst = max(worst, np.abs(qd1[0].numpy()-tb.d.qvel[tb.dadr]).max())
+            self.assertLess(np.abs(q1[0].numpy()-tb.d.qpos[tb.qadr]).max(), 1e-6)
+        self.assertGreater(limits, 20)
+        self.assertLess(worst, 1e-4)
+
+    def test_control_steps_resynced(self):
+        """60 control steps with a moving palm and changing targets; each step starts from MuJoCo's state."""
+        rng = np.random.default_rng(11)
+        tb, sim, r = self.tb, self.sim, self.scene.hand.jnt_range
+        palm = np.array([0., .8, 1.2, 1., 0., 0., 0.])
+        tb.reset(palm, np.zeros(11), np.r_[1., 1., 10., 1., 0., 0., 0.])
+        w = rng.normal(size=3)*2
+        for k in range(60):
+            if k % 10 == 0:
+                tgt = rng.uniform(r[:, 0]-.1, r[:, 1]+.1)
+            nxt = palm.copy()
+            nxt[:3] += rng.normal(size=3)*.01
+            mujoco.mju_quatIntegrate(nxt[3:], w, 1/60)
+            s = sim.step(SimState.from_testbed(tb), T(tgt[None]), T(palm[None]), T(nxt[None]))
+            tb.step(tgt, palm, nxt)
+            palm = nxt
+            self.assertLess(np.abs(s.numpy()['q']-tb.d.qpos[tb.qadr]).max(), 1e-6, k)
+            self.assertLess(np.abs(s.numpy()['qd']-tb.d.qvel[tb.dadr]).max(), 1e-4, k)
+
+    def test_object_free_flight(self):
+        tb = self.tb
+        tb.reset(np.array([0., .8, 1.2, 1., 0., 0., 0.]), np.zeros(11), np.r_[1., 1., 10., 1., 0., 0., 0.])
+        tb.d.qvel[tb.object_dadr:tb.object_dadr+6] = (.3, -.2, 1., 3., -2., 5.)
+        mujoco.mj_forward(tb.m, tb.d)
+        s = SimState.from_testbed(tb)
+        for _ in range(60):
+            tb.step(np.zeros(11), np.array([0., .8, 1.2, 1., 0., 0., 0.]))
+            s = self.sim.step(s, T(np.zeros((1, 11))), T(np.array([[0., .8, 1.2, 1., 0., 0., 0.]])))
+        n, o, v = s.numpy(), tb.object_qadr, tb.object_dadr
+        self.assertLess(np.abs(n['obj_pos']-tb.d.qpos[o:o+3]).max(), 1e-9)
+        self.assertLess(np.abs(n['obj_quat']-tb.d.qpos[o+3:o+7]).max(), 1e-9)
+        self.assertLess(np.abs(n['obj_w']-tb.d.qvel[v+3:v+6]).max(), 1e-9)
+
+    def test_soft_servo_backward(self):
+        """Forward values identical; d v_cmd / d target is 0 outside the band (exact), non-zero with band = 10 mrad."""
+        h = self.scene.hand
+        gain, vmax = T(h.servo_gain), T(h.servo_vmax)
+        q = torch.zeros(1, 11, dtype=torch.float64)
+        tgt = torch.full((1, 11), .01, dtype=torch.float64, requires_grad=True)       # 10 mrad gap: saturated
+        exact = servo_velocity(tgt, q, gain, vmax)
+        soft = servo_velocity(tgt, q, gain, vmax, band=.01)
+        self.assertEqual((exact-soft).abs().max().item(), 0.)
+        g_exact, = torch.autograd.grad(exact.sum(), tgt)
+        g_soft, = torch.autograd.grad(soft.sum(), tgt)
+        self.assertEqual(g_exact.abs().max().item(), 0.)
+        self.assertTrue((g_soft > 0).all())
 
 
 class StructuredSDF(unittest.TestCase):
