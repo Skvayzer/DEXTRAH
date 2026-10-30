@@ -165,6 +165,14 @@ class TestbedSpec:
     table_top: float = .80
     palm_armature: float = 1e3                 # kg / kg m^2 on the palm's 6 DoF (prescribed motion)
     substeps: int = SUBSTEPS                   # physics substeps per 60 Hz control step (timestep = 1/(60 substeps)); 2 = training
+    # 'velocity': robot.hand_servo as trained (v_cmd = clip(g err, +-vmax), damping kv). Near the target the 120 Hz loop
+    # is linearly unstable (growth 8.5-45x per substep for g dt = 11-52) and limit-cycles (~8 mrad, up to 2 rad/s).
+    # 'deadbeat': the command never asks for more than the remaining error in one substep: the gain is capped at 1/dt,
+    # v_cmd = clip(err / dt, +-vmax) (stable: spectral radius 0.35; g > 1/dt for every hand joint). Free speed unchanged; a blocked joint's torque is
+    # kv |err| / dt up to the effort, i.e. linear up to ~vmax dt (19 mrad) instead of saturating at effort/kp (1.7 mrad).
+    # (An implicit-position variant, damping kv (1 + g dt), was rejected: MuJoCo's implicitfast keeps that damping while
+    # the joint force range clips, so free fingers creep at ~vmax / (1 + g dt).)
+    hand_servo: str = 'velocity'
 
 
 def build_spec(ts=TestbedSpec(), contact=None, capsules=None):
@@ -174,6 +182,8 @@ def build_spec(ts=TestbedSpec(), contact=None, capsules=None):
     spec.compiler.degree = False
     set_training_options(spec)
     spec.option.timestep = 1/(60*ts.substeps)
+    if ts.hand_servo not in ('velocity', 'deadbeat'):
+        raise ValueError(f'hand_servo {ts.hand_servo}')
     ground = spec.worldbody.add_geom(name='ground', type=mujoco.mjtGeom.mjGEOM_PLANE, size=(0., 0., 1.))
     world_geom(ground, contact)
     table = spec.worldbody.add_body(name='table', mocap=True, pos=(0., 0., ts.table_top-TABLE_SIZE[2]/2))
@@ -270,6 +280,8 @@ class Testbed:
         self.act = np.array([m.actuator(PREFIX+j).id for j in HAND_JOINTS])
         servo = [hand_servo(j) for j in HAND_JOINTS]
         self.servo_gain = np.array([s['kp']/s['kv'] for s in servo])
+        if ts.hand_servo == 'deadbeat':                  # gain capped at 1/dt: v_cmd = clip(err / dt, +-vmax) (g > 1/dt here)
+            self.servo_gain = np.minimum(self.servo_gain, 1/self.m.opt.timestep)
         self.servo_vmax = np.array([s['vmax'] for s in servo])
         self.table_mocap = m.body('table').mocapid[0]
         self.object_body = m.body('object').id

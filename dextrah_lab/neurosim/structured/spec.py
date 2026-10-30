@@ -154,8 +154,8 @@ def extract(tb):
         raise ValueError('hand actuators are not velocity servos')
     # total actuator force per joint is clipped to the URDF effort (jnt_actfrcrange, set by MuJoCo's URDF import)
     lim = m.jnt_actfrcrange[joint_ids]
-    if not (m.jnt_actfrclimited[joint_ids].all() and np.allclose(lim[:, 1], kv*tb.servo_vmax) and np.allclose(lim[:, 0], -lim[:, 1])):
-        raise ValueError('hand joint actuator force range differs from the servo effort kv * vmax')
+    if not (m.jnt_actfrclimited[joint_ids].all() and np.allclose(lim[:, 0], -lim[:, 1])):
+        raise ValueError('hand joint actuator force range missing or asymmetric')
     finger = []
     for b in bodies:
         n = m.body(b).name
@@ -168,7 +168,7 @@ def extract(tb):
         jnt_pos=m.jnt_pos[joint_ids].copy(), jnt_axis=m.jnt_axis[joint_ids].copy(),
         qpos0=m.qpos0[m.jnt_qposadr[joint_ids]].copy(), jnt_range=m.jnt_range[joint_ids].copy(),
         armature=m.dof_armature[dof].copy(), servo_gain=tb.servo_gain.copy(), servo_vmax=tb.servo_vmax.copy(),
-        servo_kv=kv, servo_effort=kv*tb.servo_vmax, jnt_solref=m.jnt_solref[joint_ids].copy(),
+        servo_kv=kv, servo_effort=lim[:, 1].copy(), jnt_solref=m.jnt_solref[joint_ids].copy(),
         jnt_solimp=m.jnt_solimp[joint_ids].copy(), dof_invweight0=m.dof_invweight0[dof].copy(),
         body_invweight0=m.body_invweight0[bodies].copy(),
         geoms=[_geom(m, int(g), index[int(m.geom_bodyid[g])]) for g in tb.hand_geoms], finger_of_body=finger)

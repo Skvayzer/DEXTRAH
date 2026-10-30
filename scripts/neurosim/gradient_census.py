@@ -304,7 +304,7 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     sig_names = a.sigmas.split(',')
-    print('CONFIG', json.dumps(vars(a)), 'LOCAL_DELTAS', os.environ.get('LOCAL_DELTAS', '1e-6'), 'TIGHT', os.environ.get('TESTBED_TIGHT_SOLVER', ''), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2), 'EPISODE_SOURCE', EPISODE_SOURCE, 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
+    print('CONFIG', json.dumps(vars(a)), 'LOCAL_DELTAS', os.environ.get('LOCAL_DELTAS', '1e-6'), 'TIGHT', os.environ.get('TESTBED_TIGHT_SOLVER', ''), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2), 'HAND_SERVO', os.environ.get('TESTBED_HAND_SERVO', 'velocity'), 'EPISODE_SOURCE', EPISODE_SOURCE, 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
     t0 = time.time()
     with Pool(a.workers) as pool:
         eps = pool.map(episode_task, [(a.seed*100_000+i,) for i in range(a.episodes)])

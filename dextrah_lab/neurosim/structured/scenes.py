@@ -235,6 +235,7 @@ def tool_testbed(tool, geometry='mesh', contact=None, substeps=None):
     import os
     substeps = substeps or int(os.environ.get('TESTBED_SUBSTEPS', 2))
     tb = Testbed(TestbedSpec(geometry=geometry, object_kind='tool', substeps=substeps,
+                             hand_servo=os.environ.get('TESTBED_HAND_SERVO', 'velocity'),
                              tool={k: tool[k] for k in ('size', 'pos', 'quat', 'used', 'mass', 'inertia')}),
                  contact=contact)
     if os.environ.get('TESTBED_TIGHT_SOLVER'):      # converge the constraint solve far below the training tolerance
