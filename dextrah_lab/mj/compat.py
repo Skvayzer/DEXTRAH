@@ -16,7 +16,7 @@ import sys
 import types
 from pathlib import Path
 
-WORKSPACE = Path('/data1/users/konstantin.smirnov')
+from dextrah_lab.paths import WORKSPACE
 ISAACLAB_SOURCE = WORKSPACE/'IsaacLab/source/isaaclab'
 P2P_ROOT = WORKSPACE/'play2perfect'
 

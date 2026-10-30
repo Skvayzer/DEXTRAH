@@ -1,7 +1,7 @@
 """Build the mjlab task with the run-1105 configuration (the Isaac backend stays separate)."""
 from pathlib import Path
 
-WORKSPACE = Path('/data1/users/konstantin.smirnov')
+from dextrah_lab.paths import WORKSPACE
 
 # Contact capacity per world (MuJoCo Warp allocates nconmax*nworld contacts and
 # njmax constraint rows per world). Measured in scripts/mj_contact_capacity.py.

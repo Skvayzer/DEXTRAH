@@ -88,7 +88,8 @@ def build_policy(env, checkpoint, contract, device):
     from dextrah_lab.g1_adept.touch_continuation import load_yaml
     from dextrah_lab.wholebody.sapg_network import load_touch_sources, register_sonic_models
     run = Path(checkpoint).resolve().parent.parent
-    source, critic = load_touch_sources(device, Path(contract['source_checkpoint']), contract['source_sha256'])
+    from dextrah_lab.paths import remap
+    source, critic = load_touch_sources(device, remap(contract['source_checkpoint']), contract['source_sha256'])
     register_sonic_models(source, critic, env._sonic_reference, env._body_lower[0], env._body_upper[0], frozen=True,
                           hand_dim=getattr(env, 'hand_surface_dim', 0))
     params = load_yaml(run/'params/agent.yaml')['params']
@@ -126,7 +127,7 @@ def summarize(rows, types, step_dt, censored):
 
 
 def main():
-    if not os.environ.get('SLURM_JOB_ID'):
+    if not os.environ.get('SLURM_JOB_ID') and not os.environ.get('ORX_RUN_ID') and not os.environ.get('DEXTRAH_WORKSPACE'):
         raise RuntimeError('Use a Slurm GPU allocation')
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--checkpoint', type=Path, required=True)

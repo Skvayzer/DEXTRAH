@@ -20,6 +20,7 @@ before terminations/rewards/observations, as Isaac does after its substeps.
 """
 from copy import deepcopy
 from pathlib import Path
+from dextrah_lab.paths import remap
 import json
 import math
 
@@ -50,10 +51,10 @@ from .scene import SceneParams, TABLE_SIZE, build_scene_cfg, object_indices  # n
 from .tactile import ContactReader  # noqa: E402
 
 REFERENCE = Path(__file__).with_name('isaac_reference.json')
-RUN_1105 = Path('/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_frozen_sonic_sapg_touch_dexterous_1105')
+RUN_1105 = remap('/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_frozen_sonic_sapg_touch_dexterous_1105')
 # Fixed-body touch teacher (run-383 task, per-env object physics): Isaac dump + resolved config.
 REFERENCE_FIXED = Path(__file__).with_name('isaac_reference_fixed.json')
-RUN_FIXED = Path('/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_bps128_touch70_fixed_smoke_1233')
+RUN_FIXED = remap('/data1/users/konstantin.smirnov/DEXTRAH-G1-WholeBody/outputs/0_bps128_touch70_fixed_smoke_1233')
 
 obs_utils = p2p('obs_utils')
 reset_utils = p2p('reset_utils')
@@ -84,7 +85,9 @@ class Cfg:
 
 def load_run_cfg(run=RUN_1105):
     import yaml
-    return Cfg(yaml.unsafe_load((run/'params/env_resolved.yaml').read_text()))
+    from dextrah_lab.paths import SERVER_WORKSPACE, WORKSPACE
+    text = (run/'params/env_resolved.yaml').read_text().replace(SERVER_WORKSPACE, str(WORKSPACE))   # DEXTRAH_WORKSPACE
+    return Cfg(yaml.unsafe_load(text))
 
 
 class _Scene:
@@ -279,6 +282,15 @@ class G1SonicTouchMjEnv:
         from .robot import hand_servo
         from dextrah_lab.wholebody.actuators import body_motors as _motors
         self.robot.configure_hand_servos({n: hand_servo(n) for n in self.robot.joint_names if n not in _motors()})
+        # opt-in (evaluation / experiments): DEXTRAH_HAND_SERVO=deadbeat caps the hand servo gain at 1/dt,
+        # v_cmd = clip(err / dt, +-vmax): the trained 120 Hz servo is linearly unstable near its target and limit-cycles
+        # (~8 mrad); see docs/neurosim_structured_plan.md and the testbed's TestbedSpec.hand_servo
+        import os
+        if os.environ.get('DEXTRAH_HAND_SERVO', 'velocity') == 'deadbeat':
+            self.robot._servo_gain = torch.clamp(self.robot._servo_gain, max=1/cfg.sim.dt)
+            print('HAND_SERVO deadbeat: gain capped at 1/dt =', 1/cfg.sim.dt, flush=True)
+        elif os.environ.get('DEXTRAH_HAND_SERVO', 'velocity') != 'velocity':
+            raise ValueError('DEXTRAH_HAND_SERVO must be velocity or deadbeat')
         if velocity_limits:
             self.robot.configure_velocity_limits(torch.as_tensor(reference['joint_vel_limits'], device=device), self.physics_dt)
         self.contact_stats = dict(max_active=0)
