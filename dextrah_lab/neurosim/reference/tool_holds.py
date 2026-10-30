@@ -93,7 +93,7 @@ class HoldPool:
 
 def decode_pool(sgs_path, run_dir, limit=None, seed=0):
     state = torch.load(sgs_path, map_location='cpu', weights_only=False)
-    c = {k: v.numpy() if torch.is_tensor(v) else v for k, v in state['cfg'].items()}
+    c = {k: state['cfg'][k].numpy() for k in ('qpos', 'joint_pos', 'targets', 'asset', 'table_z')}   # not the history buffers
     family = family_layout(state['settings'])
     held = np.nonzero(state['filled'].numpy() & np.isin(family, [SGS_FAMILIES.index(f) for f in HELD_FAMILIES]))[0]
     if limit is not None and limit < len(held):
@@ -207,9 +207,8 @@ def run_acceptance(pool, run_dir, geometry='mesh', limit=None, seed=0, spec=Acce
     rows, cache = [], {}
     for i in range(n):
         a = int(pool.asset[i])
-        if a not in cache:                                  # one compiled testbed per tool
-            if len(cache) > 64:
-                cache.pop(next(iter(cache)))
+        if a not in cache:                                  # one compiled testbed per tool (holds come sorted by tool;
+            cache.clear()                                   # a compiled hand with meshes is large: keep only one)
             cache[a] = Testbed(TestbedSpec(geometry=geometry, object_kind='tool', tool=tool_of(table, a)))
         r = accept(cache[a], pool, i, table, rng, spec)
         rows.append(r)
