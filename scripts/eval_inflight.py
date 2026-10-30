@@ -22,6 +22,7 @@ def snapshot(run, dest):
     (dest/'nn').mkdir()
     shutil.copy(run/'task_contract.json', dest/'task_contract.json')
     shutil.copy(run/'params/agent.yaml', dest/'params/agent.yaml')
+    shutil.copy(run/'params/env_resolved.yaml', dest/'params/env_resolved.yaml')
     shutil.copy(run/'nn/latest.sgs.pt', dest/'nn/ckpt.sgs.pt')
     shutil.copy(run/'nn/latest.pth', dest/'nn/ckpt.pth')
     return dest/'nn/ckpt.pth'
