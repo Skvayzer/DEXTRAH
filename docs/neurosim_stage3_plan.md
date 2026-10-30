@@ -5,6 +5,10 @@ in `dextrah_lab/mj/robot.py`, `docs/neurosim_stage3_setup_review.md`). Revision 
 servo-saturation census of the trained carry expert's own data. Revision 2 is kept below unchanged; where §A and the
 body disagree, §A wins.
 
+**Build plan for the structured model (Phase 2 onward):** `docs/neurosim_structured_plan.md` (branch
+`feature/g1-neurosim-structured`; decisions of 2026-10-30: hull SDF grids for M's holds, carry and place/release first,
+CPU only until gate G3). It owns the model, its work packages and pass tests; this document owns data and gates.
+
 ## A. Amendments in rev. 2.1 (census of the carry expert, 2026-10-29)
 
 **Census.** Carry expert C v2 (run 1587), stage 1 log `outputs/neurosim/go_nogo_v2/data`, 5 of 18 chunks

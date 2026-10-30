@@ -16,13 +16,15 @@ Mirrors the Play2Perfect/Isaac import (see docs/mjlab_port_plan_20261013.md):
   kd 25 for both hands, efforts from the URDF).
 """
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 import mujoco
 
-ROBOT_URDF = Path('/data1/users/konstantin.smirnov/play2perfect/unitree_ros/robots/'
-                  'g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf')
+ROBOT_URDF = Path(os.environ.get('DEXTRAH_ROBOT_URDF',      # override on machines without /data1 (e.g. dep-1)
+                                  '/data1/users/konstantin.smirnov/play2perfect/unitree_ros/robots/'
+                                  'g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf'))
 REMOVED_LINKS = ('imu_in_torso', 'imu_in_pelvis', 'd435_link', 'mid360_link')
 # Contact bits: robot geoms never collide with robot geoms, but collide with
 # everything in the world group (object, table, ground).
