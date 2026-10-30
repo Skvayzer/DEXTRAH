@@ -31,6 +31,9 @@ from dextrah_lab.neurosim.structured.scenes import tool_testbed
 
 HZ = int(os.environ.get('UTILITY_HORIZON', 2))
 K_ACTIONS = 32
+Y_DRAWS = int(os.environ.get('Y_DRAWS', 4))
+GROUPS = dict(pos_finger=(slice(0, 3), slice(0, 6)), pos_palm=(slice(0, 3), slice(6, 12)),
+              rot_finger=(slice(3, 6), slice(0, 6)), rot_palm=(slice(3, 6), slice(6, 12)))
 OUT_KEYS = ('rel_pos', 'rel_rot', 'table_force')
 
 
@@ -66,15 +69,18 @@ def state_task(args):
     s = features(tb, ep, k)
     A = np.clip(rng.normal(size=(K_ACTIONS, 12))*SCALE*1.5, -BOUND, BOUND)
     A[0] = 0.
-    Y = np.stack([outcome_vec(G.rollout(tb, st, palm, tg, a, rng.normal(size=(8, 12))*sd, .8)[HZ]) for a in A])
+    # outcome targets averaged over Y_DRAWS noise draws (the regression target approximates E[y | s, a])
+    Y = np.stack([np.mean([outcome_vec(G.rollout(tb, st, palm, tg, a, rng.normal(size=(8, 12))*sd, .8)[HZ])
+                           for _ in range(Y_DRAWS)], 0) for a in A])
     noises = [rng.normal(size=(8, 12))*sd for _ in range(8)]
-    J = np.zeros((Y.shape[1], 12))
+    Jh = np.zeros((8, Y.shape[1], 12))
     for c in range(12):
         e = np.zeros(12)
         e[c] = .2*sd[c]
-        J[:, c] = np.mean([(outcome_vec(G.rollout(tb, st, palm, tg, e, n, .8)[HZ])-outcome_vec(G.rollout(tb, st, palm, tg, -e, n, .8)[HZ]))
-                           /(2*e[c]) for n in noises], 0)
-    return dict(seed=seed, k=k, task=task, s=s, A=A.astype(np.float32), Y=Y.astype(np.float32), J=J.astype(np.float32))
+        for i, n in enumerate(noises):
+            Jh[i, :, c] = (outcome_vec(G.rollout(tb, st, palm, tg, e, n, .8)[HZ])-outcome_vec(G.rollout(tb, st, palm, tg, -e, n, .8)[HZ]))/(2*e[c])
+    return dict(seed=seed, k=k, task=task, s=s, A=A.astype(np.float32), Y=Y.astype(np.float32), J=Jh.mean(0).astype(np.float32),
+                Ja=Jh[:4].mean(0).astype(np.float32), Jb=Jh[4:].mean(0).astype(np.float32))
 
 
 class Net(torch.nn.Module):
@@ -222,9 +228,14 @@ def main():
         tr = [d for d in data if d['seed'] not in test_seeds]
         te = [d for d in data if d['seed'] in test_seeds]
         print('SPLIT train', len(tr), 'test', len(te), flush=True)
+        np.savez_compressed(out/'data.npz', **{key: np.stack([d[key] for d in data]) for key in ('seed', 'k', 's', 'A', 'Y', 'J', 'Ja', 'Jb')},
+                            task=np.array([d['task'] for d in data]))
+        # ceiling: split-half reliability of the expected-Jacobian targets (4 vs 4 noise draws)
+        rel = {g: float(np.nanmedian([cosine(d['Ja'][r, c].ravel(), d['Jb'][r, c].ravel()) for d in te])) for g, (r, c) in GROUPS.items()}
+        print('TARGET split-half cos median (4 vs 4 draws)', {g: round(v, 3) for g, v in rel.items()}, flush=True)
         torch.set_num_threads(min(16, a.workers))
         models = {}
-        for name, w in (('learned_B0', 0.), ('learned_B1', 1.)):
+        for name, w in (('learned_B0', 0.), ('learned_B1', 1.), ('learned_B10', 10.)):
             t1 = time.time()
             models[name] = train(tr, w, a.epochs, a.seed)
             # held-out one-step prediction error (normalised) and gradient alignment
@@ -235,15 +246,14 @@ def main():
                 Y = torch.tensor(np.stack([d['Y'] for d in te]))
                 pred = net(((S-norm['sm'])/norm['ss'])[:, None].expand(-1, A.shape[1], -1), A/norm['as_'])*norm['ys']+norm['ym']
                 r2 = 1-((pred-Y)**2).mean((0, 1))/Y.reshape(-1, Y.shape[-1]).var(0)
-            cos = {g: [] for g in ('pos_finger', 'pos_palm', 'rot_finger', 'rot_palm')}
-            for d in te:
-                Jm = model_jac(net, norm, d['s'])
-                cos['pos_finger'].append(cosine(Jm[0:3, :6].ravel(), d['J'][0:3, :6].ravel()))
-                cos['pos_palm'].append(cosine(Jm[0:3, 6:].ravel(), d['J'][0:3, 6:].ravel()))
-                cos['rot_finger'].append(cosine(Jm[3:6, :6].ravel(), d['J'][3:6, :6].ravel()))
-                cos['rot_palm'].append(cosine(Jm[3:6, 6:].ravel(), d['J'][3:6, 6:].ravel()))
-            print('MODEL', name, 'train %.0fs' % (time.time()-t1), 'heldout R2 per outcome', np.round(r2.numpy(), 3).tolist(),
-                  'grad cos median', {g: round(float(np.nanmedian(v)), 3) for g, v in cos.items()}, flush=True)
+            for split, items in (('train', tr[:len(te)]), ('heldout', te)):
+                cos = {g: [] for g in GROUPS}
+                for d in items:
+                    Jm = model_jac(net, norm, d['s'])
+                    for g, (r, c) in GROUPS.items():
+                        cos[g].append(cosine(Jm[r, c].ravel(), d['J'][r, c].ravel()))
+                print('MODEL', name, split, 'grad cos median', {g: round(float(np.nanmedian(v)), 3) for g, v in cos.items()}, flush=True)
+            print('MODEL', name, 'train %.0fs' % (time.time()-t1), 'heldout R2 per outcome', np.round(r2.numpy(), 3).tolist(), flush=True)
         # utility on held-out states (40 hold + 40 lowering)
         ute = {}
         for d in te:
@@ -255,7 +265,7 @@ def main():
             ujobs += [(items[i]['seed'], ep_of[items[i]['seed']], items[i]['k'], task, models) for i in idx]
         R = pool.map(utility_task, ujobs)
     (out/'utility.json').write_text(json.dumps(R, indent=1))
-    methods = ['learned_B0', 'learned_B1', 'learned_B0_cem24', 'learned_B1_cem24', 'cem_24']
+    methods = [m for name in ('learned_B0', 'learned_B1', 'learned_B10') for m in (name, name+'_cem24')]+['cem_24']
     for task in ('hold', 'lowering'):
         Sx = [r for r in R if r['task'] == task]
         if not Sx:
