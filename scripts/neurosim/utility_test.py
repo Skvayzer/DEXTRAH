@@ -26,12 +26,14 @@ from pathlib import Path
 
 import numpy as np
 
-from gradient_census import SIGMAS, episode_task, rollout
+from gradient_census import FINGER_MODE, SIGMAS, episode_task, rollout
 from dextrah_lab.neurosim.structured.scenes import tool_testbed
 
 HZ = int(os.environ.get("UTILITY_HORIZON", 8))
 SCALE = np.r_[[.05]*6, [.03]*3, [.2]*3]
 BOUND = np.r_[[.2]*6, [.1]*3, [1.]*3]
+if FINGER_MODE == 'intent':                  # finger channel = grip-intent fraction (gradient_census FINGER_MODE)
+    SCALE[:6], BOUND[:6] = .3, 1.
 
 
 def objective(tb, st, palm, tg, a, noise, top, task, mass):
@@ -119,7 +121,8 @@ def main():
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    print('CONFIG', json.dumps(vars(a)), flush=True)
+    print('CONFIG', json.dumps(vars(a)), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2),
+          'EPISODE_SOURCE', os.environ.get('EPISODE_SOURCE', 'scripted'), 'HORIZON', HZ, flush=True)
     t0 = time.time()
     from gradient_census import label
     with Pool(a.workers) as pool:

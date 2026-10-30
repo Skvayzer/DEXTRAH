@@ -194,6 +194,8 @@ def label(tb, ep, k):
     wrel = mat(d.qpos[tb.object_qadr+3:tb.object_qadr+7]) @ d.qvel[o+3:o+6]-pw
     ph = ep.phase[k]
     moving = np.linalg.norm(vrel) > .02 or np.linalg.norm(wrel) > .3
+    if ph == 'settle':
+        return 'other'
     if not hand:
         return 'approach' if table and ph in ('approach', 'close') else ('free' if not table else 'other')
     if table:
@@ -203,10 +205,17 @@ def label(tb, ep, k):
     return 'slip' if moving else 'hold'
 
 
+EPISODE_SOURCE = os.environ.get('EPISODE_SOURCE', 'scripted')       # 'scripted' table episodes | 'm1454' holds
+
+
 def episode_task(args):
     seed, = args
     rng = np.random.default_rng(seed)
-    ep, tb = table_episode(rng)
+    if EPISODE_SOURCE == 'm1454':
+        from dextrah_lab.neurosim.reference.m_holds import m_episode
+        ep, tb = m_episode(rng)
+    else:
+        ep, tb = table_episode(rng)
     labs = [label(tb, ep, k) for k in range(len(ep.states)-max(H))]
     return seed, ep, labs
 
@@ -295,7 +304,7 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     sig_names = a.sigmas.split(',')
-    print('CONFIG', json.dumps(vars(a)), 'LOCAL_DELTAS', os.environ.get('LOCAL_DELTAS', '1e-6'), 'TIGHT', os.environ.get('TESTBED_TIGHT_SOLVER', ''), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2), 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
+    print('CONFIG', json.dumps(vars(a)), 'LOCAL_DELTAS', os.environ.get('LOCAL_DELTAS', '1e-6'), 'TIGHT', os.environ.get('TESTBED_TIGHT_SOLVER', ''), 'FINGER_MODE', FINGER_MODE, 'TESTBED_SUBSTEPS', os.environ.get('TESTBED_SUBSTEPS', 2), 'EPISODE_SOURCE', EPISODE_SOURCE, 'SIGMAS', json.dumps({s: SIGMAS[s] for s in sig_names}), flush=True)
     t0 = time.time()
     with Pool(a.workers) as pool:
         eps = pool.map(episode_task, [(a.seed*100_000+i,) for i in range(a.episodes)])
