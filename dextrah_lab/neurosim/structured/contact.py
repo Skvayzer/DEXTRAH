@@ -20,8 +20,8 @@ from dataclasses import dataclass
 import math
 import torch
 
-from .rotations import quat_to_mat
-from .sdf import HullGrid, PRIMITIVES, box as box_sdf
+from .rotations import axis_angle_mat, quat_to_mat
+from .sdf import HullGrid, PRIMITIVES, box as box_sdf, hull_sdf_exact
 
 
 def _fibonacci_sphere(n, dtype):
@@ -93,6 +93,45 @@ def table_candidates(geom, dtype=torch.float64, rim_points=8):
     raise ValueError(geom.kind)
 
 
+def mju_make_frame(n):
+    """MuJoCo's mju_makeFrame tangents for unit normals n (..., 3): y seed (0, 1, 0) unless |n_y| >= 0.5, then (0, 0, 1)."""
+    seed = torch.zeros_like(n)
+    use_y = (n[..., 1] < .5) & (n[..., 1] > -.5)
+    seed[..., 1] = use_y.to(n.dtype)
+    seed[..., 2] = (~use_y).to(n.dtype)
+    t1 = torch.nn.functional.normalize(seed-(n*seed).sum(-1, keepdim=True)*n, dim=-1)
+    return t1, torch.cross(n, t1, dim=-1)
+
+
+def _segment_closest(p0, p1, q0, q1):
+    """Closest points of segments [p0, p1] and [q0, q1] (batched (B, 3)); Ericson 5.1.9."""
+    d1, d2, r = p1-p0, q1-q0, p0-q0
+    a, e, f = (d1*d1).sum(-1), (d2*d2).sum(-1), (d2*r).sum(-1)
+    c, b = (d1*r).sum(-1), (d1*d2).sum(-1)
+    den = (a*e-b*b).clamp_min(1e-30)
+    s = ((b*f-c*e)/den).clamp(0, 1)
+    t = (b*s+f)/e.clamp_min(1e-30)
+    s = torch.where(t < 0, (-c/a.clamp_min(1e-30)).clamp(0, 1), torch.where(t > 1, ((b-c)/a.clamp_min(1e-30)).clamp(0, 1), s))
+    t = t.clamp(0, 1)
+    return p0+s[:, None]*d1, q0+t[:, None]*d2
+
+
+def golden_min(f, lo, hi, iters=48):
+    """Minimise a unimodal f over [lo, hi] (batched tensors): argmin (B,)."""
+    g = (5**.5-1)/2
+    a, b = lo, hi
+    c, d = b-g*(b-a), a+g*(b-a)
+    fc, fd = f(c), f(d)
+    for _ in range(iters):
+        left = fc < fd
+        b = torch.where(left, d, b)
+        a = torch.where(left, a, c)
+        c2, d2 = b-g*(b-a), a+g*(b-a)
+        c, d = c2, d2
+        fc, fd = f(c), f(d)
+    return .5*(a+b)
+
+
 def make_frame(n):
     """Tangent basis (t1, t2) for unit normals n (..., 3) (any orthonormal choice: the elliptic cone is isotropic)."""
     a = torch.where((n[..., :1].abs() < .9), torch.tensor([1., 0., 0.], dtype=n.dtype),
@@ -123,9 +162,10 @@ def _grad(fn, p):
 
 class ContactModel:
     def __init__(self, scene, dtype=torch.float64, device='cpu', grid_spacing=1e-3, rim_points=8, hand_table=True,
-                 witness_density=2e-3, per_pair=1):
+                 witness_density=2e-3, per_pair=1, mjccd=True):
         self.scene, self.dtype, self.device = scene, dtype, device
         self.per_pair = per_pair
+        self.mjccd = mjccd
         t = lambda x: torch.as_tensor(x, dtype=dtype, device=device)
         self.hand_geoms = scene.hand.geoms
         self.obj_geoms = scene.obj.geoms
@@ -149,12 +189,32 @@ class ContactModel:
             hand_body += [-1]*n
             obj_side += [1]*n
             fric += [mx(g.friction, table_f if table_f is not None else g.friction)]*n
+        self.hull_tensors = [(t(g.hull_vert), torch.as_tensor(g.hull_face, dtype=torch.long, device=device))
+                             if g.kind == 'mesh' else None for g in self.hand_geoms]
+        self.hull_normals, self.hull_edges = [], []
+        for g, ht in zip(self.hand_geoms, self.hull_tensors):
+            if ht is None:
+                self.hull_normals.append(None), self.hull_edges.append(None)
+                continue
+            from .sdf import hull_planes
+            self.hull_normals.append(hull_planes(*ht)[0])
+            f = ht[1]
+            e = torch.cat((f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]])).sort(1).values
+            self.hull_edges.append(torch.unique(e, dim=0))
+        # pair mode: 'perturb' = MuJoCo multi-CCD perturbation (hull vs capsule: 5 slots); 'polytope' = exact SAT
+        # penetration (hull vs box: MuJoCo's EPA; multi-contact polygons need faces aligned within 1.6 mrad: ignored);
+        # else witness points
+        self.pair_mode = {}
         for hi, h in enumerate(self.hand_geoms):
             for gi, g in enumerate(self.obj_geoms):
-                kind += ['hand_object']*per_pair
-                hand_body += [h.body]*per_pair
-                obj_side += [-1]*per_pair
-                fric += [mx(h.friction, g.friction)]*per_pair
+                mode = 'perturb' if (h.kind == 'mesh' and g.kind == 'capsule' and mjccd) else \
+                    'polytope' if (h.kind == 'mesh' and g.kind == 'box' and mjccd) else 'witness'
+                k = 5 if mode == 'perturb' else per_pair
+                self.pair_mode[hi, gi] = mode
+                kind += ['hand_object']*k
+                hand_body += [h.body]*k
+                obj_side += [-1]*k
+                fric += [mx(h.friction, g.friction)]*k
         if hand_table:
             for h in self.hand_geoms:
                 kind.append('hand_table')
@@ -185,6 +245,106 @@ class ContactModel:
         gp = torch.as_tensor(geom.pos, dtype=body_pos.dtype, device=body_pos.device)
         gR = quat_to_mat(torch.as_tensor(geom.quat, dtype=body_pos.dtype, device=body_pos.device))
         return body_pos+(body_R @ gp), body_R @ gR
+
+    def _polytope_pair(self, hi, hp, hR, bp, bR, half):
+        """Exact penetration of hand hull hi and a box (centre bp, rotation bR, half extents half) by the separating
+        axis theorem (= EPA's minimum translation for convex polytopes): axes = box faces, hull faces, edge x edge.
+        Returns world contact position (midway), normal (box -> hull), depth (dist, < 0 in penetration)."""
+        hv = self.hull_tensors[hi][0]
+        he = self.hull_edges[hi]
+        B = hp.shape[0]
+        Vh = hp[:, None]+torch.einsum('bij,kj->bki', hR, hv)                         # (B, nv, 3) world
+        signs = torch.tensor([[x, y, z] for x in (-1., 1.) for y in (-1., 1.) for z in (-1., 1.)], dtype=hv.dtype, device=hv.device)
+        Vb = bp[:, None]+torch.einsum('bij,kj->bki', bR, signs*half)                 # (B, 8, 3)
+        box_axes = bR.transpose(1, 2)                                                  # (B, 3, 3) rows = axes
+        hull_axes = torch.einsum('bij,kj->bki', hR, self.hull_normals[hi])           # (B, nf, 3)
+        ed_h = torch.einsum('bij,kj->bki', hR, hv[he[:, 1]]-hv[he[:, 0]])            # (B, ne, 3)
+        cr = torch.cross(ed_h[:, :, None].expand(-1, -1, 3, -1), box_axes[:, None].expand(-1, ed_h.shape[1], -1, -1), dim=-1)
+        crn = torch.linalg.norm(cr, dim=-1)
+        cr = cr/crn.clamp_min(1e-12)[..., None]
+        cr = torch.where((crn > 1e-6)[..., None], cr, box_axes[:, None].expand_as(cr))  # degenerate: repeat a box axis
+        axes = torch.cat((box_axes, hull_axes, cr.reshape(B, -1, 3)), 1)
+        axes = torch.cat((axes, -axes), 1)                                             # both directions (box -> hull)
+        pb = torch.einsum('bai,bki->bak', axes, Vb)                                    # (B, A, 8)
+        ph = torch.einsum('bai,bki->bak', axes, Vh)
+        depth = pb.max(-1).values-ph.min(-1).values                                   # overlap along u (u: box -> hull)
+        dmin, a = depth.min(1)
+        u = axes.gather(1, a[:, None, None].expand(-1, 1, 3))[:, 0]
+        nbox, nhull = 3, hull_axes.shape[1]
+        A_ = axes.shape[1]//2
+        ai = a % A_
+        is_box_face = ai < nbox
+        is_hull_face = (ai >= nbox) & (ai < nbox+nhull)
+        # witness points: deepest feature of the other body along u
+        hproj = torch.einsum('bi,bki->bk', u, Vh)
+        bproj = torch.einsum('bi,bki->bk', u, Vb)
+        tie_h = (hproj <= hproj.min(1, keepdim=True).values+1e-9).to(hv.dtype)
+        tie_b = (bproj >= bproj.max(1, keepdim=True).values-1e-9).to(hv.dtype)
+        xh = (tie_h[..., None]*Vh).sum(1)/tie_h.sum(1, keepdim=True)                  # deepest hull point(s)
+        xb = (tie_b[..., None]*Vb).sum(1)/tie_b.sum(1, keepdim=True)                  # deepest box point(s)
+        x2_face = xh                                                                   # box face: hull vertex
+        x1_face = xb                                                                   # hull face: box vertex
+        # edge-edge: closest points between the chosen hull edge and the deepest box edge along that direction
+        ei = ((ai-nbox-nhull).clamp_min(0))//3
+        bj = ((ai-nbox-nhull).clamp_min(0)) % 3
+        h0 = Vh.gather(1, he[ei, 0][:, None, None].expand(-1, 1, 3))[:, 0]
+        h1 = Vh.gather(1, he[ei, 1][:, None, None].expand(-1, 1, 3))[:, 0]
+        ax_j = box_axes.gather(1, bj[:, None, None].expand(-1, 1, 3))[:, 0]
+        hb = half[bj] if half.dim() == 1 else half.gather(-1, bj[:, None])[:, 0]
+        # the box edge along axis j through the box vertex deepest along u (its 2 other coordinates fixed)
+        sgn = torch.sign(torch.einsum('bij,bi->bj', bR, u))                          # box-frame direction of u
+        sgn = torch.where(sgn == 0, torch.ones_like(sgn), sgn)
+        corner = bp+torch.einsum('bij,bj->bi', bR, sgn*half)
+        coord_j = torch.einsum('bi,bi->b', corner-bp, ax_j)
+        e_mid = corner-coord_j[:, None]*ax_j
+        b0, b1 = e_mid-hb[:, None]*ax_j, e_mid+hb[:, None]*ax_j
+        c1, c2 = _segment_closest(b0, b1, h0, h1)
+        x1 = torch.where(is_box_face[:, None], x2_face+dmin[:, None]*u, torch.where(is_hull_face[:, None], x1_face, c1))
+        x2 = torch.where(is_box_face[:, None], x2_face, torch.where(is_hull_face[:, None], x1_face-dmin[:, None]*u, c2))
+        return .5*(x1+x2), u, -dmin
+
+    def _hull_exact(self, hi, p_local):
+        v, f = self.hull_tensors[hi]
+        return hull_sdf_exact(p_local.reshape(-1, 3), v, f).reshape(p_local.shape[:-1])
+
+    def _mesh_capsule(self, hi, gi, hp, hR, op, oR, eps=1e-3, rel_tol=1e-3):
+        """MuJoCo's hull-capsule contacts: the deepest point (continuous search along the capsule segment against the
+        exact hull SDF), then multi-CCD's four ±eps tilts of both geoms about the contact point (relative rotation
+        2 eps about the tangent axes of mju_makeFrame), keeping a new contact when it is more than
+        rel_tol * min(rbound) from every earlier one; extra contacts get the first contact's depth.
+        Returns pos, normal (object -> hand), dist (B, 5) and valid (B, 5)."""
+        h, g = self.hand_geoms[hi], self.obj_geoms[gi]
+        r, half = float(g.size[0]), float(g.size[1])
+        z = oR[..., 2]                                                      # capsule axis (world)
+
+        def deepest(centre, axis):
+            # centre, axis: world; returns world position, normal, depth
+            a_loc = lambda t: torch.einsum('bi,bij->bj', centre+t[:, None]*axis-hp, hR)
+            t = golden_min(lambda t: self._hull_exact(hi, a_loc(t)), torch.full_like(centre[:, 0], -half),
+                           torch.full_like(centre[:, 0], half))
+            s = a_loc(t)
+            sd = self._hull_exact(hi, s)
+            gl = _grad(lambda x: self._hull_exact(hi, x), s)                  # hull outward at s (local)
+            n = -torch.einsum('bij,bj->bi', hR, gl)                           # object -> hand
+            pos = hp+torch.einsum('bij,bj->bi', hR, s-.5*(r+sd)[:, None]*gl)
+            return pos, n, sd-r
+        p0, n0, d0 = deepest(op, z)
+        tol = rel_tol*min(g.rbound, h.rbound)
+        P, N, D, V = [p0], [n0], [d0], [torch.ones_like(d0, dtype=torch.bool)]
+        t1, t2 = mju_make_frame(n0)
+        for ax in (t1, t2):
+            for ang in (-eps, eps):
+                R2 = axis_angle_mat(ax, torch.full_like(d0, 2*ang))           # object relative to the hand
+                c2 = p0+torch.einsum('bij,bj->bi', R2, op-p0)
+                z2 = torch.einsum('bij,bj->bi', R2, z)
+                pk, nk, dk = deepest(c2, z2)
+                Rh = axis_angle_mat(ax, torch.full_like(d0, -ang))            # back to the world (hand rotated -eps)
+                pk = p0+torch.einsum('bij,bj->bi', Rh, pk-p0)
+                nk = torch.einsum('bij,bj->bi', Rh, nk)
+                # MuJoCo compares against contacts actually added: invalid ones must not block later ones
+                distinct = torch.stack([(torch.linalg.norm(pk-q, dim=-1) > tol) | ~v for q, v in zip(P, V)], 0).all(0) & (dk < 0)
+                P.append(pk), N.append(nk), D.append(d0), V.append(distinct)
+        return torch.stack(P, 1), torch.stack(N, 1), torch.stack(D, 1), torch.stack(V, 1)
 
     @staticmethod
     def _select(dist, world, K, min_sep=2e-3):
@@ -231,6 +391,24 @@ class ContactModel:
                 d2 = self._hand_sdf(hi, loc2)
                 dist = torch.cat((d1, d2), 1)
                 world = torch.cat((wh, wo), 1)
+                if self.pair_mode[hi, gi] == 'perturb':
+                    near = dist.min(1).values < 2e-3                                    # witness pre-check
+                    if bool(near.any()):
+                        pk, nk, dk, vk = self._mesh_capsule(hi, gi, hp, hR, op, oR)
+                        dk = torch.where(vk & near[:, None], dk, torch.ones_like(dk))
+                    else:
+                        B = dist.shape[0]
+                        pk, nk = hp[:, None].expand(B, 5, 3), torch.zeros_like(hp)[:, None].expand(B, 5, 3)+hR[:, :, :1].transpose(1, 2)
+                        dk = torch.ones(B, 5, dtype=dist.dtype, device=dist.device)
+                    P.append(pk)
+                    N.append(nk)
+                    D.append(dk)
+                    continue
+                if self.pair_mode[hi, gi] == 'polytope':
+                    half = torch.as_tensor(g.size, dtype=dist.dtype, device=dist.device)
+                    pk, nk, dk = self._polytope_pair(hi, hp, hR, op, oR, half)
+                    P.append(pk[:, None]), N.append(nk[:, None]), D.append(dk[:, None])
+                    continue
                 sel, valid = self._select(dist, world, self.per_pair)                  # (B, K) candidate indices
                 is1 = sel < d1.shape[1]
                 i1, i2 = sel.clamp_max(d1.shape[1]-1), (sel-d1.shape[1]).clamp_min(0)
@@ -250,6 +428,12 @@ class ContactModel:
         if self.hand_table:
             for hi, h in enumerate(self.hand_geoms):
                 hp, hR = hpose[hi]
+                if h.kind == 'mesh' and self.mjccd:
+                    B = hp.shape[0]
+                    eye = torch.eye(3, dtype=hp.dtype, device=hp.device).expand(B, 3, 3)
+                    pk, nk, dk = self._polytope_pair(hi, hp, hR, self.table_pos.expand(B, 3), eye, self.table_half)
+                    P.append(pk[:, None]), N.append(nk[:, None]), D.append(dk[:, None])
+                    continue
                 wh = hp[:, None]+torch.einsum('bij,kj->bki', hR, self.hand_wit[hi])
                 d = self._table_sdf(wh)
                 m, i = d.min(-1)

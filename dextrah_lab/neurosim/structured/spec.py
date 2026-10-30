@@ -28,6 +28,7 @@ class GeomSpec:
     quat: np.ndarray             # in the body frame (4,) wxyz
     friction: np.ndarray         # (3,) sliding, torsional, rolling
     mujoco_id: int
+    rbound: float = 0.               # MuJoCo geom_rbound (multi-CCD distinctness tolerance)
     hull_vert: np.ndarray = None     # mesh: hull vertices in the GEOM frame (n, 3)
     hull_face: np.ndarray = None     # mesh: hull triangles (k, 3), outward
 
@@ -119,7 +120,8 @@ def _hull(m, g):
 def _geom(m, g, body_index):
     kind = GEOM_TYPES[int(m.geom_type[g])]
     gs = GeomSpec(name=m.geom(g).name, kind=kind, body=body_index, size=m.geom_size[g].copy(), pos=m.geom_pos[g].copy(),
-                  quat=m.geom_quat[g].copy(), friction=m.geom_friction[g].copy(), mujoco_id=g)
+                  quat=m.geom_quat[g].copy(), friction=m.geom_friction[g].copy(), mujoco_id=g,
+                  rbound=float(m.geom_rbound[g]))
     if kind == 'mesh':
         gs.hull_vert, gs.hull_face = _hull(m, g)
     return gs

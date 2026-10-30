@@ -308,6 +308,56 @@ class StructuredWP3(unittest.TestCase):
         self.assertLess(np.median(rel), .15)
 
 
+def grip_forces(tool, rng, steps=45):
+    """(MuJoCo, structured) per-finger normal forces after the hull hand closes on a held tool; None if no scene."""
+    from dextrah_lab.neurosim.structured.scenes import grip_scene, tool_testbed
+    fingers = ['thumb', 'index', 'middle', 'ring', 'pinky', 'palm']
+    tb = tool_testbed(tool)
+    sc = extract(tb)
+    sim = StructuredSim(sc, contact_model=ContactModel(sc))
+    fb = np.array([fingers.index(f) for f in sc.hand.finger_of_body])
+    g = grip_scene(tb, rng, tool)
+    if g is None:
+        return None
+    for _ in range(steps):
+        tb.step(g.targets, g.palm, hold_object=g.obj)
+    tb.d.ctrl[tb.act] = tb.servo_ctrl(g.targets)
+    mujoco.mj_forward(tb.m, tb.d)
+    mj = np.array([tb.finger_forces()[f] for f in fingers])
+    sim.substep(SimState.from_testbed(tb), T(g.targets[None]), T(g.palm[None, :3]), quat_to_mat(T(g.palm[None, 3:])),
+                T(np.zeros((1, 3))), T(np.zeros((1, 3))), hold_object=True)
+    c, f = sim.last['contacts'], sim.last['forces']['elliptic'][0, :, 0]
+    ours = np.zeros(6)
+    for k, (kd, a) in enumerate(zip(c.kind, c.active[0])):
+        if kd == 'hand_object' and a:
+            ours[fb[int(c.hand_body[k])]] += float(f[k])
+    return mj, ours
+
+
+class StructuredWP3Tools(unittest.TestCase):
+    """Hull hand closing on M-style tools: hull-box pairs by exact SAT penetration (= MuJoCo's EPA), hull-capsule
+    pairs by MuJoCo's multi-CCD perturbation rule."""
+
+    def _check(self, handle, med_tol):
+        from dextrah_lab.neurosim.structured.scenes import random_tool
+        rng, rel = np.random.default_rng(3), []
+        for _ in range(4):
+            out = grip_forces(random_tool(rng, handle=handle), rng)
+            if out is None:
+                continue
+            mj, ours = out
+            big = mj > 2.
+            rel += list(np.abs(ours-mj)[big]/mj[big])
+        self.assertGreater(len(rel), 8)
+        self.assertLess(np.median(rel), med_tol)
+
+    def test_box_handles(self):
+        self._check('box', .02)
+
+    def test_capsule_handles(self):
+        self._check('capsule', .1)
+
+
 class StructuredSDF(unittest.TestCase):
     def test_primitives_match_mj_geomDistance(self):
         rng = np.random.default_rng(4)
