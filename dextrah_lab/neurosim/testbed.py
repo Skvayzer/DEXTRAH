@@ -157,6 +157,11 @@ class CylinderSpec:
 class TestbedSpec:
     cylinder: CylinderSpec = field(default_factory=CylinderSpec)
     geometry: str = 'mesh'                     # 'mesh' | 'capsule'
+    object_kind: str = 'cylinder'              # 'cylinder' | 'tool' (M's handle-head tools: compiled with tool=)
+    # tool parts (object_kind 'tool'): dict(size (4, 3), pos (4, 3) at the COM, quat (4, 4), used (4,), mass, inertia (3,));
+    # compiled into the model: writing per-object geometry into a compiled C MuJoCo model leaves stale compile data
+    # (contact sets differed from a fresh compile in 30/30 restored holds, even with geom_sameframe cleared)
+    tool: dict = None
     table_top: float = .80
     palm_armature: float = 1e3                 # kg / kg m^2 on the palm's 6 DoF (prescribed motion)
 
@@ -173,9 +178,27 @@ def build_spec(ts=TestbedSpec(), contact=None, capsules=None):
     world_geom(table.add_geom(name='table', type=mujoco.mjtGeom.mjGEOM_BOX, size=tuple(s/2 for s in TABLE_SIZE)), contact)
     obj = spec.worldbody.add_body(name='object', pos=(0., 0., ts.table_top+ts.cylinder.height/2))
     obj.add_freejoint(name='object_free')
-    g = obj.add_geom(name='object', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=(ts.cylinder.radius, ts.cylinder.height/2, 0.))
-    g.mass = ts.cylinder.mass                 # uniform density: inertia from the shape
-    world_geom(g, contact)
+    if ts.object_kind == 'cylinder':
+        g = obj.add_geom(name='object', type=mujoco.mjtGeom.mjGEOM_CYLINDER, size=(ts.cylinder.radius, ts.cylinder.height/2, 0.))
+        g.mass = ts.cylinder.mass                 # uniform density: inertia from the shape
+        world_geom(g, contact)
+    elif ts.object_kind == 'tool':
+        # dextrah_lab.mj.scene.object_spec: body frame at the COM, 4 primitive slots (handle box / capsule, head box /
+        # capsule) whose size, pose, rbound and aabb are written per object (set_tool), unused slots a 0.1 mm placeholder
+        from dextrah_lab.mj.objects import PLACEHOLDER, SLOTS, SLOT_TYPES
+        t = ts.tool
+        if t is None:
+            raise ValueError("object_kind 'tool' needs TestbedSpec.tool")
+        obj.mass, obj.ipos, obj.inertia, obj.explicitinertial = float(t['mass']), (0., 0., 0.), tuple(t['inertia']), True
+        for k, (name, kind) in enumerate(zip(SLOTS, SLOT_TYPES)):
+            if not t['used'][k]:
+                continue
+            g = obj.add_geom(name='object_'+name, type=mujoco.mjtGeom.mjGEOM_BOX if kind == 'box' else mujoco.mjtGeom.mjGEOM_CAPSULE)
+            g.size, g.pos, g.quat = tuple(t['size'][k]), tuple(t['pos'][k]), tuple(t['quat'][k])
+            g.mass = 0.
+            world_geom(g, contact)
+    else:
+        raise ValueError(f'object_kind {ts.object_kind}')
     # inactive weld of the object to the world: holds it (with its own mass and contact softness) while the fingers
     # close in the held-state generator; data = the object's pose, set when activated
     hold = spec.add_equality(type=mujoco.mjtEq.mjEQ_WELD, name1='world', name2='object', objtype=mujoco.mjtObj.mjOBJ_BODY)
@@ -265,7 +288,8 @@ class Testbed:
         hand_bodies = [b for b in range(m.nbody) if b == root or self._under(b, root)]
         self.hand_geoms = np.array([g for g in range(m.ngeom) if m.geom_bodyid[g] in hand_bodies
                                     and (m.geom_contype[g] | m.geom_conaffinity[g])])
-        self.object_geom = m.geom('object').id
+        self.object_geoms = np.array([g for g in range(m.ngeom) if m.geom_bodyid[g] == self.object_body])
+        self.object_geom = int(self.object_geoms[0])
         self.table_geom = m.geom('table').id
 
     def _under(self, b, root):
@@ -362,12 +386,13 @@ class Testbed:
         m, d = self.m, self.d
         out, f = [], np.zeros(6)
         hand = set(self.hand_geoms.tolist())
+        objg = set(self.object_geoms.tolist())
         for i in range(d.ncon):
             c = d.contact[i]
             g = {int(c.geom1), int(c.geom2)}
-            if self.object_geom in g and g & hand:
+            if g & objg and g & hand:
                 pair = 'hand_object'
-            elif self.object_geom in g and self.table_geom in g:
+            elif g & objg and self.table_geom in g:
                 pair = 'object_table'
             elif self.table_geom in g and g & hand:
                 pair = 'hand_table'
