@@ -6,7 +6,8 @@ control changes physics and the action interface, not the manipulation reward.
 from collections.abc import Mapping
 import math
 
-TOUCH_RUN = '/data1/users/konstantin.smirnov/DEXTRAH-BPS128-TOUCH/outputs/0_bps128_touch70_continuous_383'
+from dextrah_lab.paths import remap as _remap
+TOUCH_RUN = str(_remap('/data1/users/konstantin.smirnov/DEXTRAH-BPS128-TOUCH/outputs/0_bps128_touch70_continuous_383'))
 TOUCH_CHECKPOINT = TOUCH_RUN + '/nn/complete_17364025344.pth'
 TOUCH_SHA256 = 'ed9b26a7ba335c25f15df6623c8e0a97f6d5b3285721ae7f8263f82d6227d2cd'
 BANK_SHA256 = '69a73d99a05749459fd4339f9341d3cce142ece0f7965283c04cb6410a2f3328'

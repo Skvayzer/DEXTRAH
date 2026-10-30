@@ -47,8 +47,8 @@ def mjlab_task_config(args):
 
 
 def main():
-    if not os.environ.get('SLURM_JOB_ID'):
-        raise RuntimeError('Use a Slurm GPU allocation')
+    if not os.environ.get('SLURM_JOB_ID') and not os.environ.get('ORX_RUN_ID') and not os.environ.get('DEXTRAH_WORKSPACE'):
+        raise RuntimeError('Use a Slurm GPU allocation (or an orx run / DEXTRAH_WORKSPACE machine)')
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--backend', choices=['isaac', 'mjlab'], default='isaac')
     backend = pre.parse_known_args()[0].backend
@@ -249,8 +249,9 @@ def main():
         parent_teacher = parent_contract.get('source_checkpoint')
         from dextrah_lab.wholebody.task_contract import TOUCH_CHECKPOINT as _run383
         if args.teacher_checkpoint is None and parent_teacher not in (None, _run383):
-            args.teacher_checkpoint = Path(parent_teacher)
-        elif args.teacher_checkpoint is not None and str(args.teacher_checkpoint) != parent_teacher:
+            from dextrah_lab.paths import remap
+            args.teacher_checkpoint = remap(parent_teacher)
+        elif args.teacher_checkpoint is not None and str(args.teacher_checkpoint) not in (parent_teacher, str(__import__('dextrah_lab.paths', fromlist=['remap']).remap(parent_teacher))):
             raise ValueError(f'Continuation teacher {args.teacher_checkpoint} != parent {parent_teacher}')
         from dextrah_lab.wholebody.hand_surface import HAND_SURFACE_DIM, hand_surface_dim
         parent_hand = bool(parent_contract.get('body_termination', {}).get('hand_surface_obs', False))
@@ -342,7 +343,7 @@ def main():
             from dextrah_lab.wholebody.source_config import source_task_config
             from dextrah_lab.tasks.g1_revo2_adept.g1_sonic_touch_env import G1SonicTouchEnv
         torch.set_num_threads(4)
-        workspace = Path('/data1/users/konstantin.smirnov')
+        from dextrah_lab.paths import WORKSPACE as workspace
         revision = subprocess.check_output(['git', '-C', str(workspace/'play2perfect'), 'rev-parse', 'HEAD'], text=True).strip()
         if revision != P2P_REVISION:
             raise ValueError('Pinned Play2Perfect revision changed')
@@ -396,7 +397,11 @@ def main():
             actor_gradient_steps_per_epoch=ac_cfg['mini_epochs']*ac_cfg['horizon_length']*args.num_envs//minibatch_size,
             critic_gradient_steps_per_epoch=ac_cfg['central_value_config']['mini_epochs']*ac_cfg['horizon_length']*args.num_envs//minibatch_size)
         contract['optimization'] = optimization
-        print('OPTIMIZATION '+json.dumps(optimization), flush=True)
+        hand_servo = os.environ.get('DEXTRAH_HAND_SERVO', 'velocity')       # applied in dextrah_lab/mj/env.py
+        contract['hand_servo'] = hand_servo
+        if hand_servo != 'velocity':
+            contract['intentional_changes'] = contract['intentional_changes'] + [f'hand_servo_{hand_servo}']
+        print('OPTIMIZATION '+json.dumps(optimization), 'HAND_SERVO', hand_servo, flush=True)
         sgs_settings = None
         if args.sgs:
             from dataclasses import asdict
