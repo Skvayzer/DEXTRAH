@@ -9,6 +9,8 @@ import mujoco
 import numpy as np
 import torch
 
+from dextrah_lab.mj.robot import ContactParams
+from dextrah_lab.neurosim.structured.contact import ContactModel
 from dextrah_lab.neurosim.structured.dynamics import SimState, StructuredSim
 from dextrah_lab.neurosim.structured.kinematics import HandKinematics, palm_substeps
 from dextrah_lab.neurosim.structured.servo import servo_velocity
@@ -18,6 +20,7 @@ from dextrah_lab.neurosim.structured.spec import extract
 from dextrah_lab.neurosim.testbed import Testbed, TestbedSpec
 
 T = lambda x: torch.as_tensor(np.asarray(x), dtype=torch.float64)
+torch.set_num_threads(4)                     # CPU jobs: <= 4 cores (CLAUDE.md)
 
 
 def random_palm(rng):
@@ -232,6 +235,77 @@ class StructuredWP2(unittest.TestCase):
         g_soft, = torch.autograd.grad(soft.sum(), tgt)
         self.assertEqual(g_exact.abs().max().item(), 0.)
         self.assertTrue((g_soft > 0).all())
+
+
+TOOL = dict(size=np.array([[.012, .012, .07], [1e-4, 0., 0.], [.03, .012, .02], [1e-4, 0., 0.]]),
+            pos=np.array([[0., 0., -.02], [0., 0., 0.], [0., 0., .07], [0., 0., 0.]]), quat=np.tile([1., 0., 0., 0.], (4, 1)),
+            used=np.array([1, 0, 1, 0], bool), mass=.3, inertia=np.array([5e-4, 5e-4, 1e-4]))
+
+
+class StructuredWP3(unittest.TestCase):
+    def test_tool_on_table_matches_mujoco(self):
+        """Box tool (handle + head) landing / sliding / spinning on the table, 40 re-synced control steps: MuJoCo's
+        8 corner contacts, normal law and (condim 4) elliptic friction reproduced to solver precision."""
+        palm = np.array([0., .6, 1.3, 1., 0., 0., 0.])
+        R = np.zeros(4)
+        mujoco.mju_euler2Quat(R, np.radians([90., 3., 0.]), 'xyz')
+        for condim, tol in ((1, 1e-12), (4, 1e-7)):
+            tb = Testbed(TestbedSpec(object_kind='tool', tool=TOOL), contact=ContactParams(condim=condim))
+            sc = extract(tb)
+            sim = StructuredSim(sc, contact_model=ContactModel(sc))
+            tb.reset(palm, np.zeros(11), np.r_[0., 0., .8125, R], table_top=.8)
+            tb.d.qvel[tb.object_dadr:tb.object_dadr+6] = (.03, .01, -.05, 0., .5, .3)
+            mujoco.mj_forward(tb.m, tb.d)
+            o, v = tb.object_qadr, tb.object_dadr
+            for k in range(40):
+                s = sim.step(SimState.from_testbed(tb), T(np.zeros((1, 11))), T(palm[None]))
+                tb.step(np.zeros(11), palm)
+                n = s.numpy()
+                self.assertLess(np.abs(n['obj_v']-tb.d.qvel[v:v+3]).max(), tol, (condim, k))
+                self.assertLess(np.abs(n['obj_w']-tb.d.qvel[v+3:v+6]).max(), 10*tol, (condim, k))
+            c = sim.last['contacts']
+            act = [float(x) for x, a, kd in zip(c.dist[0], c.active[0], c.kind) if a and kd == 'object_table']
+            self.assertEqual(sorted(np.round(act, 9)), sorted(np.round([tb.d.contact[i].dist for i in range(tb.d.ncon)], 9)))
+
+    def test_finger_forces_on_held_cylinder(self):
+        """Fingers close and press on an immovable cylinder (Testbed hold_object); per-finger normal force from one
+        substep at MuJoCo's state. Status (WP3, one contact per pair): median relative error <= 15%."""
+        from dextrah_lab.neurosim.reference.held_states import axis_angle, pose, random_unit, rotation_between
+        from dextrah_lab.neurosim.testbed import CLOSE_TARGETS
+        tb = Testbed(TestbedSpec(geometry='capsule'))
+        sc = extract(tb)
+        sim = StructuredSim(sc, contact_model=ContactModel(sc))
+        r = float(tb.m.geom_size[tb.object_geom][0])
+        fingers = ['thumb', 'index', 'middle', 'ring', 'pinky', 'palm']
+        fb = np.array([fingers.index(f) for f in sc.hand.finger_of_body])
+        rng, rel, scenes = np.random.default_rng(1), [], 0
+        while scenes < 4:
+            axis_h = axis_angle(random_unit(rng), np.radians(rng.uniform(0, 20))) @ np.array([0., 1., 0.])
+            c_h = np.array([.021+r+rng.uniform(0, .008), rng.uniform(-.015, .025), rng.uniform(.045, .095)])
+            R_hw = axis_angle(random_unit(rng), rng.uniform(0, np.pi))
+            p_ow = np.array([0., 0., 1.2])
+            palm, obj = pose(p_ow-R_hw @ c_h, R_hw), pose(p_ow, R_hw @ rotation_between(np.array([0., 0., 1.]), axis_h))
+            tb.reset(palm, np.zeros(11), obj, table_top=.8)
+            if any(c['pair'] == 'hand_object' and c['dist'] < 0 for c in tb.contacts()):
+                continue
+            tgt = CLOSE_TARGETS*rng.uniform(.6, 1.)
+            for _ in range(45):
+                tb.step(tgt, palm, hold_object=obj)
+            tb.d.ctrl[tb.act] = tb.servo_ctrl(tgt)
+            mujoco.mj_forward(tb.m, tb.d)
+            mj = np.array([tb.finger_forces()[f] for f in fingers])
+            sim.substep(SimState.from_testbed(tb), T(tgt[None]), T(palm[None, :3]), quat_to_mat(T(palm[None, 3:])),
+                        T(np.zeros((1, 3))), T(np.zeros((1, 3))), hold_object=True)
+            c, f = sim.last['contacts'], sim.last['forces']['elliptic'][0, :, 0]
+            ours = np.zeros(6)
+            for k, (kd, a) in enumerate(zip(c.kind, c.active[0])):
+                if kd == 'hand_object' and a:
+                    ours[fb[int(c.hand_body[k])]] += float(f[k])
+            big = mj > 2.
+            rel += list(np.abs(ours-mj)[big]/mj[big])
+            scenes += 1
+        self.assertGreater(len(rel), 8)
+        self.assertLess(np.median(rel), .15)
 
 
 class StructuredSDF(unittest.TestCase):

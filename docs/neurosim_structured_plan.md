@@ -31,7 +31,7 @@ place/release, later M-grasp) differ only in their start states and in which mar
 | Geometry | Analytic SDFs (box, capsule, sphere, cylinder) for the tool, table and the primitive hand; SDF grids of the 17 hand hulls (MuJoCo's own ≤ 64-vertex hulls) | no |
 | Contact points | Mirror MuJoCo's contact generation where it is closed-form (box/capsule on the table face: corner and end points); witness points + deepest-point selection per (hand link, tool part) | — |
 | Normal contact | MuJoCo's soft-constraint law with the exact solref/solimp (below), coupled solve over active contacts | per-pair-type correction |
-| Friction | Elliptic cone (μ 0.5, fingertip markers 1.0, torsion 0.005 m, impratio 10); see WP4 | stiffness / creep parameters |
+| Friction | MuJoCo's own soft elliptic cone, mirrored exactly (μ 0.5, fingertip markers 1.0, torsion 0.005 m, impratio 10); see §6 for why not a bristle model | none (exact where contacts match) |
 | Residual | Small bounded network on local contact features | yes (WP6) |
 | Backward-only smoothing | Soft servo band s ≈ σ (rev. 2.1 A1); pushing-only long-range contact tail; added as `f + (f_soft − stopgrad(f_soft))` so forward rollouts stay exact | band and tail chosen by the benchmark |
 | Outputs | Next state, per-finger forces, margins: slip utilisation, grasp margin, tipping margin, distances, touchdown speed | — |
@@ -45,7 +45,12 @@ For a contact with signed distance r (< 0 in penetration) and normal velocity v:
 - Impedance `d(|r|)` from solimp (0.9, 0.95, 0.001, 0.5, 2): from dmin 0.9 to dmax 0.95 over the first 1 mm.
 - Reference acceleration `a_ref = −b·v − k·d·r`; regulariser `R = (1 − d)/d · Â`, with Â (`efc_diagA`) the sum of the
   two bodies' `body_invweight0` translational terms for the normal row (object: 1/m) — measured 3.333 for a 0.3 kg tool.
-- Elliptic friction rows: `Â_t = Â_n / impratio`, `R_t = R_n / impratio` (measured).
+- Elliptic friction rows (measured): cone coefficient `μ = f₀ / sqrt(impratio)` (0.158 for f₀ = 0.5);
+  `Â_j = Â_0 (f₀ / f_j)² / impratio` and `R_j = (1 − d)/d · Â_j` (tangential ×0.1, torsional ×1000 for
+  f = (0.5, 0.005)); `a_ref,j = −b·v_j` (no position term); the impedance d of the contact applies to every row.
+- The forces solve MuJoCo's primal problem `min ½ (x − a₀)ᵀ M (x − a₀) + Σ s(Jx − a_ref)` with the plain M
+  (implicitfast's damping does not enter the solve) and its three-zone elliptic cost; `constraint.solve_primal`
+  implements it with Newton's method over the 17 DoF (11 fingers + 6 object), independent of the contact count.
 - A single frictionless contact has the closed form `f = (a_ref − a_0)/(A + R)`; at rest `f = k·d·|r| / R`, so the
   static penetration depends on how many contacts share the load. Mirroring MuJoCo's contact count per pair type is
   therefore part of matching it, not a detail.
@@ -60,14 +65,13 @@ For a contact with signed distance r (< 0 in penetration) and normal velocity v:
 | File | Content |
 | --- | --- |
 | `rotations.py` | Batched quaternion / rotation utilities (wxyz, MuJoCo conventions: `mju_quatIntegrate`, `mju_quat2Vel`) |
-| `spec.py` | `HandSpec`, `ObjectSpec`, `ContactSpec` extracted from a compiled `Testbed` |
-| `kinematics.py` | Palm interpolation, hand FK, point Jacobians |
-| `sdf.py` | Primitive SDFs, hull SDF grids (build + trilinear lookup), witness-point sampling |
+| `spec.py` | `HandSpec`, `ObjectSpec`, `SceneSpec` extracted from a compiled `Testbed` |
+| `kinematics.py` | Palm interpolation, hand FK, point / rotation Jacobians, mass matrix, gravity, Coriolis (forward-mode) |
+| `sdf.py` | Primitive SDFs, exact convex-hull SDF, hull SDF grids (trilinear lookup) |
 | `servo.py` | Exact servo, soft backward surrogate |
-| `dynamics.py` | Finger and object dynamics without contact (WP2) |
-| `contact.py` | Contact points, MuJoCo impedance law, coupled normal solve (WP3) |
-| `friction.py` | Friction (WP4) |
-| `model.py` | `StructuredSim.step(state, targets, palm, palm_next)` |
+| `constraint.py` | MuJoCo impedance law, `Rows`, primal Newton solve (unilateral + elliptic rows) |
+| `contact.py` | Witness points, contact generation (object–table, hand–object, hand–table), contact rows |
+| `dynamics.py` | `SimState`, `StructuredSim.step(state, targets, palm, palm_next, hold_object)` |
 
 Tests: `tests/test_neurosim_structured.py` (CPU; every comparison is against the C MuJoCo testbed). Scripts:
 `scripts/neurosim/structured_*.py`.
@@ -79,7 +83,7 @@ Tests: `tests/test_neurosim_structured.py` (CPU; every comparison is against the
 | WP1 | Spec extraction, rotations, palm interpolation, hand FK, point Jacobians, primitive SDFs | FK body poses within 1e-9 m / rad of `mj_kinematics` at random joint angles and palm poses; palm substep poses equal `Testbed.step`'s; SDF of box/capsule/sphere/cylinder equals `mj_geomDistance` (< 1e-6 m) outside and the analytic depth inside; Jacobians equal `mj_jac` | 2–3 d |
 | WP2 | Contact-free dynamics: servo + implicit damping + joint mass block + gravity + Coriolis + limits; object free flight | One substep from random states (limits, clipped forces, moving palm): q̇ within 1e-4 rad/s; 60 re-synced control steps: q within 1e-6 rad; object free flight 1 s within 1e-9 (open-loop finger trajectories are not a valid test: free fingers limit-cycle, §5) | 1–2 d |
 | WP3 | Contact points + normal law + coupled solve | Tool resting on the table: penetration and per-corner force within 5% of MuJoCo; fingers pressing on a welded tool: per-finger normal force within 10–20% | 2–3 d |
-| WP4 | Friction | Tool held 2 s by a primitive-hand grip: creep < 2 mm and within 2× of MuJoCo's; slide on the table: stick → slip onset within one control step of MuJoCo's | 2–3 d |
+| WP4 | Friction (MuJoCo's elliptic cone, §6) | Slide / spin on the table matches MuJoCo (done with WP3); tool held 2 s by a hand grip: creep within 2× of MuJoCo's; stick → slip onset within one control step of MuJoCo's | 2–3 d |
 | WP5 | Hull SDF grids (~1 mm, 0.5 mm check on flat faces), hull witness points; replay of harvested M holds | Grid SDF vs exact hull distance < 0.3 mm (1 mm grid) near the surface; held/shifted/dropped agreement with the testbed on ≥ 300 harvested holds | 2–3 d |
 | WP6 | Fitting: per-pair-type correction, friction parameters, residual (staged, rev. 2.1 §6) | Gate G2 (rev. 2.1 §6) | 4–5 d |
 | WP7 | Gradient benchmark + utility test on the carry and place/release slices (rev. 2.1 §7) | Gate G3 (go / no-go) | 3–4 d |
@@ -94,7 +98,9 @@ lowered onto the table, fingers opened), then **M-repose** and **M-grasp** (reac
 | --- | --- |
 | WP1 | done: FK / anchors / axes 1e-15; Jacobians, 11×11 mass matrix, gravity 1e-12; palm substeps exact; primitive SDFs = `mj_geomDistance` (< 1e-6 out, < 1e-5 in); exact hull SDF of all 17 hulls within 9e-7 m; 1 mm grids near the surface median 0.01 mm, p95 0.07 mm, max 0.29 mm |
 | WP2 | done: finger substep q̇ within 1.5e-5 rad/s; re-synced control steps q within 1e-6 rad; object free flight 1e-14 |
-| WP3–8 | not started |
+| WP3 | partly done. **Object–table: exact** — box tool landing, sliding and spinning on the table, 40 re-synced steps: object velocity within 3e-15 (condim 1) and 4e-9 (condim 4, elliptic friction); same 8 contacts, depths and normal forces as MuJoCo. **Hand–object: approximate** — fingers pressing an immovable cylinder (8 scenes per hand): per-finger normal force median relative error 8% (primitive hand) / 6% (hull grids), p90 38%; MuJoCo makes 1–5 contacts per (link, cylinder) pair by multi-CCD (24–31 in total), we make 1 (8–12). Naive extra points (farthest-point, own normals, `per_pair=5`) are worse (median 71% / 124%). Next: mirror multi-CCD's patch (one normal per pair, clipped support polygon), then a release / drop test |
+| WP4 | friction law done with WP3 (MuJoCo's elliptic cone, exact on the table); hold-creep and stick→slip tests pending on hand grips (needs WP3's contact patches) |
+| WP5–8 | not started (WP5's hull grids exist and pass the accuracy test) |
 
 ## 5. Findings while building (MuJoCo 3.11, testbed)
 
@@ -118,6 +124,17 @@ lowered onto the table, fingers opened), then **M-repose** and **M-grasp** (reac
    τ = −ω × Iω matches to 1e-14; explicit Euler is off by 2e-3 rad/s per substep at 6 rad/s.
 5. Joint limits are soft (solref 0.02, solimp 0.9–0.95, `dof_invweight0` as Â): fingers pushed below 0 sink to
    −0.07 rad; the structured solve reproduces MuJoCo's limit forces.
+
+6. **Friction: MuJoCo's soft elliptic cone instead of a bristle model** (change from rev. 2.1 §5.3). The reference
+   simulator *is* MuJoCo, and its friction law could be mirrored exactly (object–table matches to 4e-9), so the
+   forward model needs no fitted friction parameters wherever contacts match. MuJoCo's friction is itself soft: it
+   creeps at a rate set by R_t, which the mirrored law reproduces by construction; a bristle model would have had to
+   be fitted to that creep. A bristle state remains an option later for real-robot calibration.
+7. **Contact count is the open issue for hand grips** (WP3 status): the coupled solve and the law are exact, so the
+   remaining hand–object error comes from contact generation (count, placement, normals of multi-CCD patches).
+8. The held-state generator (`reference/held_states.try_hold`) produced 0 holds in 400 trials here (primitive and
+   hull hand; 'overlap' / 'no_grip'), consistent with the ≤ 1.5% reported on the server; WP3 tests therefore use
+   fingers closing on an immovable cylinder. Harvested M holds (server) are the intended WP4/WP5 scenes.
 
 Local development (no `/data1`): set `DEXTRAH_ROBOT_URDF` to a checkout of `unitreerobotics/unitree_ros`
 (`robots/g1_with_brainco_hand/g1_29dof_mode_15_brainco_hand.urdf`). The upstream URDF may differ from the server's

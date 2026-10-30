@@ -89,6 +89,8 @@ class SceneSpec:
     refsafe: bool
     palm_body_pos: np.ndarray    # hand root pose in the palm frame (identity in the testbed)
     palm_body_quat: np.ndarray
+    table_friction: np.ndarray = None    # (3,)
+    condim: int = 4              # contact dimensionality (equal for every contact geom in the testbed)
 
 
 def _hull(m, g):
@@ -178,12 +180,18 @@ def extract(tb):
     solref, solimp = m.geom_solref[contact_geoms], m.geom_solimp[contact_geoms]
     if np.ptp(solref, 0).max() > 0 or np.ptp(solimp, 0).max() > 0:
         raise ValueError('contact solref / solimp differ between geoms (mixing rules not implemented)')
+    condim = m.geom_condim[contact_geoms]
+    if np.ptp(condim) > 0 or int(condim[0]) not in (1, 3, 4):
+        raise ValueError(f'contact condim must be one of 1, 3, 4 and equal for every geom, got {sorted(set(condim))}')
+    if m.opt.cone != mujoco.mjtCone.mjCONE_ELLIPTIC and int(condim[0]) > 1:
+        raise ValueError('only elliptic friction cones are implemented')
     return SceneSpec(
         hand=hand, obj=obj, table_top=float(tb.d.mocap_pos[tb.table_mocap][2]+TABLE_SIZE[2]/2),
         table_pos=tb.d.mocap_pos[tb.table_mocap].copy(), table_half=m.geom_size[tg].copy(), timestep=float(m.opt.timestep),
         substeps=SUBSTEPS, gravity=m.opt.gravity.copy(), impratio=float(m.opt.impratio), solref=solref[0].copy(),
         solimp=solimp[0].copy(), refsafe=not bool(m.opt.disableflags & mujoco.mjtDisableBit.mjDSBL_REFSAFE),
-        palm_body_pos=m.body_pos[root].copy(), palm_body_quat=m.body_quat[root].copy())
+        palm_body_pos=m.body_pos[root].copy(), palm_body_quat=m.body_quat[root].copy(),
+        table_friction=m.geom_friction[tg].copy(), condim=int(condim[0]))
 
 
 def tensors(x, dtype=torch.float64, device='cpu'):
