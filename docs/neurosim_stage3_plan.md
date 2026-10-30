@@ -115,6 +115,47 @@ hold survival per radius; the prism mesh (per-world mesh variants) is the fallba
 contact. Out of distribution for M: 5–6 cm diameter (training cylinders ≤ 4 cm), no head, goal success needs the roll
 about the symmetry axis (so lift and hold are the metrics, not goal success).
 
+**Frozen M on cylinders** (main branch `feature/g1-wholebody-sapg` @ 4d13fba, `scripts/eval_cylinders_frozen_m.py`,
+job 1690; run 1454 best, deterministic leader, 3,000 first episodes per run, cylinders stood upright before the spawn
+check, 84% of draws valid). Held = no table or floor contact since the lift (also counts incidental table touches).
+
+| Objects | Randomization | Lifted | Held 1 / 2 / 5 s after the lift | Floor drop | Goal success |
+| --- | --- | --- | --- | --- | --- |
+| Tools (control, same path) | training | 93% | 63 / 58 / 43% | 32% | 72% |
+| Cylinders, all | training | 82% | 45 / 39 / 29% | 47% | 40% |
+| Cylinders r 2.5 / 2.75 / 3.0 cm | training | 81 / 82 / 82% | 5 s: 40 / 27 / 21% | 40 / 47 / 53% | 51 / 38 / 32% |
+| Cylinders, all | off | 85% | 54 / 47 / 36% | 30% | 47% |
+| Cylinders r 2.5 / 2.75 / 3.0 cm | off | 84 / 84 / 86% | 5 s: 48 / 35 / 26% | 25 / 32 / 35% | 54 / 47 / 39% |
+
+M grasps cylinders as often as it lifts tools minus ~10 points, but holds them worse as the radius grows (r 2.5 cm is
+close to the tools); short cylinders (8–12 cm) are the weakest (14% held at 5 s with randomization, 42% for 16–20 cm).
+Cylinder holds for the bank: harvest from r 2.5 cm (and fine-tune M on cylinders before harvesting r 3.0 cm).
+
+**Phase 1 data on tools** (job 1687): 4,000 episodes from the usable holds of both pools (family uniform, one third
+firm), 875,400 control steps, 11.1M contacts (12.7 per step), 7.3 min on 4 cores; carry completed 85%, object lost in
+the carry 14%, touchdown 84%, object off the table 20% (episodes end there). Tools with asset id % 10 == 0 are held out.
+`outputs/neurosim/stage3/episodes_tools_v1` (3.6 GB).
+
+**Reference gradients, first G1 check** (job 1688, `scripts/neurosim/ref_grads_tools.py`): 100 states per stratum
+(600, train split), 2 random directions per channel, delta 0.01 rad (fingers) and 1 cm/s + 0.05 rad/s (palm), 64 draws
+split into two independent halves; every restored state replayed the log exactly (600/600). Median cosine between the
+halves (all 22 outcomes standardized; by group in brackets, h = 2):
+
+| sigma_f, sigma_p | Channel | Holding h 1 / 2 / 4 | Touchdown h 1 / 2 / 4 | Pre-contact h 1 / 2 / 4 |
+| --- | --- | --- | --- | --- |
+| 0.005 rad, 1 mm | finger | 0.96 / 0.92 / 0.82 (pos 0.96, force 0.94) | 0.90 / 0.83 / 0.75 | 0.08 / 0.26 / 0.13 |
+| 0.005 rad, 1 mm | palm | 0.99 / 0.94 / 0.90 (pos 0.999, force 0.27) | 0.95 / 0.82 / 0.80 | 0.78 / 0.68 / 0.67 |
+| 0.02 rad, 1 mm | finger | 0.85 / 0.70 / 0.48 | 0.69 / 0.56 / 0.41 | ~0.1 |
+| 0.05 rad, 3 mm | finger | 0.64 / 0.39 / 0.15 | 0.52 / 0.24 / 0.18 | ~0 |
+| 0.05 rad, 3 mm | palm | 0.96 / 0.90 / 0.76 (pos 0.998) | 0.87 / 0.74 / 0.53 | 0.63 / 0.53 / 0.48 |
+
+G1 (cosine >= 0.9 at the task sigma, h <= 4, in-contact strata) holds for palm -> object pose (position 0.90–0.999,
+rotation 0.86–0.98 in every stratum and sigma), not for the full outcome vector (contact forces and slip are much
+noisier) and not for the finger channel above sigma 0.005 / h 2. Pre-contact finger derivatives are ~0 within 8 steps
+(no reachable contact), as expected. Commands sit at joint limits often (thumb proximal 63–77%, pinky 70–84% of the
+sampled states, one-sided responses). Next: per-outcome gates instead of one cosine, delta matched to sigma
+(0.02–0.05), 256 draws on the finger channel, a control variate (the unperturbed rollout under the same noise).
+
 ---
 
 ## Revision 2 (research agent), unchanged
