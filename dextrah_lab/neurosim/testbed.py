@@ -314,11 +314,12 @@ class Testbed:
         err = targets-self.d.qpos[self.qadr]
         return np.clip(self.servo_gain*err, -self.servo_vmax, self.servo_vmax)
 
-    def step(self, targets, palm_pose, palm_pose_next=None, hold_object=None):
+    def step(self, targets, palm_pose, palm_pose_next=None, hold_object=None, on_substep=None):
         """One 60 Hz control step: the palm moves from palm_pose to palm_pose_next at constant linear and angular
         velocity (set with the pose at each physics substep); the servo command is recomputed each substep (as
         write_data_to_sim). hold_object: an object pose (7) kept fixed (pose re-set, velocity zeroed at every
-        substep: an immovable object, e.g. while the fingers close on it)."""
+        substep: an immovable object, e.g. while the fingers close on it). on_substep(k): called after each physics
+        substep (e.g. to log its contacts)."""
         m, d = self.m, self.d
         nxt = palm_pose if palm_pose_next is None else palm_pose_next
         T = SUBSTEPS*m.opt.timestep
@@ -342,6 +343,8 @@ class Testbed:
                 d.qpos[self.object_qadr:self.object_qadr+7] = hold_object
                 d.qvel[self.object_dadr:self.object_dadr+6] = 0.
             mujoco.mj_step(m, d)
+            if on_substep is not None:
+                on_substep(k)
         if hold_object is not None:
             d.qpos[self.object_qadr:self.object_qadr+7] = hold_object
             d.qvel[self.object_dadr:self.object_dadr+6] = 0.
