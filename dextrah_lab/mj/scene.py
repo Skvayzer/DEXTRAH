@@ -4,17 +4,19 @@ from dataclasses import dataclass, field
 import mujoco
 import numpy as np
 
-from .objects import SLOTS, SLOT_TYPES, PLACEHOLDER
+from .objects import PLACEHOLDER, slot_names, slot_types
 from .robot import ContactParams, WORLD_CONAFFINITY, WORLD_CONTYPE, build_fixed_robot_spec, build_robot_spec
 
 # play2perfect/assets/urdf/table_narrow.urdf: one box, kinematic in Isaac.
 TABLE_SIZE = (0.475, 0.4, 0.3)
-_GEOM = {'box': mujoco.mjtGeom.mjGEOM_BOX, 'capsule': mujoco.mjtGeom.mjGEOM_CAPSULE}
+_GEOM = {'box': mujoco.mjtGeom.mjGEOM_BOX, 'capsule': mujoco.mjtGeom.mjGEOM_CAPSULE,
+         'cylinder': mujoco.mjtGeom.mjGEOM_CYLINDER}
 
 
 @dataclass
 class SceneParams:
     contact: ContactParams = field(default_factory=ContactParams)
+    cylinder_slot: bool = False          # opt-in fifth object slot: a true cylinder (objects.CYLINDER_SLOT)
 
 
 def _world_geom(geom, contact):
@@ -26,7 +28,7 @@ def _world_geom(geom, contact):
     geom.friction = (contact.friction, contact.torsional, contact.rolling)
 
 
-def object_spec(contact):
+def object_spec(contact, cylinder_slot=False):
     spec = mujoco.MjSpec()
     body = spec.worldbody.add_body(name='object_root')
     body.add_freejoint(name='object_free')
@@ -35,7 +37,7 @@ def object_spec(contact):
     body.ipos = (0., 0., 0.)
     body.inertia = (1e-4, 1e-4, 1e-4)
     body.explicitinertial = True
-    for name, kind in zip(SLOTS, SLOT_TYPES):
+    for name, kind in zip(slot_names(cylinder_slot), slot_types(cylinder_slot)):
         geom = body.add_geom(name=name, type=_GEOM[kind])
         geom.size = (PLACEHOLDER, PLACEHOLDER, PLACEHOLDER)
         geom.mass = 0.
@@ -79,14 +81,15 @@ def build_scene_cfg(num_envs, params=SceneParams(), fixed_body_reference=None, r
                           init_state=EntityCfg.InitialStateCfg(pos=tuple(pos), rot=tuple(rot)))
     return SceneCfg(num_envs=num_envs, env_spacing=0., spec_fn=add_ground(contact), entities={
         'robot': robot,
-        'object': EntityCfg(spec_fn=lambda: object_spec(contact)),
+        'object': EntityCfg(spec_fn=lambda: object_spec(contact, params.cylinder_slot)),
         'table': EntityCfg(spec_fn=lambda: table_spec(contact), init_state=EntityCfg.InitialStateCfg(pos=(0., 0., 0.65))),
     })
 
 
 def object_indices(mj_model):
     body = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_BODY, 'object/object_root')
-    geoms = [mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, f'object/{s}') for s in SLOTS]
+    cylinder = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'object/cylinder') >= 0
+    geoms = [mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, f'object/{s}') for s in slot_names(cylinder)]
     if body < 0 or min(geoms) < 0:
         raise RuntimeError('Object body/slots not found in compiled scene')
     return body, np.array(geoms)

@@ -131,6 +131,15 @@ class G1SonicTouchMjEnv:
         self.step_dt = cfg.sim.dt*cfg.decimation
         self.max_episode_length = math.ceil(cfg.episode_length_s/self.step_dt)
         self.scene_params = scene_params or SceneParams()
+        # Opt-in object set instead of the procedural tools (cfg.assets.object_set; 'cylinders':
+        # dextrah_lab/mj/cylinder_objects.py, parameters in cfg.assets.cylinder_params). It needs the cylinder slot and
+        # skips the tool-pool count and BPS-bank hash checks (what was built: self.object_set_record).
+        self.object_set = getattr(cfg.assets, 'object_set', None)
+        if self.object_set is not None:
+            if self.object_set != 'cylinders':
+                raise ValueError(f'Unknown object set {self.object_set!r}')
+            from dataclasses import replace
+            self.scene_params = replace(self.scene_params, cylinder_slot=True)
         self._mj_scene = Scene(build_scene_cfg(
             num_envs, self.scene_params, fixed_body_reference=reference if fixed_body else None,
             robot_pose=(cfg.assets.robot_init_pos, cfg.assets.robot_init_rot)), device)
@@ -165,13 +174,18 @@ class G1SonicTouchMjEnv:
         # ---- G1Revo2DirectEnv.__init__ -----------------------------------------
         requested = set(cfg.assets.handle_head_types)
         expected = sum(d.type in requested for d in size_distributions.OBJECT_SIZE_DISTRIBUTIONS)*cfg.assets.num_assets_per_type
-        if len(self._object_urdf_paths) != expected:
+        if self.object_set is None and len(self._object_urdf_paths) != expected:
             raise RuntimeError(f'Object pool mismatch: expected {expected}, got {len(self._object_urdf_paths)}')
         self._episode_ever_lifted = torch.zeros(num_envs, device=device, dtype=torch.bool)
         # ---- G1Revo2BpsEnv.__init__ --------------------------------------------
         if (cfg.observation_space, cfg.state_space) != (92, 114):
             raise ValueError('Warm-start task requires the proven 92/114 P2P observation layout')
         bank, manifest = build_bank(self._object_urdf_paths, cfg.bps_cache_dir)
+        if self.object_set is not None:
+            self.object_set_record = dict(object_set=self.object_set, assets=len(self._object_urdf_paths),
+                                          bps_features_sha256=manifest['features_sha256'],
+                                          params=dict(getattr(cfg.assets, 'cylinder_params', {}) or {}))
+            print('OBJECT_SET '+json.dumps(self.object_set_record), flush=True)
         indices = self._object_asset_index_per_env.cpu().numpy()
         self._bps_features = torch.as_tensor(map_features(bank, indices), device=device)
         self._bps_bank = bank
@@ -204,7 +218,7 @@ class G1SonicTouchMjEnv:
             # ---- fixed-body touch task: no SONIC layers ------------------------------
             if (cfg.observation_space, cfg.state_space) != tuple(isaac_dims):
                 raise ValueError(f'Fixed-body interface {(cfg.observation_space, cfg.state_space)} != Isaac {isaac_dims}')
-            if self._bps_manifest['features_sha256'] != BANK_SHA256:
+            if self.object_set is None and self._bps_manifest['features_sha256'] != BANK_SHA256:
                 raise ValueError('mjlab port generated a different object bank')
             # Opt-in hand-to-surface observation (wholebody/hand_surface.py), after touch.
             self._hand_surface, self.hand_surface_dim = None, 0
@@ -221,7 +235,7 @@ class G1SonicTouchMjEnv:
             # ---- G1SonicTouchEnv.__init__ (after parent) -------------------------------
             if (cfg.observation_space, cfg.state_space) != (TASK_ACTOR_DIM, TASK_CRITIC_DIM):
                 raise ValueError('Expected the trained BPS128 + touch interface')
-            if self._bps_manifest['features_sha256'] != BANK_SHA256:
+            if self.object_set is None and self._bps_manifest['features_sha256'] != BANK_SHA256:
                 raise ValueError('mjlab port generated a different object bank')
             names = self.robot.joint_names
             self._body_ids = torch.tensor(joint_indices(names, BODY_JOINTS), device=device)
@@ -304,16 +318,21 @@ class G1SonicTouchMjEnv:
         # Same procedural pool, order and env assignment as Isaac (seed 42, shuffled).
         import tempfile
         self._tmp_asset_dir = tempfile.mkdtemp(prefix='mj_play_assets_')
-        paths, scales = generate_objects.generate_handle_head_urdfs(
-            handle_head_types=tuple(cfg.assets.handle_head_types), num_per_type=cfg.assets.num_assets_per_type,
-            out_dir=self._tmp_asset_dir, shuffle=cfg.assets.shuffle_assets)
+        if self.object_set == 'cylinders':
+            from .cylinder_objects import generate_cylinder_urdfs
+            paths, scales, self.object_set_meta = generate_cylinder_urdfs(
+                self._tmp_asset_dir, **(getattr(cfg.assets, 'cylinder_params', {}) or {}))
+        else:
+            paths, scales = generate_objects.generate_handle_head_urdfs(
+                handle_head_types=tuple(cfg.assets.handle_head_types), num_per_type=cfg.assets.num_assets_per_type,
+                out_dir=self._tmp_asset_dir, shuffle=cfg.assets.shuffle_assets)
         self._object_urdf_paths = [str(p) for p in paths]
         asset = torch.arange(n, device=device) % len(paths)
         self._object_asset_index_per_env = asset
         self._object_scale_per_env = torch.as_tensor(np.asarray(scales, dtype=np.float32), device=device)[asset]
         self._table_variant_scales = None
         # Per-world object geometry and inertials.
-        bank = build_object_bank(self._object_urdf_paths)
+        bank = build_object_bank(self._object_urdf_paths, self.scene_params.cylinder_slot)
         self.object_bank = bank
         body, geoms = object_indices(self.sim.mj_model)
         self.sim.expand_model_fields(('geom_size', 'geom_pos', 'geom_quat', 'geom_rbound', 'geom_aabb',
@@ -331,7 +350,7 @@ class G1SonicTouchMjEnv:
         m.geom_pos[:, geoms] = t(bank.pos[a])-com[:, None]
         m.geom_quat[:, geoms] = t(bank.quat[a])
         m.geom_rbound[:, geoms] = t(bank.rbound[a])
-        m.geom_aabb[:, geoms] = t(bank.aabb[a]).view(n, 4, 2, 3)
+        m.geom_aabb[:, geoms] = t(bank.aabb[a]).view(n, len(geoms), 2, 3)
         m.body_mass[:, body] = t(bank.mass[a])
         m.body_ipos[:, body] = 0.
         m.body_iquat[:, body] = t(np.tile([1., 0., 0., 0.], (n, 1)))

@@ -21,6 +21,17 @@ import numpy as np
 SLOTS = ('handle_box', 'handle_capsule', 'head_box', 'head_capsule')
 SLOT_TYPES = ('box', 'capsule', 'box', 'capsule')
 PLACEHOLDER = 1e-4
+# Opt-in fifth slot (SceneParams.cylinder_slot): a true flat-ended cylinder, used by URDF collisions named "cylinder"
+# (dextrah_lab/mj/cylinder_objects.py). Without the flag the bank and the scene are exactly the four slots above.
+CYLINDER_SLOT = 4
+
+
+def slot_names(cylinder_slot=False):
+    return SLOTS+(('cylinder',) if cylinder_slot else ())
+
+
+def slot_types(cylinder_slot=False):
+    return SLOT_TYPES+(('cylinder',) if cylinder_slot else ())
 
 
 def quat_from_rpy(r, p, y):
@@ -39,25 +50,37 @@ class ObjectBank:
     mass: np.ndarray      # (n_obj,)
     com: np.ndarray       # (n_obj, 3)
     inertia: np.ndarray   # (n_obj, 3) principal moments, axes aligned with the link frame
+    slot_types: tuple = SLOT_TYPES
 
     @property
     def rbound(self):
+        types = np.array(self.slot_types)
         box = np.linalg.norm(self.size, axis=-1)
         capsule = self.size[..., 0]+self.size[..., 1]
-        return np.where(np.array([t == 'box' for t in SLOT_TYPES]), box, capsule)
+        out = np.where(types == 'box', box, capsule)
+        if 'cylinder' in self.slot_types:
+            out = np.where(types == 'cylinder', np.hypot(self.size[..., 0], self.size[..., 1]), out)
+        return out
 
     @property
     def aabb(self):
         """MuJoCo geom_aabb: local-frame centre (zeros) and half extents."""
         half = self.size.copy()
-        capsule = np.array([t == 'capsule' for t in SLOT_TYPES])
+        types = np.array(self.slot_types)
+        capsule = types == 'capsule'
         half[..., capsule, 0] = self.size[..., capsule, 0]
         half[..., capsule, 1] = self.size[..., capsule, 0]
         half[..., capsule, 2] = self.size[..., capsule, 0]+self.size[..., capsule, 1]
+        cylinder = types == 'cylinder'
+        if cylinder.any():
+            half[..., cylinder, 1] = self.size[..., cylinder, 0]
+            half[..., cylinder, 2] = self.size[..., cylinder, 1]
         return np.concatenate((np.zeros_like(half), half), -1)
 
 
-def parse_object(path):
+def parse_object(path, cylinder_slot=False):
+    """(geoms [(kind, size, xyz, quat)], mass, com, diagonal inertia). URDF cylinders become capsules (as Isaac), except
+    collisions named "cylinder", which need the cylinder slot."""
     link = ET.parse(path).getroot().find('link')
     geoms = []
     for collision in link.findall('collision'):
@@ -69,7 +92,12 @@ def parse_object(path):
             geoms.append(('box', np.array([float(v) for v in shape.get('size').split()])/2, xyz, quat_from_rpy(*rpy)))
         elif shape.tag == 'cylinder':
             r, length = float(shape.get('radius')), float(shape.get('length'))
-            geoms.append(('capsule', np.array([r, length/2, 0.]), xyz, quat_from_rpy(*rpy)))
+            kind = 'capsule'
+            if collision.get('name') == 'cylinder':
+                if not cylinder_slot:
+                    raise ValueError(f'{path}: a true cylinder needs SceneParams.cylinder_slot')
+                kind = 'cylinder'
+            geoms.append((kind, np.array([r, length/2, 0.]), xyz, quat_from_rpy(*rpy)))
         else:
             raise ValueError(f'Unsupported object primitive {shape.tag} in {path}')
     if not 1 <= len(geoms) <= 2:
@@ -85,16 +113,16 @@ def parse_object(path):
             np.array([float(tensor.get(k)) for k in ('ixx', 'iyy', 'izz')]))
 
 
-def build_object_bank(paths):
-    n = len(paths)
-    size = np.full((n, 4, 3), PLACEHOLDER)
-    pos = np.zeros((n, 4, 3))
-    quat = np.tile(np.array([1., 0., 0., 0.]), (n, 4, 1))
-    used = np.zeros((n, 4), dtype=bool)
+def build_object_bank(paths, cylinder_slot=False):
+    n, S = len(paths), len(slot_types(cylinder_slot))
+    size = np.full((n, S, 3), PLACEHOLDER)
+    pos = np.zeros((n, S, 3))
+    quat = np.tile(np.array([1., 0., 0., 0.]), (n, S, 1))
+    used = np.zeros((n, S), dtype=bool)
     mass, com, inertia = np.zeros(n), np.zeros((n, 3)), np.zeros((n, 3))
     for i, path in enumerate(paths):
-        geoms, mass[i], com[i], inertia[i] = parse_object(path)
+        geoms, mass[i], com[i], inertia[i] = parse_object(path, cylinder_slot)
         for part, (kind, s, xyz, q) in enumerate(geoms):
-            slot = 2*part+(kind == 'capsule')
+            slot = CYLINDER_SLOT if kind == 'cylinder' else 2*part+(kind == 'capsule')
             size[i, slot], pos[i, slot], quat[i, slot], used[i, slot] = s, xyz, q, True
-    return ObjectBank(size, pos, quat, used, mass, com, inertia)
+    return ObjectBank(size, pos, quat, used, mass, com, inertia, slot_types(cylinder_slot))

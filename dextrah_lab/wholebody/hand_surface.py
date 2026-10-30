@@ -39,7 +39,7 @@ def hand_surface_dim(arm_links=False, goal=False):
 SCALE = 10.                                             # metres -> decimetres
 CLIP = 3.                                               # 30 cm
 
-MJ_GEOM_CAPSULE, MJ_GEOM_BOX = 3, 6
+MJ_GEOM_CAPSULE, MJ_GEOM_CYLINDER, MJ_GEOM_BOX = 3, 5, 6
 
 
 def quat_to_mat(q):
@@ -51,13 +51,13 @@ def quat_to_mat(q):
                         2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)), -1).reshape(*q.shape[:-1], 3, 3)
 
 
-def nearest_surface_vectors(points, centre, rot, size, is_box, used):
-    """Vectors from points to the nearest surface point of a union of boxes/capsules.
+def nearest_surface_vectors(points, centre, rot, size, is_box, used, is_cyl=None):
+    """Vectors from points to the nearest surface point of a union of boxes/capsules (/cylinders).
 
     points (n, P, 3); centre (n, S, 3); rot (n, S, 3, 3) local->world; size (n, S, 3)
-    (box: half extents; capsule: radius, half length along local z); is_box (S,) bool;
-    used (n, S) bool. Points inside a primitive get the vector to its nearest face.
-    Returns (n, P, 3).
+    (box: half extents; capsule and cylinder: radius, half length along local z); is_box (S,) bool;
+    used (n, S) bool; is_cyl (S,) bool or None (no cylinder slot: the box/capsule result, unchanged).
+    Points inside a primitive get the vector to its nearest face. Returns (n, P, 3).
     """
     local = torch.einsum('nsji,npsj->npsi', rot, points[:, :, None]-centre[:, None])     # R^T (p - c)
     h = size[:, None].expand_as(local)
@@ -80,6 +80,19 @@ def nearest_surface_vectors(points, centre, rot, size, is_box, used):
     unit = torch.where(n > 1e-9, d/n.clamp_min(1e-9), fallback)
     capsule = a+r[..., None]*unit-local
     v_local = torch.where(is_box[None, None, :, None], box, capsule)
+    if is_cyl is not None and bool(is_cyl.any()):
+        # Cylinder: outside, clamp radially to r and axially to +-half; inside, out through the nearer of side and cap.
+        rho = local[..., :2].norm(dim=-1, keepdim=True)
+        radial = torch.where(rho > 1e-9, local[..., :2]/rho.clamp_min(1e-9), fallback[..., :2])
+        z = local[..., 2:]
+        q = torch.cat((torch.where(rho > r[..., None], r[..., None]*radial, local[..., :2]),
+                       torch.maximum(torch.minimum(z, half[..., None]), -half[..., None])), -1)
+        side_gap, cap_gap = r[..., None]-rho, half[..., None]-z.abs()
+        inside = (side_gap > 0) & (cap_gap > 0)
+        to_side = torch.cat((r[..., None]*radial, z), -1)
+        to_cap = torch.cat((local[..., :2], torch.where(z >= 0, half[..., None], -half[..., None])), -1)
+        q = torch.where(inside, torch.where(side_gap < cap_gap, to_side, to_cap), q)
+        v_local = torch.where(is_cyl[None, None, :, None], q-local, v_local)
     v = torch.einsum('nsij,npsj->npsi', rot, v_local)
     dist = v.norm(dim=-1).masked_fill(~used[:, None, :], float('inf'))
     best = dist.argmin(-1)
@@ -116,9 +129,11 @@ class HandSurface:
         self.used = torch.as_tensor(bank.used, device=device, dtype=torch.bool)
         _, slots = object_indices(env.sim.mj_model)
         types = [int(env.sim.mj_model.geom_type[g]) for g in slots]
-        if any(x not in (MJ_GEOM_BOX, MJ_GEOM_CAPSULE) for x in types):
-            raise ValueError(f'Object slots must be boxes or capsules, got types {types}')
+        if any(x not in (MJ_GEOM_BOX, MJ_GEOM_CAPSULE, MJ_GEOM_CYLINDER) for x in types):
+            raise ValueError(f'Object slots must be boxes, capsules or cylinders, got types {types}')
         self.is_box = torch.tensor([x == MJ_GEOM_BOX for x in types], device=device)
+        self.is_cyl = torch.tensor([x == MJ_GEOM_CYLINDER for x in types], device=device) \
+            if MJ_GEOM_CYLINDER in types else None
 
     def points(self):
         env = self.env
@@ -138,7 +153,7 @@ class HandSurface:
         centre = obj_pos[:, None]+torch.einsum('nij,nsj->nsi', R, self.pos[a])
         rot = R[:, None] @ self.rot[a]
         points = self.points() if points is None else points
-        return nearest_surface_vectors(points, centre, rot, self.size[a], self.is_box, self.used[a])
+        return nearest_surface_vectors(points, centre, rot, self.size[a], self.is_box, self.used[a], self.is_cyl)
 
     def goal_pose(self):
         """Env-local goal pose of the object link (as obs_utils: goal_viz root pose)."""

@@ -517,7 +517,7 @@ class MjSgsTask:
         self.body, geoms = object_indices(env.sim.mj_model)
         self.geoms = torch.as_tensor(geoms, device=self.device, dtype=torch.long)
         self.tab = dict(size=t(bank.size), quat=t(bank.quat), rbound=t(bank.rbound),
-                        aabb=t(bank.aabb).view(self.n_assets, 4, 2, 3), mass=t(bank.mass), com=t(bank.com),
+                        aabb=t(bank.aabb).view(self.n_assets, len(geoms), 2, 3), mass=t(bank.mass), com=t(bank.com),
                         inertia=t(bank.inertia))
         self.tab['pos'] = t(bank.pos)-self.tab['com'][:, None]
         self.tab['bps'] = torch.as_tensor(map_features(env._bps_bank, np.arange(self.n_assets)), device=self.device,
