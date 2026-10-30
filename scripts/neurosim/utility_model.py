@@ -27,6 +27,9 @@ from dextrah_lab.neurosim.structured.spec import extract
 
 HZ = int(os.environ.get('UTILITY_HORIZON', 2))
 BANDS = (0., .005, .02)
+# variants: (name, backward servo band, noisy Adam steps: an action-noise draw at sigma mid added each iteration =
+# stochastic randomized smoothing of the model objective)
+VARIANTS = [('model_0', 0., False), ('model_0.02', .02, False), ('model_pathband_mid', .02, True)]
 DT = 1/60
 T = lambda x: torch.as_tensor(np.asarray(x), dtype=torch.float64)
 
@@ -72,7 +75,7 @@ def run_state(args):
     s0 = SimState.from_testbed(tb)
     cm = ContactModel(sc)
     t0 = time.time()
-    for b in BANDS:
+    for vname, b, noisy in VARIANTS:
         sim = StructuredSim(sc, contact_model=cm, servo_band=b or None)
         z = torch.zeros(12, dtype=torch.float64, requires_grad=True)
         opt = torch.optim.Adam([z], lr=.1)
@@ -80,14 +83,15 @@ def run_state(args):
         try:
             for _ in range(iters):
                 opt.zero_grad()
-                f = model_objective(sim, s0, palm, tg, z*sc_t)
+                xi = T(rng.normal(size=12)*sd) if noisy else 0.
+                f = model_objective(sim, s0, palm, tg, z*sc_t+xi)
                 f.backward()
                 opt.step()
                 with torch.no_grad():
                     z.copy_(torch.maximum(torch.minimum(z, bd), -bd))
-            res[f'model_{b:g}'] = evaluate(z.detach().numpy()*SCALE)
+            res[vname] = evaluate(z.detach().numpy()*SCALE)
         except Exception as e:
-            res[f'model_{b:g}'] = np.nan
+            res[vname] = np.nan
             res['error'] = repr(e)
     res['model_sec'] = time.time()-t0
     for B in budgets:                                  # CEM with B MuJoCo rollouts
@@ -117,7 +121,7 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     budgets = [int(x) for x in a.budgets.split(',')]
-    print('CONFIG', json.dumps(vars(a)), 'EPISODE_SOURCE', G.EPISODE_SOURCE, 'HORIZON', HZ, 'BANDS', BANDS, flush=True)
+    print('CONFIG', json.dumps(vars(a)), 'EPISODE_SOURCE', G.EPISODE_SOURCE, 'HORIZON', HZ, 'VARIANTS', VARIANTS, flush=True)
     t0 = time.time()
     with Pool(a.workers) as pool:
         eps = pool.map(G.episode_task, [(a.seed*100_000+i,) for i in range(a.episodes)])
@@ -140,7 +144,7 @@ def main():
             if (i+1) % 10 == 0:
                 print('PROGRESS %d/%d %.0fs' % (i+1, len(jobs), time.time()-t0), flush=True)
     (out/'utility_model.json').write_text(json.dumps(R, indent=1))
-    methods = [f'model_{b:g}' for b in BANDS]+[f'cem_{B}' for B in budgets]
+    methods = [v[0] for v in VARIANTS]+[f'cem_{B}' for B in budgets]
     for task in ('hold', 'lowering'):
         S = [r for r in R if r['task'] == task]
         if not S:
