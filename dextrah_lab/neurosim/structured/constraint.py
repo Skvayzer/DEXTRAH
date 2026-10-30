@@ -140,7 +140,18 @@ def evaluate(x, M, a0, rows):
 
 
 def solve_primal(M, a0, rows, iters=50, tol=1e-12, ls_iters=30):
-    """Newton on MuJoCo's primal; returns (qacc (B, n), forces dict). M (B, n, n), a0 = M⁻¹ qfrc_smooth (B, n)."""
+    """Newton on MuJoCo's primal; returns (qacc (B, n), forces dict). M (B, n, n), a0 = M⁻¹ qfrc_smooth (B, n).
+    Differentiable by the implicit function theorem: the iterations run without autograd; one Newton step from the
+    converged x* with autograd on, x* - H(x*)⁻¹ g(x*) (= x* in value, since g(x*) = 0), carries the exact derivative
+    of the minimiser with respect to M, a0 and the rows (within the current zone of every constraint)."""
+    if torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in
+                                       (M, a0, rows.uJ, rows.uaref, rows.uR, rows.eJ, rows.earef, rows.eR)):
+        with torch.no_grad():
+            xs, _ = solve_primal(M.detach(), a0.detach(), Rows(**{k: (v.detach() if torch.is_tensor(v) else v)
+                                                                   for k, v in vars(rows).items()}), iters, tol, ls_iters)
+        _, grad, H, _ = evaluate(xs, M, a0, rows)
+        x = xs-torch.linalg.solve(H, grad[..., None]).squeeze(-1)
+        return x, evaluate(x, M, a0, rows)[3]
     x = a0.clone()
     cost, grad, H, forces = evaluate(x, M, a0, rows)
     scale = torch.diagonal(M, dim1=-2, dim2=-1).mean(-1)

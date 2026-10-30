@@ -320,8 +320,9 @@ class ContactModel:
         def deepest(centre, axis):
             # centre, axis: world; returns world position, normal, depth
             a_loc = lambda t: torch.einsum('bi,bij->bj', centre+t[:, None]*axis-hp, hR)
-            t = golden_min(lambda t: self._hull_exact(hi, a_loc(t)), torch.full_like(centre[:, 0], -half),
-                           torch.full_like(centre[:, 0], half))
+            with torch.no_grad():                    # argmin: no gradient needed (envelope theorem)
+                t = golden_min(lambda t: self._hull_exact(hi, a_loc(t.detach())), torch.full_like(centre[:, 0], -half),
+                               torch.full_like(centre[:, 0], half)).detach()
             s = a_loc(t)
             sd = self._hull_exact(hi, s)
             gl = _grad(lambda x: self._hull_exact(hi, x), s)                  # hull outward at s (local)
