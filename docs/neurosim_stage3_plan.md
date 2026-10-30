@@ -51,6 +51,58 @@ regulariser R = (1 − d)/d · Â (d the impedance). A single frictionless conta
 with several contacts and elliptic friction cones the solve couples them. The learned "coupled-solve correction" in §5
 is exactly the step from the per-contact closed form to the multi-contact result.
 
+## B. Phase 0 results on the manipulation expert's tool holds (2026-10-30)
+
+Held states come from the policy (option 1, tools first): every held state (families stable_grasp and near_goal) of
+M's success-guided sampler pool is rebuilt in the testbed with the same tool, the palm at the recorded hand-base pose,
+the 11 joint angles, the recorded targets (so every servo keeps its gap) and the recorded table
+(`dextrah_lab/neurosim/reference/tool_holds.py`, `scripts/neurosim/harvest_tool_holds.py`). One model is compiled per
+tool: writing a tool's geometry into a compiled model is unreliable in C MuJoCo (`geom_sameframe` hides geom_pos/quat;
+with it cleared, contact sets still differed from a fresh compile in 30 of 30 holds).
+
+**Acceptance test** (1 s, palm prescribed): 15 steps of contact transient, then the object must stay within 5 mm and
+5° of its post-transient pose in the palm frame through 15 settle steps and a ±3 mm / ±3° palm shake (30 steps).
+Outcomes: held (firm), shifted (still in the hand, slipping), dropped (no hand contact above 0.5 N at the end). The
+transient is excluded because restored states carry the whole-body simulation's penetrations (median 7 mm, 90th
+percentile 12 mm), which the solver pushes out in the first steps; measured from the recorded pose, only 2.6–2.8% pass.
+
+| Pool (21,845 holds each) | Held | Shifted | Dropped | Rejected per family (brush / eraser / hammer / marker / screwdriver / spatula) |
+| --- | --- | --- | --- | --- |
+| Run 1454 (condim 3, the route's M) | 9.8% | 84.1% | 6.1% | 91 / 85 / 81 / 99.8 / 90 / 97% |
+| Run 1640 (condim 4, table-aware) | 9.5% | 83.6% | 6.9% | 92 / 87 / 81 / 99.7 / 89 / 97% |
+
+Slip in usable holds (1454): median 6–8 mm and 9–32° over the 0.75 s after the transient, mostly rotation (marker 32°,
+spatula 24°, hammer 9°). Grips: 2 fingers above 0.5 N in 59–60% of usable holds, 3 in 23%, palm contact in 92–93%.
+M's own sampler success: firm 0.80, slipping 0.78, dropped 0.49 (dropped holds are weak in M's world too; firm and
+slipping are not distinguished there, so slipping is mostly the static test, not weak grips). Output:
+`outputs/neurosim/stage3/tool_holds_{1454,1640}/holds.pt` (state after the transient and settle, per hold).
+
+**Census on accepted holds** (amends A2 for tools): 90–99% of joints outside the linear band (firm and usable alike);
+median gap 8–15 mrad, thumb proximal 45 mrad (usable) and 247 mrad (firm). The firm tool grips push the thumb far past
+contact, deeper than the carry expert's 13 mrad median.
+
+**0.6 Warp parity** (`scripts/neurosim/warp_parity_holds.py`, job 1686): the same per-tool compiled model and test in
+MuJoCo Warp (float32) and C MuJoCo (float64), 72 tools (12 per family), 1,300 holds × 4 shake directions shared by both.
+
+| | Held | Shifted | Dropped | Worst displacement p50 / p90 | Transient p50 / p90 |
+| --- | --- | --- | --- | --- | --- |
+| C MuJoCo | 10.5% | 80.1% | 9.4% | 7.4 / 37 mm, 17 / 92° | 7.0 / 20 mm |
+| Warp | 9.5% | 81.1% | 9.4% | 7.1 / 35 mm, 17 / 84° | 6.8 / 21 mm |
+
+Same outcome in the same world 86%; held ↔ shifted disagreements sit at the threshold (median worst / limit 0.97 C,
+1.06 Warp). Per-hold probabilities over the 4 directions: held r = 0.70 (mean |ΔP| 0.07), dropped r = 0.77 (0.05).
+Family differences up to 5 points (hammer dropped 9.1 vs 3.9%, spatula held 4.5 vs 1.6%) on 12 tools each. Warp is not
+replica-deterministic: the 4 copies of a hold, identical until the shake, end the transient 0.4 mm apart (median;
+90th percentile 2.4 mm, 99th 11 mm), so part of the 14% pairwise disagreement is Warp's own divergence. One Warp world
+of 5,200 went NaN (a marker hold that C drops). Warp throughput 3,100 world-steps/s at 300 worlds (no graph capture).
+
+**Reading.** At the level of noise-averaged statistics the C reference stands in for Warp on these states (G0's parity
+item), so the 80% slipping is not a C-versus-Warp effect: it is the transfer (penetrations resolved, velocities zeroed,
+the palm still instead of the arm moving under SONIC). Phase 1 uses all usable holds (94%), labelled firm or slipping
+with the measured displacement, from the post-transient states. The capsule variant (a) could not use these holds (its
+primitives are fatter than the training hulls: 0% transfer, penetration p90 24 mm), so tools need the signed-distance
+grids of the hulls (variant b).
+
 ---
 
 ## Revision 2 (research agent), unchanged
