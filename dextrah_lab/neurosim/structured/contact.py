@@ -18,6 +18,8 @@ first three rows, rotational for torsion), friction rows scaled R_j = R_0 (f_0 /
 from dataclasses import dataclass
 
 import math
+
+import numpy as np
 import torch
 
 from .rotations import axis_angle_mat, quat_to_mat
@@ -160,6 +162,17 @@ def _grad(fn, p):
     return torch.nn.functional.normalize(g, dim=-1)
 
 
+_GRID_MEMO = {}
+
+
+def hull_grid(verts, faces, spacing, dtype, device):
+    """HullGrid memoised on the hull (the hand's grids are the same for every scene; building one costs seconds)."""
+    key = (np.asarray(verts).tobytes(), np.asarray(faces).tobytes(), spacing, dtype, str(device))
+    if key not in _GRID_MEMO:
+        _GRID_MEMO[key] = HullGrid(verts, faces, spacing, dtype=dtype, device=device)
+    return _GRID_MEMO[key]
+
+
 class ContactModel:
     def __init__(self, scene, dtype=torch.float64, device='cpu', grid_spacing=1e-3, rim_points=8, hand_table=True,
                  witness_density=2e-3, per_pair=1, mjccd=True):
@@ -171,7 +184,7 @@ class ContactModel:
         self.obj_geoms = scene.obj.geoms
         self.grids, self.hand_wit, self.obj_wit = [], [], []
         for g in self.hand_geoms:
-            self.grids.append(HullGrid(g.hull_vert, g.hull_face, grid_spacing, dtype=dtype, device=device) if g.kind == 'mesh' else None)
+            self.grids.append(hull_grid(g.hull_vert, g.hull_face, grid_spacing, dtype, device) if g.kind == 'mesh' else None)
             self.hand_wit.append(witness_points(g, dtype, witness_density).to(device))
         for g in self.obj_geoms:
             self.obj_wit.append(witness_points(g, dtype, witness_density).to(device))
