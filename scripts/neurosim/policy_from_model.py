@@ -34,6 +34,7 @@ from dextrah_lab.neurosim.structured.spec import extract
 SIG = G.SIGMAS['mid']
 SD = np.r_[[SIG[0]]*6, [SIG[1]]*3, [SIG[2]]*3]
 _CACHE = OrderedDict()
+EPS = {}                      # seed -> EpisodeLog, set before the worker pool forks (shared copy-on-write)
 
 
 def scene(seed, ep):
@@ -43,14 +44,15 @@ def scene(seed, ep):
         sc = extract(tb)
         cm = ContactModel(sc)
         _CACHE[seed] = (tb, sc, cm)
-        while len(_CACHE) > 24:
+        while len(_CACHE) > 2:
             _CACHE.popitem(last=False)
     return _CACHE[seed]
 
 
 def grad_task(args):
     """d J_model / d z at z (relative to J_model(0) of the same noise draws), and J_model."""
-    seed, ep, k, task, z, mode, rseed = args
+    seed, k, task, z, mode, rseed = args
+    ep = EPS[seed]
     torch.set_num_threads(1)
     tb, sc, cm = scene(seed, ep)
     palm, tg, st = ep.palm[k:k+9], ep.targets[k:k+8], ep.states[k]
@@ -82,7 +84,8 @@ def grad_task(args):
 
 
 def eval_task(args):
-    seed, ep, k, task, zs = args
+    seed, k, task, zs = args
+    ep = EPS[seed]
     rng = np.random.default_rng(seed*7919+k)
     tb = tool_testbed(ep.tool)
     palm, tg, st = ep.palm[k:k+9], ep.targets[k:k+8], ep.states[k]
@@ -96,7 +99,8 @@ def eval_task(args):
 
 
 def feature_task(args):
-    seed, ep, k, task = args
+    seed, k, task = args
+    ep = EPS[seed]
     tb = tool_testbed(ep.tool)
     return np.concatenate((features(tb, ep, k), [float(task == 'lowering')])).astype(np.float32)
 
@@ -135,19 +139,22 @@ def main():
     rng = np.random.default_rng(a.seed)
     with Pool(a.workers) as pool:
         eps = pool.map(G.episode_task, [(a.seed*100_000+i,) for i in range(a.episodes)])
-        states = []
-        for seed, ep, labs in eps:
-            ks = [(k, 'hold' if l in ('hold', 'slip') else 'lowering') for k, l in enumerate(labs) if l in ('hold', 'slip', 'lowering')]
-            if ks:
-                for i in rng.choice(len(ks), min(a.per_episode, len(ks)), replace=False):
-                    states.append((seed, ep, *ks[i]))
-        seeds = sorted({s[0] for s in states})
-        test_seeds = set(rng.choice(seeds, len(seeds)//5, replace=False).tolist())
-        tr = [s for s in states if s[0] not in test_seeds]
-        te = [s for s in states if s[0] in test_seeds]
+    states = []
+    for seed, ep, labs in eps:
+        EPS[seed] = ep
+        ks = [(k, 'hold' if l in ('hold', 'slip') else 'lowering') for k, l in enumerate(labs) if l in ('hold', 'slip', 'lowering')]
+        if ks:
+            for i in rng.choice(len(ks), min(a.per_episode, len(ks)), replace=False):
+                states.append((seed, *ks[i]))
+    del eps
+    seeds = sorted({s[0] for s in states})
+    test_seeds = set(rng.choice(seeds, len(seeds)//5, replace=False).tolist())
+    tr = [s for s in states if s[0] not in test_seeds]
+    te = [s for s in states if s[0] in test_seeds]
+    with Pool(a.workers) as pool:                    # forked after EPS is filled
         F = np.stack(pool.map(feature_task, states, chunksize=4))
-        idx = {(s[0], s[2]): i for i, s in enumerate(states)}
-        Ftr = F[[idx[(s[0], s[2])] for s in tr]]
+        idx = {(s[0], s[1]): i for i, s in enumerate(states)}
+        Ftr = F[[idx[(s[0], s[1])] for s in tr]]
         mean, std = torch.tensor(Ftr.mean(0)), torch.tensor(Ftr.std(0)+1e-6)
         print('STATES train', len(tr), 'test', len(te), 'tools test', len(test_seeds), 'features', F.shape[1],
               '%.0fs' % (time.time()-t0), flush=True)
@@ -159,7 +166,7 @@ def main():
             brng = np.random.default_rng(a.seed+1)
             for u in range(a.updates):
                 b = brng.choice(len(tr), a.batch, replace=False)
-                S = torch.tensor(F[[idx[(tr[i][0], tr[i][2])] for i in b]])
+                S = torch.tensor(F[[idx[(tr[i][0], tr[i][1])] for i in b]])
                 Z = pi(S)
                 jobs = [(*tr[i], Z[j].detach().double().numpy(), 'det' if arm == 'det' else 'expected', a.seed*1_000_003+u*1000+j)
                         for j, i in enumerate(b)]
@@ -187,7 +194,7 @@ def main():
         for split, items in ev_sets.items():
             jobs = []
             for s in items:
-                f = torch.tensor(F[idx[(s[0], s[2])]])[None]
+                f = torch.tensor(F[idx[(s[0], s[1])]])[None]
                 with torch.no_grad():
                     zs = {arm: pi(f)[0].double().numpy() for arm, pi in policies.items()}
                 jobs.append((*s, zs))
